@@ -505,7 +505,7 @@ are skipped: `strings.trim_space` would skip Unicode ones too.
 @(private)
 begins_with_markup :: proc(body: string) -> bool {
 	// A UTF-8 byte order mark is no blank, but a page may open with one.
-	rest := strings.trim_left(strings.trim_prefix(body, "\xef\xbb\xbf"), " \t\r\n")
+	rest := strings.trim_left(strings.trim_prefix(body, filter.BOM), " \t\r\n")
 	return strings.has_prefix(rest, "<")
 }
 

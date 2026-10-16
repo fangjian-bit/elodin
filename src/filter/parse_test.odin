@@ -654,7 +654,7 @@ test_a_byte_order_mark_is_not_part_of_the_first_rule :: proc(t: ^testing.T) {
 	cases := []struct {
 		text:   string,
 		format: Format,
-	}{{"\xef\xbb\xbf0.0.0.0 ads.example\n", .Hosts}, {"\xef\xbb\xbfads.example\n", .Domains}, {"\xef\xbb\xbf||ads.example^\n", .Adblock}, {"\xef\xbb\xbf||ads.example^\n", .Auto}, {"# a.txt\n\xef\xbb\xbfads.example\n", .Domains}}
+	}{{"\xef\xbb\xbf0.0.0.0 ads.example\n", .Hosts}, {"\xef\xbb\xbfads.example\n", .Domains}, {"\xef\xbb\xbf||ads.example^\n", .Adblock}, {"\xef\xbb\xbf||ads.example^\n", .Auto}, {"# a.txt\n\xef\xbb\xbfads.example\n", .Domains}, {"# a.txt\n\xef\xbb\xbf0.0.0.0 ads.example\n", .Auto}}
 	for c in cases {
 		block, allow := parsed(c.text, c.format)
 		testing.expectf(t, block.count == 1, "%v: count = %d", c.format, block.count)
