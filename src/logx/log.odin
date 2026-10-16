@@ -169,6 +169,96 @@ eventf :: proc(level: Level, msg: string, format: string, args: ..any) {
 	write_line(level, msg, fmt.tprintf(format, ..args))
 }
 
+/*
+Lets one event in a window through at `warn`, and counts the others in it.
+
+For a condition a peer can provoke as often as it likes, where a `warn` per
+occurrence would let it write to this server's disk. Once a window rather than
+once per process: a fault that begins hours after the first one, or a second,
+different one, still reaches `warn`.
+
+The first event opens it at once, so there is a line to find; after that it
+opens once per `GATE_WINDOW`, and the line says how many it passed over since
+the one before it - which, after a quiet spell, can be hours back.
+Lock-free, because the callers are accept loops and send loops.
+*/
+Gate :: struct {
+	next: i64,
+	held: u64,
+}
+
+GATE_WINDOW :: 60 * time.Second
+
+// `now` is a monotonic clock reading in nanoseconds, a parameter so a test can
+// cross the window without waiting for it.
+gate_pass :: proc(g: ^Gate, now: i64) -> (loud: bool, held: u64) {
+	for {
+		next := sync.atomic_load(&g.next)
+		if next != 0 && now < next {
+			sync.atomic_add(&g.held, 1)
+			return false, 0
+		}
+		if _, swapped := sync.atomic_compare_exchange_strong(&g.next, next, now + i64(GATE_WINDOW)); swapped {
+			return true, sync.atomic_exchange(&g.held, 0)
+		}
+	}
+}
+
+gate_pass_now :: proc(g: ^Gate) -> (loud: bool, held: u64) {
+	return gate_pass(g, time.tick_now()._nsec)
+}
+
+// Whether a gate is inside its window, without spending it: for a caller that
+// leaves the line to another one on the same event and only needs to know that
+// one has just been said.
+gate_shut :: proc(g: ^Gate, now: i64) -> bool {
+	next := sync.atomic_load(&g.next)
+	return next != 0 && now < next
+}
+
+/*
+`warnf`, saying how many like it a `Gate` passed over since the last one.
+*/
+warnf_held :: proc(held: u64, format: string, args: ..any) {
+	if held == 0 {
+		emit(.Warn, format, ..args)
+		return
+	}
+	if !enabled(.Warn) {
+		return
+	}
+	write_line(.Warn, fmt.tprintf(format, ..args), fmt.tprintf("held=%d", held))
+}
+
+/*
+`warnf` through a `Gate`, with the number it held back, and `debugf` while the
+gate is shut.
+*/
+gated_warnf :: proc(g: ^Gate, format: string, args: ..any) {
+	gated_warnf_from(g, "", format, ..args)
+}
+
+/*
+`gated_warnf` for a line about a client's query: the `debug` line carries the
+client as a field and the `warn` does not, since a `warn` a minute naming it
+would keep a record of who asked whatever `log.queries` says, while `debug` is
+switched on to find out.
+*/
+gated_warnf_from :: proc(g: ^Gate, client: string, format: string, args: ..any) {
+	if loud, held := gate_pass_now(g); loud {
+		warnf_held(held, format, ..args)
+		return
+	}
+	if client == "" {
+		debugf(format, ..args)
+		return
+	}
+	if !enabled(.Debug) {
+		return
+	}
+	write_line(.Debug, fmt.tprintf(format, ..args), fmt.tprintf("client=%s", quote(client)))
+}
+
 debugf :: proc(format: string, args: ..any) {
 	emit(.Debug, format, ..args)
 }

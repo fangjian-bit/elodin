@@ -722,17 +722,14 @@ says why it refused (`POLICY_EDE_FIRST`) that does not happen; where it says
 nothing, which is most of them today, it does. An operator's first sign would
 otherwise be the ads coming back.
 
-Once per process and at debug after that, the shape `unreadable_rcode_refusal`
-uses and for the same reason: the line names bytes an upstream chose, so a
+Once a window per upstream at warn and at debug between, the shape
+`unreadable_rcode_refusal` uses and for the same reason: the line names bytes an upstream chose, so a
 per-query warn would let one decide how much this server writes to disk.
 
 Only REFUSED. A swept SERVFAIL is the ordinary business of this sweep - a name
 whose authority is down produces them all day - and warning about those would
 bury the one line that means something.
 */
-@(private)
-refusal_reported: bool
-
 @(private)
 report_swept_refusal :: proc(u: ^Upstream, response: []u8) {
 	if dns.peek_rcode(response) != .Refused {
@@ -741,16 +738,18 @@ report_swept_refusal :: proc(u: ^Upstream, response: []u8) {
 	// And only where the reply really said nothing. `resolve_insisting` is
 	// shared with the chain lookups, whose `answerable` takes NOERROR and
 	// NXDOMAIN alone - so a REFUSED carrying a policy code is swept there, and
-	// a line saying it carried none would be false and would spend the one
-	// warning this process has on saying so.
+	// a line saying it carried none would be false and would spend this
+	// upstream's warning for the window on saying so.
 	if extended_error_within(response, POLICY_EDE_FIRST, POLICY_EDE_LAST) {
 		return
 	}
-	if sync.atomic_exchange(&refusal_reported, true) {
+	loud, held := logx.gate_pass_now(&u.swept)
+	if !loud {
 		logx.debugf("upstream %s refused this name without saying why; another member answered it", u.spec.name)
 		return
 	}
-	logx.warnf(
+	logx.warnf_held(
+		held,
 		"upstream %s refused a name without an extended error saying why, and another member of its group answered it: if %s is a filtering resolver, its blocks are being asked elsewhere - see elodin_upstream_swept_rcode_total",
 		u.spec.name,
 		u.spec.name,

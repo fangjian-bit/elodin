@@ -389,6 +389,17 @@ Budget :: struct {
 	*/
 	walk_stopped:  string,
 	/*
+	The first step of this question's walk to be called broken, as the zone and
+	what was wrong at it, for the log. `Result.detail` carries it out.
+
+	Not `walk_stopped`: that is the reason a client is sent, which names an
+	allowance and is deliberately the same from one zone to the next. This is the
+	one thing an operator reading "broken chain of trust" has no other way to
+	learn, and the first writer wins because the step that broke the walk is the
+	one that matters - what is tried after it is a consequence.
+	*/
+	broken:        string,
+	/*
 	This walk kept a parent's keys past a DS denial it could not read, because
 	every NSEC3 record in it was above the iteration ceiling (issue #331).
 
@@ -529,6 +540,20 @@ without this the precise code would be the one nobody ever sees.
 @(private)
 walk_reason :: proc(budget: ^Budget) -> string {
 	return budget.walk_stopped if budget.walk_stopped != "" else "chain of trust unavailable"
+}
+
+// The reason of a verdict that a step of the chain of trust produced.
+BROKEN_CHAIN :: "broken chain of trust"
+
+// Say which step of the walk broke, for the log only: the first call in a walk
+// wins, since what is tried after the step that broke is a consequence of it.
+@(private)
+broke_at :: proc(budget: ^Budget, zone, why: string, allocator: mem.Allocator) {
+	if budget.broken != "" {
+		return
+	}
+	shown := dns.name_trim_root(zone)
+	budget.broken = strings.concatenate({shown if shown != "" else ".", ": ", why}, allocator)
 }
 
 // Give up on a step, saying why. The words reach the client as an extended
@@ -862,6 +887,14 @@ Result :: struct {
 	status:    Status,
 	// A short phrase for the log line and the extended DNS error.
 	reason:    string,
+	/*
+	Where the walk broke and why, for the log and never for the client: the zone
+	and the step, in words. Set only on a `Bogus` verdict whose reason is
+	`BROKEN_CHAIN`, which is the one a chain-of-trust step produced; empty on
+	every other, including ones that failed for a reason local to the message or
+	that a step's `Bogus` was turned into something else for.
+	*/
+	detail:    string,
 	/*
 	Whether this verdict *is* the shedding: a walk of this question was turned
 	away for want of a slot, and that is what the status and reason report.
@@ -1827,6 +1860,9 @@ validate_answer :: proc(
 ) -> Result {
 	worst := Status.Secure
 	reason: string
+	// The step behind `reason`, when that is `BROKEN_CHAIN`. Read as the RRset's
+	// walk ends, since any later walk clears it.
+	detail: string
 	expansions := make([dynamic]Wildcard_Expansion, 0, 1, allocator)
 	checked := 0
 
@@ -1859,6 +1895,9 @@ validate_answer :: proc(
 			now,
 			allocator,
 		)
+		// The step this RRset's walk broke at, read now: the DNAME check below
+		// walks too, and clears it.
+		broken := budget.broken
 		/*
 		A CNAME carrying no signature at all may be one a DNAME produced rather
 		than one a zone forgot to sign. RFC 6672 section 3.4.1 has the server
@@ -1949,6 +1988,7 @@ validate_answer :: proc(
 			// client's extended error, for a refusal that was anything but.
 			if worse(worst, status) != worst {
 				reason = why
+				detail = broken if why == BROKEN_CHAIN else ""
 			}
 			worst = worse(worst, status)
 			continue
@@ -2101,19 +2141,20 @@ validate_answer :: proc(
 		// same records, read against the same zone, and re-verifying them spends
 		// an allowance the answer needs for its own RRsets.
 		denials := make([dynamic]Verified_Denial, 0, 1, allocator)
-		proof_reason: string
+		proof_reason, proof_detail: string
 		for e in expansions {
 			proof, records, why := validate_wildcard_proof(v, budget, msg, e.owner, e.encloser, class, &denials, unix, now, allocator)
 			// The reason belongs to the verdict that is being returned, so it
 			// moves only when the verdict does.
 			if worse(worst, proof) != worst {
 				proof_reason = why
+				proof_detail = budget.broken if why == BROKEN_CHAIN else ""
 			}
 			worst = worse(worst, proof)
 			append(&proved, ..records)
 		}
 		if worst != .Secure {
-			return {status = worst, reason = proof_reason}
+			return {status = worst, reason = proof_reason, detail = proof_detail}
 		}
 	}
 
@@ -2158,7 +2199,7 @@ validate_answer :: proc(
 	records from an answer nobody is vouching for anyway.
 	*/
 	if worst != .Secure {
-		return {status = worst, reason = reason}
+		return {status = worst, reason = reason, detail = detail}
 	}
 	/*
 	Last, and after the verdict is settled. The hints spend what the answer and
@@ -2217,7 +2258,7 @@ validate_denial :: proc(
 	case .Insecure:
 		return {status = .Insecure, reason = "unsigned zone"}
 	case .Bogus:
-		return {status = .Bogus, reason = "broken chain of trust"}
+		return {status = .Bogus, reason = BROKEN_CHAIN, detail = budget.broken}
 	case .Indeterminate:
 		return {status = .Indeterminate, reason = walk_reason(budget)}
 	}
@@ -2601,7 +2642,7 @@ validate_rrset :: proc(
 	case .Indeterminate:
 		return .Indeterminate, "", walk_reason(budget), "", {}
 	case .Bogus:
-		return .Bogus, "", "broken chain of trust", "", {}
+		return .Bogus, "", BROKEN_CHAIN, "", {}
 	case .Secure:
 	}
 
@@ -2918,10 +2959,15 @@ validate_wildcard_proof :: proc(
 	// Established from the expanded name, for the same reason as the denial path.
 	trust, keys, established := zone_trust(v, budget, owner, now, allocator)
 	if trust != .Secure {
-		// A chain this server could not walk is not a proof that failed, and the
-		// two must not reach the log or the client saying the same thing.
-		if trust == .Indeterminate {
+		// A chain this server could not walk, or one that broke, is not a proof
+		// that failed, and the two must not reach the log or the client saying
+		// the same thing.
+		switch trust {
+		case .Indeterminate:
 			return trust, nil, walk_reason(budget)
+		case .Bogus:
+			return trust, nil, BROKEN_CHAIN
+		case .Insecure, .Secure:
 		}
 		return trust, nil, "wildcard expansion not proven"
 	}
@@ -3356,6 +3402,7 @@ zone_trust :: proc(
 	// walk's own answer and not one left behind by an earlier proof.
 	budget.walk_stopped = ""
 	budget.walk_past_ceiling = false
+	budget.broken = ""
 	/*
 	The walk asks for a slot at its first upstream lookup and gives it back
 	here. One that never needs a lookup never takes one, so a flood holding
@@ -3550,6 +3597,7 @@ zone_step :: proc(
 		if derr == .Request_Budget {
 			return walk_gave_up(budget, READING_OVER_BUDGET), nil
 		}
+		broke_at(budget, child, "the DS reply could not be decoded", allocator)
 		return .Bogus, nil
 	}
 	/*
@@ -3618,6 +3666,12 @@ zone_step :: proc(
 			returns below - give the skipped name back to the lookup.
 			*/
 			forget_skipped_non_cut(v, parent, child)
+			broke_at(
+				budget,
+				child,
+				"the DS set is not signed by any key of its parent, or its signature expanded a wildcard",
+				allocator,
+			)
 			return .Bogus, nil
 		}
 		// A DS the parent signed, so whatever the walk kept keys past above
@@ -3702,6 +3756,7 @@ zone_step :: proc(
 		drops it for not being the parent's, and both slices are empty.
 		*/
 		forget_skipped_non_cut(v, parent, child)
+		broke_at(budget, child, "the reply to the DS question held neither a DS nor a denial signed by the parent", allocator)
 		return .Bogus, nil
 	}
 
@@ -3750,6 +3805,7 @@ zone_step :: proc(
 	}
 	if step == .Bogus {
 		forget_skipped_non_cut(v, parent, child)
+		broke_at(budget, child, "the signed denial of a DS proves neither an unsigned delegation nor a name that is not a cut", allocator)
 	}
 	switch step {
 	case .Insecure:
@@ -3932,6 +3988,7 @@ fetch_keys :: proc(
 			budget.walk_stopped = READING_OVER_BUDGET
 			return nil, .Indeterminate
 		}
+		broke_at(budget, zone, "the DNSKEY reply could not be decoded", allocator)
 		return nil, .Bogus
 	}
 	// As in `zone_step`: an upstream error leaves the zone's keys unknown, which
@@ -3943,6 +4000,8 @@ fetch_keys :: proc(
 
 	records := records_of(msg.answer, zone, .DNSKEY, class, allocator)
 	if len(records) == 0 || len(records) > MAX_KEYS_PER_ZONE {
+		why := "the DNSKEY reply held no keys" if len(records) == 0 else "the DNSKEY reply held more keys than this server reads"
+		broke_at(budget, zone, why, allocator)
 		return nil, .Bogus
 	}
 	parsed := make([dynamic]Dnskey, 0, len(records), allocator)
@@ -4062,7 +4121,15 @@ fetch_keys :: proc(
 	if exhausted {
 		return nil, .Indeterminate
 	}
-	return nil, .Bogus if checkable else .Insecure
+	if checkable {
+		why := "no DNSKEY both matches a DS the parent published and signs the DNSKEY set"
+		if zone == "." {
+			why = "no DNSKEY both matches a trust anchor and signs the DNSKEY set"
+		}
+		broke_at(budget, zone, why, allocator)
+		return nil, .Bogus
+	}
+	return nil, .Insecure
 }
 
 // Does this DNSKEY hash to this DS? The digest runs over the owner name in

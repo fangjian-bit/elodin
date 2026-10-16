@@ -151,10 +151,20 @@ Upstream :: struct {
 	// a dead server stops costing every query a full timeout.
 	failures:     u32,
 	down_until:   time.Time,
-	// Which kinds of failure this upstream has already been reported for, so
-	// each one is said once at `warn` and left to `debug` after that; see
-	// `record_failure`.
-	reported:     bit_set[Error],
+	// One gate per kind of failure, so each is said at `warn` once a window and
+	// left to `debug` between; see `record_failure`.
+	reported:     [Error]logx.Gate,
+	// The same for a TLS handshake failure's reason, which has its own line, per
+	// kind it maps to; see `handshake_failure_due`.
+	handshake:    [Error]logx.Gate,
+	/*
+	The same for the two lines that name this upstream for a reply it sent
+	rather than a failure: a REFUSED swept to another member, and an rcode a
+	client cannot read. Per upstream, so a line's `held=` is this upstream's
+	and one member's stream cannot keep another's first one from `warn`.
+	*/
+	swept:        logx.Gate,
+	unreadable:   logx.Gate,
 
 	stats:        Stats,
 	allocator:    mem.Allocator,
@@ -174,7 +184,7 @@ Stats :: struct {
 	The same failures as `failures`, split by what went wrong.
 
 	`failures` alone says an upstream is failing and never which way, and the
-	log cannot fill the gap: a kind is warned about once per process, so an
+	log cannot fill the gap: a kind is warned about once a minute, so an
 	operator reading a window of it sees whichever kinds happened to be new in
 	that window and nothing about the rate of any of them. Which kind
 	dominates is the whole diagnosis - a `Timeout` and a `TLS_Failed` against
@@ -335,20 +345,36 @@ record_success :: proc(u: ^Upstream, elapsed: time.Duration) {
 }
 
 /*
-Whether this is the first failure of its kind for this upstream.
+Whether this failure is the one of its kind to say something about this window.
 
-`true` exactly once per upstream per member of `Error`, so a caller with
-something to say about a failure says it once however often the failure comes
-back. The caller holds `u.mu`; `first_failure_of_kind` is the same question
-asked from outside the lock.
+`true` at the first of a kind and then once per `logx.GATE_WINDOW` per upstream
+per member of `Error`, with the number passed over in between, so a caller with
+something to say about a failure says it often enough to be found and rarely
+enough to be bounded however often the failure comes back. The caller holds
+`u.mu`.
+
+Except a kind that a handshake line has just been written for, which stays
+quiet: that line carries the reason, and a second one saying only the kind is
+the same event twice. Only that kind: a handshake that timed out says nothing
+about a `TLS_Failed`. Counted in the kind's own `held` all the same, since the
+handshake line counts only handshakes and a failure of the kind on a live
+connection would otherwise be in neither number. So a kind's `held=` is every
+failure of that kind its own line did not say, whether or not a handshake line
+said it, and the two lines' counts overlap by the handshakes.
 */
 @(private)
-note_failure_kind :: proc(u: ^Upstream, err: Error) -> bool {
-	if err in u.reported {
-		return false
+note_failure_kind :: proc(u: ^Upstream, err: Error) -> (loud: bool, held: u64) {
+	return note_failure_kind_at(u, err, time.tick_now()._nsec)
+}
+
+// `note_failure_kind` against a clock the caller names.
+@(private)
+note_failure_kind_at :: proc(u: ^Upstream, err: Error, now: i64) -> (loud: bool, held: u64) {
+	if logx.gate_shut(&u.handshake[err], now) {
+		sync.atomic_add(&u.reported[err].held, 1)
+		return false, 0
 	}
-	u.reported += {err}
-	return true
+	return logx.gate_pass(&u.reported[err], now)
 }
 
 /*
@@ -357,30 +383,34 @@ The same, for the transports that know more about a failure than its kind.
 A TLS handshake carries a reason string that `Error` has no room for, and it is
 worth more than the enum is: "certificate has expired" and "no application
 protocol" are different problems that both arrive here as `TLS_Failed`. Asked
-where the reason is still in hand, so the one line this failure gets is the one
-with the reason on it and `record_failure` stays quiet about it afterwards.
+where the reason is still in hand, with a gate of its own per kind, so the one
+line this failure gets in a window is the one with the reason on it:
+`note_failure_kind` holds back its own line for that kind while this one's window
+is open.
+
+Not the kind's gate, which `record_failure` passes for the same event a moment
+later: one event asking the same gate twice would count itself twice and could
+hand the line to the one without the reason.
 */
 @(private)
-first_failure_of_kind :: proc(u: ^Upstream, err: Error) -> bool {
+handshake_failure_due :: proc(u: ^Upstream, err: Error) -> (loud: bool, held: u64) {
 	if u == nil {
-		return false
+		return false, 0
 	}
-	sync.mutex_lock(&u.mu)
-	defer sync.mutex_unlock(&u.mu)
-	return note_failure_kind(u, err)
+	return logx.gate_pass_now(&u.handshake[err])
 }
 
 /*
-Count one failed exchange, and say why the first time each kind happens.
+Count one failed exchange, and say why the first time each kind happens in a window.
 
-The `warn` is once per upstream per kind of failure rather than per exchange:
+The `warn` is once a window per upstream per kind of failure rather than per exchange:
 an upstream that intermittently fails never reaches the threshold below, so
 without it the only trace it left would be a `debug` line nobody has on and a
 counter nobody is scraping - which is how a member of a group can be failing
 every few queries, with the rest of the group covering for it, and nothing in
-the log says so. Once per kind bounds the output at the size of `Error` for
-the life of the process, whatever the query rate does, and a recurrence is
-still on the `debug` line `exchange` writes for every one.
+the log says so. Once a window per kind bounds the output at the size of `Error` per
+window, whatever the query rate does, and a recurrence between warns is still
+on the `debug` line `exchange` writes for every one.
 */
 @(private)
 record_failure :: proc(
@@ -395,8 +425,8 @@ record_failure :: proc(
 	u.stats.queries += 1
 	u.stats.failures += 1
 	u.stats.failure_kinds[err] += 1
-	if note_failure_kind(u, err) {
-		logx.warnf("upstream %s (%v %s): %v", u.spec.name, u.spec.kind, u.spec.address, err)
+	if loud, held := note_failure_kind(u, err); loud {
+		logx.warnf_held(held, "upstream %s (%v %s): %v", u.spec.name, u.spec.kind, u.spec.address, err)
 	}
 	if !charge {
 		return
@@ -477,8 +507,8 @@ record_failure :: proc(
 Count a reply from `u` whose rcode the caller could not hand to a client.
 
 Kept per upstream because that is the question the count has to answer. The line
-the server logs for one of these is said once per process and demoted to debug
-after it - the bytes behind it being ones an on-path attacker can write - so
+the server logs for one of these is said once a window and demoted to debug
+between - the bytes behind it being ones an on-path attacker can write - so
 without a figure carrying the name, an operator whose group has one broken
 member has no way to tell which of them it is.
 

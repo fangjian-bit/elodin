@@ -364,10 +364,10 @@ test_an_extended_rcode_is_not_forwarded_to_the_client :: proc(t: ^testing.T) {
 	testing.expect_value(t, counters.failed, u64(1))
 	testing.expect_value(t, counters.forwarded, u64(0))
 	/*
-	Counted as its own figure as well, which is what makes the once-at-warn line
-	sound: the warning is said once per process and demoted to debug after, so a
+	Counted as its own figure as well, which is what makes the gated line
+	sound: the warning is said once a window and demoted to debug between, so a
 	deployment whose upstream starts doing this has nothing but this counter to
-	show for every query after the first. Same reasoning as `conn_refused`.
+	show for every query the log holds back. Same reasoning as `conn_refused`.
 	*/
 	testing.expect_value(t, counters.unreadable_rcode, u64(1))
 

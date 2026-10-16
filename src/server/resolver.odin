@@ -172,12 +172,12 @@ Stats :: struct {
 	`unreadable_rcode_refusal`.
 
 	Counted rather than only logged, for the reason `conn_refused` is: the line
-	beside this is said once and demoted to debug after, because the two bytes
-	that trigger it are ones an on-path attacker can write into any reply it can
-	reach, and that reasoning only holds if something else goes on counting.
-	Without this, a deployment whose only upstream started answering an extended
-	rcode - every query a SERVFAIL - would show one `warn` from whenever it
-	began and a `failed=` that says nothing about why.
+	beside this is said once a window and demoted to debug between, because the
+	two bytes that trigger it are ones an on-path attacker can write into any
+	reply it can reach, and that reasoning only holds if something else goes on
+	counting. Without this, a deployment whose only upstream started answering
+	an extended rcode - every query a SERVFAIL - would show one `warn` a minute
+	and a `failed=` that says nothing about how many.
 
 	Apart from `failed`, which it also adds to. `failed` is every query this
 	server could not answer, and a rising one of those is the question "what is
@@ -1089,6 +1089,11 @@ edns_option_sent :: proc(msg: dns.Message, code: dns.EDNS_Option_Code) -> bool {
 	}
 	return false
 }
+
+// Opens once a window per kind of error for a query that got no answer from its
+// upstreams, so that one kind of failure does not take the window of another.
+@(private)
+query_failed_reported: [upstream.Error]logx.Gate
 
 @(private)
 resolve_query :: proc(
@@ -2384,7 +2389,22 @@ resolve_query :: proc(
 			answering_upstream(winner),
 		)
 	} else if uerr != .None {
-		logx.debugf("query %s %s from %s failed: %v", dns.type_name(q.type), q.name, client, uerr)
+		/*
+		The only line that says why a query answered `outcome=failed
+		detail=upstream`, which names no cause of its own. Once a window per
+		kind of error, with the number held back: which name fails is the
+		client's to choose. The client only on the `debug` line; see
+		`logx.gated_warnf_from`.
+
+		Not for a detached refresh, which no client is waiting on: taking the
+		window there would leave a client's own failure of the same kind as a
+		`held=` count. The upstream's own line for the kind says it failed.
+		*/
+		if unanswered != nil {
+			logx.debugf("refresh of %s %s failed: %v", dns.type_name(q.type), dns.name_trim_root(q.name), uerr)
+		} else {
+			logx.gated_warnf_from(&query_failed_reported[uerr], client, "query %s %s failed: %v", dns.type_name(q.type), dns.name_trim_root(q.name), uerr)
+		}
 	}
 	// Not by setting `uerr`: every value it has names a transport failure, and
 	// `.Not_Resolved` is an upstream hostname that would not resolve.
@@ -3144,8 +3164,8 @@ server answering BADVERS to EDNS version 0 is misconfigured or being interfered
 with, and either way the operator has one server to look at. The query log
 carries that on every occurrence as `outcome=failed detail=rcode:<upstream>`.
 
-The line above it is at warn once and at debug every time after, like
-`report_udp_ceiling` and the AD-bit prune. Those eight bits are two bytes an
+The line about it is at warn once a window and at debug between, like the
+AD-bit prune. Those eight bits are two bytes an
 on-path attacker can write into any reply it can reach - the same reading the
 sweep in `upstream.resolve_insisting` is written on - so a per-query warn would
 let one decide how much this server writes to disk, in exactly the
@@ -3156,7 +3176,7 @@ Which is only sound because something else goes on counting: `unreadable_rcode`
 climbs on every one of these in the stats line, and
 `elodin_upstream_unreadable_rcode_total{upstream}` climbs beside it against the
 server that sent the reply - so both what is happening and which member of the
-group is doing it stay visible long after the one warn scrolled away. The
+group is doing it stay visible between the warns. The
 reasoning is `conn_refused`'s, and so is the shape. `upstream.record_failure` is
 deliberately not called: see `upstream.note_unreadable_rcode`.
 
@@ -3165,9 +3185,10 @@ with the rcode named, the way the rebinding guard and the validator explain
 their own refusals. A client that queried without EDNS has nowhere to put one
 and gets the bare SERVFAIL.
 */
-// Set once the first reply has been refused for an unreadable rcode; see below.
+// For a reply no upstream can be named for, which the per-upstream gate cannot
+// hold; see `upstream.Upstream.unreadable`.
 @(private)
-unreadable_rcode_reported: bool
+unreadable_rcode_reported: logx.Gate
 
 /*
 What to call an rcode in a line a person reads.
@@ -3225,30 +3246,19 @@ unreadable_rcode_refusal :: proc(
 	from := answering_upstream(winner)
 	name := dns.name_trim_root(q.name)
 	shown := rcode_text(rcode)
-	if sync.atomic_exchange(&unreadable_rcode_reported, true) {
-		logx.debugf(
-			"upstream %s answered %s for %s %s from %s, which a client would read as another rcode; answering SERVFAIL",
-			from,
-			shown,
-			dns.type_name(q.type),
-			name,
-			client,
-		)
-	} else {
-		logx.warnf(
-			"upstream %s answered %s for %s %s from %s, which a client would read as another rcode; answering SERVFAIL",
-			from,
-			shown,
-			dns.type_name(q.type),
-			name,
-			client,
-		)
-		logx.warnf("further replies refused for an rcode a client cannot read are logged at debug level")
-	}
+	logx.gated_warnf_from(
+		&winner.unreadable if winner != nil else &unreadable_rcode_reported,
+		client,
+		"upstream %s answered %s for %s %s, which a client would read as another rcode; answering SERVFAIL",
+		from,
+		shown,
+		dns.type_name(q.type),
+		name,
+	)
 	count_answer(&s.stats.failed)
 	sync.atomic_add(&s.stats.unreadable_rcode, 1)
 	// And against the server that sent it, which is the half of the question
-	// the total cannot answer once the one warn line has scrolled away.
+	// the total cannot answer between the warns.
 	upstream.note_unreadable_rcode(winner)
 
 	named := fmt.tprintf("rcode:%s", from)

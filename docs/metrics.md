@@ -107,4 +107,4 @@ Two panels show failures nothing else does:
 - *Replies the group could not use*: an upstream answering promptly with
   something unusable, which keeps a clean failure rate and `up` of 1.
 - *Upstream failures by kind*: the failure rate by cause, which the log states
-  only once per kind.
+  only once a minute per kind.

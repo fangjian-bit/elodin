@@ -657,9 +657,9 @@ report_rebind :: proc(name: string, addr: [16]u8, v6: bool, allocator: mem.Alloc
 }
 
 /*
-Say, once, that an answer was withheld because it could not be read.
+Say, once a window, that an answer was withheld because it could not be read.
 
-A different diagnosis from the one above and so a flag of its own: an operator
+A different diagnosis from the one above and so a gate of its own: an operator
 who saw the private-address warning first would otherwise never be told that this
 is happening at all. What it points at is not a network to exempt but an upstream
 emitting something this decoder rejects - or somebody trying the one way there
@@ -667,19 +667,17 @@ was around the guard - so the line names the decode error rather than a setting,
 and does not suggest `allow_domains`, which would not help.
 */
 @(private)
-unreadable_reported: bool
+unreadable_reported: logx.Gate
 
 @(private)
 report_unreadable :: proc(name: string, err: dns.Decode_Error) {
-	say, first := report_once(&unreadable_reported, logx.enabled(.Debug))
-	if !say {
-		return
-	}
-	if !first {
+	loud, held := logx.gate_pass_now(&unreadable_reported)
+	if !loud {
 		logx.debugf("refused an unreadable answer for %s: %v", dns.name_trim_root(name), err)
 		return
 	}
-	logx.warnf(
+	logx.warnf_held(
+		held,
 		"refused an answer for %s that could not be decoded (%v): with rebinding protection on, an answer this server cannot read is one it cannot check, so it is not passed on",
 		dns.name_trim_root(name),
 		err,

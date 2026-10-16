@@ -33,9 +33,12 @@ test_every_line_is_logfmt :: proc(t: ^testing.T) {
 	errorf("broken")
 	eventf(.Info, "stats", "queries=%d blocked=%d", 12, 3)
 	eventf(.Info, "query", "name=%s", quote("a name with spaces"))
+	g: Gate
+	gated_warnf_from(&g, "192.0.2.1:53000", "query %s failed", "a.example")
+	gated_warnf_from(&g, "192.0.2.1:53000", "query %s failed", "b.example")
 
 	lines := log_lines(t, path)
-	if !testing.expectf(t, len(lines) == 9, "%d lines written, want 9:\n%v", len(lines), lines) {
+	if !testing.expectf(t, len(lines) == 11, "%d lines written, want 11:\n%v", len(lines), lines) {
 		return
 	}
 
@@ -63,6 +66,11 @@ test_every_line_is_logfmt :: proc(t: ^testing.T) {
 	// inside it, which is the whole point of the format.
 	testing.expect_value(t, after_stamp(t, lines[7]), "level=info msg=stats queries=12 blocked=3")
 	testing.expect_value(t, after_stamp(t, lines[8]), `level=info msg=query name="a name with spaces"`)
+
+	// A gated line about a client's query names the client at debug, where it
+	// is asked for, and not on the warn a window, which is written regardless.
+	testing.expect_value(t, after_stamp(t, lines[9]), `level=warn msg="query a.example failed"`)
+	testing.expect_value(t, after_stamp(t, lines[10]), `level=debug msg="query b.example failed" client=192.0.2.1:53000`)
 }
 
 @(private = "file")
@@ -133,4 +141,48 @@ expect_rfc3339_stamp :: proc(t: ^testing.T, line: string, i: int) {
 		c := rest[at]
 		testing.expectf(t, c >= '0' && c <= '9', "line %d: %q is not a digit at %d", i, rune(c), at)
 	}
+}
+
+/*
+A warning that fires once per process says nothing about the second time it
+happens: the first Bogus verdict since start spends the only `warn`, and an
+hours-long fault after it is `debug` and unlogged.
+
+A gate lets one event through per window instead - the first immediately, so an
+operator has a line to grep for, then one a window - and counts what it held
+back so that the line says there was more. The clock is a parameter so the
+window can be crossed without waiting for it.
+*/
+@(test)
+test_a_gate_opens_once_a_window_and_counts_what_it_held :: proc(t: ^testing.T) {
+	g: Gate
+	window := i64(GATE_WINDOW)
+	start := i64(1_000_000)
+
+	loud, held := gate_pass(&g, start)
+	testing.expect(t, loud, "the first event did not open the gate")
+	testing.expect_value(t, held, 0)
+
+	for i in 1 ..= 3 {
+		loud, held = gate_pass(&g, start + i64(i))
+		testing.expectf(t, !loud, "event %d inside the window was loud", i + 1)
+	}
+
+	loud, held = gate_pass(&g, start + window - 1)
+	testing.expect(t, !loud, "the gate opened a nanosecond early")
+
+	loud, held = gate_pass(&g, start + window)
+	testing.expect(t, loud, "the gate stayed shut after its window")
+	testing.expect_value(t, held, 4)
+
+	loud, held = gate_pass(&g, start + window + 1)
+	testing.expect(t, !loud, "the window did not restart when the gate opened")
+
+	// Looking is not spending: it neither opens the gate nor counts an event.
+	testing.expect(t, gate_shut(&g, start + window + 2), "a gate inside its window was not shut")
+	testing.expect(t, !gate_shut(&g, start + 2 * window + 1), "a gate past its window was shut")
+	testing.expect(t, !gate_shut(&Gate{}, start), "a gate nothing has passed was shut")
+	loud, held = gate_pass(&g, start + 2 * window + 1)
+	testing.expect(t, loud, "looking at a gate spent its window")
+	testing.expect_value(t, held, 1)
 }
