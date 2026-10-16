@@ -73,6 +73,8 @@ test_a_default_name_names_one_thing :: proc(t: ^testing.T) {
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [{name: \"https://dns.example/q\", url: \"https://other.example/q?a=1\"}, \"https://dns.example/q?a=1\"]\n", false},
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [\"https://dns.example/q?a=1\"]\n  zones:\n    - domains: [corp.example]\n      servers: [\"https://dns.example/q?a=1#x\"]\n", true},
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [{name: a, url: \"https://dns.example/q?a=1\"}, {name: b, url: \"https://dns.example/q?a=2\"}]\n", true},
+		// One name the file gives two servers, though it spells a url up to a query.
+		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [{name: \"https://dns.example/q\", url: \"https://dns.example/q?a=1\"}, {name: \"https://dns.example/q\", url: \"https://dns.example/q?a=2\"}]\n", true},
 		{"upstream:\n  servers: [{name: cf, address: 1.1.1.1}, {name: cf, address: 1.0.0.1}]\n", true},
 		{"upstream:\n  servers: [\"1.1.1.1\"]\n  zones:\n    - domains: [corp.example]\n      servers: [{address: 1.1.1.1, verify: false, hostname: x.example}]\n", true},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/h?k=1\"]\n  allowlists: [\"https://l.example/h?k=2\"]\n", false},

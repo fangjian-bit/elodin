@@ -1268,6 +1268,7 @@ load_upstream_spec :: proc(
 	}
 
 	opt_string(l, n, "name", &spec.name, path)
+	spec.named = spec.name != ""
 	opt_string(l, n, "address", &spec.address, path)
 	opt_string(l, n, "hostname", &spec.hostname, path)
 	opt_string(l, n, "url", &spec.url, path)

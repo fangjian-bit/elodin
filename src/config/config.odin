@@ -119,6 +119,8 @@ Upstream_Spec :: struct {
 	// Addresses used to resolve `hostname` when it is not an IP literal.
 	bootstrap: []string,
 	verify:    bool,
+	// The file gave `name:`; otherwise it is what `describe_upstream` built.
+	named:     bool,
 }
 
 Strategy :: enum u8 {

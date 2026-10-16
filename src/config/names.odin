@@ -56,7 +56,7 @@ check_default_upstream_names :: proc(l: ^Loader, cfg: ^Config) {
 			}
 			// One url, the fragment aside: a given name can equal the cut url of
 			// a server on another host, so the path alone does not tell.
-			one_url := prev.kind == .HTTPS && s.kind == .HTTPS && strings.truncate_to_byte(prev.url, '#') == strings.truncate_to_byte(s.url, '#')
+			one_url := prev.kind == .HTTPS && s.kind == .HTTPS && url_sent(prev.url) == url_sent(s.url)
 			if !one_url && (cut_a_query(prev) || cut_a_query(s)) {
 				errorf(l, "upstream: two different servers both go by %q, a url cut at its query; give one a 'name:' (in the map form of a server)", s.name)
 			}
@@ -67,10 +67,17 @@ check_default_upstream_names :: proc(l: ^Loader, cfg: ^Config) {
 		visit(l, &seen, route.upstream.servers)
 	}
 
-	// A default name that is shorter than the url it came from, the fragment aside.
+	// A default name that is shorter than the url it came from, the fragment
+	// aside. A name the file gives is its own, whatever it spells.
 	cut_a_query :: proc(s: Upstream_Spec) -> bool {
-		return s.kind == .HTTPS && s.name == url_name(s.url) && s.name != strings.truncate_to_byte(s.url, '#')
+		return s.kind == .HTTPS && !s.named && s.name != url_sent(s.url)
 	}
+}
+
+// What of a url is sent: all of it up to the fragment (RFC 3986 3.5).
+@(private)
+url_sent :: proc(url: string) -> string {
+	return strings.truncate_to_byte(url, '#')
 }
 
 /*
@@ -97,7 +104,7 @@ check_list_cache_names :: proc(l: ^Loader, cfg: ^Config) {
 			prev, found := seen[file]
 			if !found {
 				seen[file] = bl
-			} else if strings.truncate_to_byte(prev.url, '#') != strings.truncate_to_byte(bl.url, '#') {
+			} else if url_sent(prev.url) != url_sent(bl.url) {
 				errorf(l, "blocking: the lists named %q and %q would share the cache file %s; give one a different 'name:'", prev.name, bl.name, file)
 			}
 		}
