@@ -146,6 +146,11 @@ move_query_named_caches :: proc(cfg: ^config.Config) {
 				}
 			} else if err := os.rename(old_path, path); err != nil {
 				logx.warnf("list %s: cannot move the cached copy to %s (%v)", list.name, path, err)
+			} else if src, has := source_of(list); has {
+				// Named by this very url, so it is this url's copy.
+				if werr := write_cache_file(source_path(path), transmute([]byte)src); werr != nil {
+					warn_cache_unwritable(cfg, path, werr)
+				}
 			}
 		}
 	}
@@ -324,6 +329,11 @@ list_contents :: proc(
 @(private)
 cached_copy :: proc(cfg: ^config.Config, list: config.Block_List, load: List_Load) -> (string, List_Load) {
 	cache_path := list_cache_path(cfg, list)
+	// A copy of another query is another list: `?category=ads` does not stand
+	// in for `?category=malware`.
+	if !copy_is_of(list, cache_path) {
+		return "", .Unavailable
+	}
 	data, err := os.read_entire_file(cache_path, context.allocator)
 	if err != nil {
 		return "", .Unavailable
@@ -353,6 +363,9 @@ save_cached_copy :: proc(cfg: ^config.Config, list: config.Block_List, text: str
 	if dir := filepath.dir(cache_path); dir != "" {
 		make_directories(dir)
 	}
+	// The fingerprint goes first, so a copy is never beside one of another url:
+	// one left by a query since dropped, or by a write that stopped between the two.
+	os.remove(source_path(cache_path))
 	if werr := write_cache_file(cache_path, transmute([]byte)text); werr != nil {
 		warn_cache_unwritable(cfg, cache_path, werr)
 		return
@@ -368,10 +381,11 @@ save_cached_copy :: proc(cfg: ^config.Config, list: config.Block_List, text: str
 A list whose url has a query is cached under a name without it, so the copy of
 `?category=ads` would read as fresh for `?category=malware`, or for a rotated
 key. A fingerprint of the url as sent goes in a file beside the copy, and only a
-copy whose fingerprint matches is fresh; any other is downloaded again, and
-still stands in when the download fails. The fingerprint is never logged, and
+copy whose fingerprint matches is fresh, or stands in when a download fails;
+any other is another list's, and is downloaded over. The fingerprint is never logged, and
 the file name the log does show holds no part of the query. A url with no query
-is the list its name says, and has none.
+is the list its name says, and has none; a copy beside a fingerprint is of a url
+with a query, so it is not fresh for one without.
 */
 @(private)
 source_of :: proc(list: config.Block_List) -> (src: string, has: bool) {
@@ -392,7 +406,7 @@ source_path :: proc(cache_path: string) -> string {
 copy_is_of :: proc(list: config.Block_List, cache_path: string) -> bool {
 	src, has := source_of(list)
 	if !has {
-		return true
+		return !os.exists(source_path(cache_path))
 	}
 	data, err := os.read_entire_file(source_path(cache_path), context.temp_allocator)
 	return err == nil && string(data) == src

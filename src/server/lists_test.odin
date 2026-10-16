@@ -328,13 +328,18 @@ test_a_cache_named_by_a_query_moves :: proc(t: ^testing.T) {
 	for f, i in files {
 		testing.expect(t, os.write_entire_file(f, bodies[i]) == nil)
 	}
+	// The current copy is the stale list's own, by its fingerprint.
+	src, _ := source_of(stale)
+	testing.expect(t, os.write_entire_file(source_path(files[2]), src) == nil)
 	defer {
 		for f in ([]string{list_cache_path(&cfg, moved), list_cache_path(&cfg, other), list_cache_path(&cfg, on)}) {
 			os.remove(f)
 		}
 		for f in files {
 			os.remove(f)
+			os.remove(source_path(f))
 		}
+		os.remove(source_path(list_cache_path(&cfg, moved)))
 	}
 
 	block, allow := build_filter_sets(&cfg, false)
@@ -388,8 +393,12 @@ test_a_changed_query_is_not_fresh :: proc(t: ^testing.T) {
 	_, fresh = fetch_list(&cfg, plain)
 	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
 	testing.expect(t, !os.exists(source_path(list_cache_path(&cfg, plain))), "a url with no query has a fingerprint")
-	// And the old copy still stands in when the download fails.
+	// Nor does it stand in when that download fails: it is another list. Its
+	// own url's copy does.
 	text, load := cached_copy(&cfg, b, .Stale)
+	testing.expect_value(t, load, List_Load.Unavailable)
+	testing.expect_value(t, text, "")
+	text, load = cached_copy(&cfg, a, .Stale)
 	testing.expect_value(t, load, List_Load.Stale)
 	testing.expect_value(t, text, "0.0.0.0 a.example\n")
 	delete(text)
@@ -397,6 +406,18 @@ test_a_changed_query_is_not_fresh :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.contains(path, "SECRET"), "the query is in the file name")
 	src, _ := os.read_entire_file(source_path(path), context.temp_allocator)
 	testing.expect(t, len(src) > 0 && !strings.contains(string(src), "SECRET"), "the fingerprint is %q", string(src))
+
+	// The query dropped from the url: the copy of the query is not fresh for it,
+	// and its own copy, once saved, leaves no fingerprint behind to say otherwise.
+	bare := config.Block_List{name = a.name, url = "http://127.0.0.1:1/l", format = .Hosts, enabled = true}
+	_, fresh = fetch_list(&cfg, bare)
+	testing.expect_value(t, fresh, Fetch.Failed)
+	save_cached_copy(&cfg, bare, "0.0.0.0 bare.example\n")
+	testing.expect(t, !os.exists(source_path(path)), "the query's fingerprint outlived its copy")
+	_, fresh = fetch_list(&cfg, bare)
+	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
+	_, fresh = fetch_list(&cfg, a)
+	testing.expect_value(t, fresh, Fetch.Failed)
 }
 
 @(private = "file")
