@@ -54,9 +54,11 @@ check_default_upstream_names :: proc(l: ^Loader, cfg: ^Config) {
 				seen[s.name] = s
 				continue
 			}
-			one_url := prev.kind == .HTTPS && s.kind == .HTTPS && prev.path == s.path
+			// One url, the fragment aside: a given name can equal the cut url of
+			// a server on another host, so the path alone does not tell.
+			one_url := prev.kind == .HTTPS && s.kind == .HTTPS && strings.truncate_to_byte(prev.url, '#') == strings.truncate_to_byte(s.url, '#')
 			if !one_url && (cut_a_query(prev) || cut_a_query(s)) {
-				errorf(l, "upstream: two servers whose urls differ in the query both go by %q; give one a 'name:' (in the map form of a server)", s.name)
+				errorf(l, "upstream: two different servers both go by %q, a url cut at its query; give one a 'name:' (in the map form of a server)", s.name)
 			}
 		}
 	}

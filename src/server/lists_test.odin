@@ -314,18 +314,22 @@ test_a_cache_named_by_a_query_moves :: proc(t: ^testing.T) {
 	stale := config.Block_List{name = "http://192.0.2.1/b", url = "http://192.0.2.1/b?key=SECRET", format = .Hosts, enabled = true}
 	kept := config.Block_List{name = "http://192.0.2.1/c?key=SECRET", url = "http://192.0.2.1/c?key=SECRET", format = .Hosts, enabled = true}
 	other := config.Block_List{name = "http://192.0.2.1/c", url = "http://192.0.2.1/c?key=SECRET", format = .Hosts, enabled = true}
-	cfg.blocking.lists = []config.Block_List{moved, stale, kept, other}
+	// A disabled list is not loaded, and its old copy is not moved: its name is
+	// another list's here, which would load the disabled one's rules.
+	off := config.Block_List{name = "http://192.0.2.1/d", url = "http://192.0.2.1/d?key=SECRET", format = .Hosts}
+	on := config.Block_List{name = "http://192.0.2.1/d", url = "http://192.0.2.9/d", format = .Hosts, enabled = true}
+	cfg.blocking.lists = []config.Block_List{moved, stale, kept, other, off, on}
 
 	path_of :: proc(dir, name: string) -> string {
 		return strings.concatenate({dir, "/", config.list_cache_name(name)}, context.temp_allocator)
 	}
-	files := []string{path_of(dir, moved.url), path_of(dir, stale.url), path_of(dir, stale.name), path_of(dir, kept.name)}
-	bodies := []string{"0.0.0.0 moved.example\n", "0.0.0.0 stale.example\n", "0.0.0.0 current.example\n", "0.0.0.0 kept.example\n"}
+	files := []string{path_of(dir, moved.url), path_of(dir, stale.url), path_of(dir, stale.name), path_of(dir, kept.name), path_of(dir, off.url)}
+	bodies := []string{"0.0.0.0 moved.example\n", "0.0.0.0 stale.example\n", "0.0.0.0 current.example\n", "0.0.0.0 kept.example\n", "0.0.0.0 off.example\n"}
 	for f, i in files {
 		testing.expect(t, os.write_entire_file(f, bodies[i]) == nil)
 	}
 	defer {
-		for f in ([]string{path_of(dir, moved.name), path_of(dir, other.name)}) {
+		for f in ([]string{path_of(dir, moved.name), path_of(dir, other.name), path_of(dir, on.name)}) {
 			os.remove(f)
 		}
 		for f in files {
@@ -342,6 +346,8 @@ test_a_cache_named_by_a_query_moves :: proc(t: ^testing.T) {
 	testing.expect(t, os.exists(path_of(dir, moved.name)), "the old copy did not move to the list's name")
 	testing.expect(t, !os.exists(files[1]), "the old copy beside a current one was kept")
 	testing.expect(t, os.exists(files[3]), "another list's own cache was touched")
+	testing.expect(t, !filter.set_lookup(block, "off.example"), "a disabled list's old copy loaded as another list")
+	testing.expect(t, os.exists(files[4]), "a disabled list's old copy moved")
 }
 
 @(private = "file")

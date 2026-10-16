@@ -112,7 +112,9 @@ A list the file names only by a url with a query was cached, before #487, under
 the whole url, so the file name held whatever key the query carried. Each such
 copy moves to the name the list goes by now, or is removed when a copy is there
 already: the key leaves `cache_dir`, and a box that boots offline still has the
-list. A file that is some list's own cache under its current name is left alone.
+list. A file that is some list's own cache under its current name is left alone,
+and so is a disabled list's copy: nothing loads that list, and its name may be
+another list's, which would then load its rules.
 */
 @(private)
 move_query_named_caches :: proc(cfg: ^config.Config) {
@@ -125,7 +127,7 @@ move_query_named_caches :: proc(cfg: ^config.Config) {
 	}
 	for set in lists {
 		for list in set {
-			if list.url == "" || list.file != "" || list.name != config.url_name(list.url) {
+			if list.url == "" || list.file != "" || !list.enabled || list.name != config.url_name(list.url) {
 				continue
 			}
 			old := config.list_cache_name(list.url)
