@@ -10,44 +10,51 @@ import si "core:sys/info"
 /*
 Worker counts derived from the machine elodin is starting on.
 
-`server.workers` and `server.upstream_workers` are not shipped as a fixed 128 and
-64, which would be a resolver sized for five thousand cache misses a second on
-every box that installs it. The cost of being wrong is not symmetric: too few
-workers is throughput an operator can see and raise, while too many is memory
-that never comes back. A worker holds a scratch arena from its first query onward - 256 KiB
-here, since the build defines `DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE` - and Odin's
-`arena_free_all` keeps and zeroes the first block rather than returning it, so
-the pages stay resident for the life of the process. 192 threads is some 50 MB
-that a household resolver answering a few queries a second has no use for.
+The pool is wide wherever the machine can hold it: a cache miss parks a worker
+for an upstream round trip, so the miss rate a server can carry is its worker
+count over the upstream's RTT, and a pool sized by cores caps a two-core box at
+a few hundred misses a second. Width costs the hit path nothing, because only
+`running_workers` of the pool run at once (see `pool.make_pool`), and costs
+memory only as far as the load reaches: a worker holds a scratch arena from its
+first query onward - 256 KiB here, since the build defines
+`DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE` - and Odin's `arena_free_all` keeps and
+zeroes the first block rather than returning it, but the pool wakes the worker
+that went idle last, so a household resolver answering a few queries a second
+touches the arenas of a few workers and no more.
 
-So the numbers are worked out at startup from what the machine actually has,
-and only when the file leaves them unset. An operator who names a number gets
-that number; nothing here overrides a configured value or second-guesses it.
+What the machine does decide is the ceiling on that memory: a burst that
+reaches every worker leaves every arena resident for the life of the process,
+so the count is held to a share of RAM (`WORKER_MEMORY_SHARE`), and the running
+limit is read off the CPUs. Both only when the file leaves them unset. An
+operator who names a number gets that number; nothing here overrides a
+configured value or second-guesses it.
 */
 
 /*
-Handlers per usable CPU.
+The widest derived pool, and the size it takes wherever memory allows.
 
-Workers are sized by expected load rather than by parallelism - a worker spends
-its time parked on an upstream round trip, not on a core - so the CPU count is
-being read as "how big is this machine" rather than as a limit on useful
-threads. Four per CPU with the bounds below puts a two-core home box on 16
-workers, or about 800 cache misses per second, and a 32-core resolver on the
-128 a fixed default would give everybody.
+Workers are sized for cache misses rather than for the CPUs: a miss parks its
+worker for an upstream round trip, so how many misses a second the server can
+carry is `workers / upstream_rtt` whatever the core count, and the load a box is
+asked to carry has nothing to do with how many cores it has. 128 against a
+20 ms upstream is some six thousand misses a second, the order every comparable
+resolver carries on two cores (issue #493). Hits do not pay for the width: the
+pool runs only `running_workers` at once, and a worker that is never woken never
+touches its scratch arena, so the threads past what the load needs cost a stack
+and a scheduler entry rather than a quarter of a megabyte each.
 */
-WORKERS_PER_CPU :: 4
-
-/*
-The narrowest and widest derived pools.
-
-The floor is not about throughput but about latency under a burst: every query
-shares this pool, so a handful of workers all parked on a slow upstream is a
-cache hit that takes 60 µs to produce arriving hundreds of milliseconds late.
-The ceiling is where the old default sat, and past it the memory is real while
-the throughput is theoretical.
-*/
-MIN_DERIVED_WORKERS :: 16
 MAX_DERIVED_WORKERS :: 128
+
+/*
+Workers allowed on the CPU at once, per usable CPU.
+
+Two rather than one, at a hit rate indistinguishable from one's on two cores:
+the hooks in `pool.blocking_begin` cover every wait a handler makes on the
+network or on another query, and the second slot per core is headroom for the
+short waits nothing hooks (a page fault, a log write, a contended lock) so that
+one of them does not leave a core idle with work queued.
+*/
+RUNNING_WORKERS_PER_CPU :: 2
 
 /*
 Memory charged to each thread when checking the derivation against RAM.
@@ -62,9 +69,9 @@ WORKER_MEMORY_BYTES :: 512 * 1024
 The share of memory the thread floor is allowed to take.
 
 A thirty-second of RAM is generous for something that is neither the cache nor
-the blocklists - the two things an operator sizes elodin's memory for - and it
-only ever binds on machines small enough that the CPU term alone would still
-have overcommitted them. On anything from about 3 GB up it is inert.
+the blocklists - the two things an operator sizes elodin's memory for. It binds
+below about 3 GB, where the full 128 handlers and their racers would be past it:
+a 1 GiB machine gets 42.
 */
 WORKER_MEMORY_SHARE :: 32
 
@@ -101,6 +108,7 @@ Sizing :: struct {
 	machine:                  Machine,
 	derived_workers:          bool,
 	derived_upstream_workers: bool,
+	derived_running_workers:  bool,
 	derived_chain_walks:      bool,
 	derived_connection_walks: bool,
 	derived_udp_readers:      bool,
@@ -144,9 +152,6 @@ derive_udp_readers :: proc(m: Machine) -> int {
 // Handlers for a machine, ignoring any term the machine did not report.
 derive_workers :: proc(m: Machine) -> int {
 	workers := MAX_DERIVED_WORKERS
-	if m.cpus > 0 {
-		workers = clamp(m.cpus * WORKERS_PER_CPU, MIN_DERIVED_WORKERS, MAX_DERIVED_WORKERS)
-	}
 	if m.memory > 0 {
 		threads := (m.memory / WORKER_MEMORY_SHARE) / WORKER_MEMORY_BYTES
 		// The handlers bring `workers / 2` racers with them, so a budget of
@@ -155,6 +160,21 @@ derive_workers :: proc(m: Machine) -> int {
 		workers = min(workers, max(affordable, MIN_MEMORY_WORKERS))
 	}
 	return workers
+}
+
+/*
+Handlers that may run at once, for a machine and a pool of `workers`.
+
+A machine whose CPUs could not be counted gets the whole pool, which is no
+limit at all: guessing a small number there would cap the hit rate of a large
+host at a figure picked for a small one. Never more than the pool, where a
+limit would mean nothing.
+*/
+derive_running_workers :: proc(m: Machine, workers: int) -> int {
+	if m.cpus <= 0 {
+		return workers
+	}
+	return min(m.cpus * RUNNING_WORKERS_PER_CPU, workers)
 }
 
 /*
@@ -205,9 +225,9 @@ denies an attacker the last worker.
 A quarter, and never fewer than two. The reserved workers serve what needs no
 walk, which is mostly cache hits at tens of microseconds but also ordinary
 forwarding at an upstream round trip, so the number has to be enough to keep
-that moving rather than merely non-zero: a quarter of the derived floor is four,
-which is some hundreds of forwards a second, and a quarter of the ceiling is
-thirty-two.
+that moving rather than merely non-zero: a quarter of the derived 128 is
+thirty-two, some fifteen hundred forwards a second, and the floor of two is
+what a pool memory has cut to `MIN_MEMORY_WORKERS` keeps.
 
 What this does not bound tightly is upstream volume - #356's other cost - since
 nearly the whole pool may still be walking. That is the trade the issue asks for

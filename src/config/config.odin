@@ -392,7 +392,7 @@ Dnssec_Config :: struct {
 	numbers differ by an order of magnitude - zero derives it from
 	`server.max_connections` the same way `max_chain_walks` is derived from
 	`server.workers`, so the default is 384 against 512 connections where the
-	other is 12 against 16 workers.
+	other is 96 against 128 workers.
 
 	It exists because `server.max_connections` is the wrong lever for the job an
 	operator would reach for it to do. Lowering `max_chain_walks` caps the
@@ -573,16 +573,13 @@ Server_Config :: struct {
 
 	A worker is occupied for the whole of an upstream round trip, so sustained
 	throughput on cache misses is roughly `workers / upstream_rtt`. With a
-	typical 20 ms upstream that is about 50 queries per second per worker, and
-	because every query shares this pool, a shortage delays answers that were
-	going to come from the cache just as much as ones that were not.
-
+	typical 20 ms upstream that is about 50 queries per second per worker.
 	Size it as `target_qps * upstream_rtt`, with headroom: 5000 qps against a
 	20 ms upstream wants at least 100.
 
-	Zero derives it from the machine at startup - see `sizing.odin` - because
-	every worker costs memory permanently and a number that suits a rack-mounted
-	resolver is one a home router pays for and never uses.
+	Zero derives it at startup - see `sizing.odin` - as 128, or fewer where
+	the memory those workers can come to hold would be past a thirty-second of
+	the machine's.
 	*/
 	workers:                    int,
 	/*
@@ -593,6 +590,17 @@ Server_Config :: struct {
 	from the machine.
 	*/
 	upstream_workers:           int,
+	/*
+	Workers that may be on the CPU at once. A worker waiting on an upstream or
+	on another query's answer is not counted, so this bounds the threads
+	competing for the cores rather than the queries in flight: a cache hit is
+	answered by a worker that is already awake rather than by waking one of
+	its own, which is where a wide pool's hit rate would otherwise go.
+
+	Zero derives it as twice the usable CPUs, or the whole pool where the CPUs
+	could not be counted.
+	*/
+	running_workers:            int,
 	/*
 	Per-connection read timeout for TCP, DoT and DoH clients.
 
@@ -1106,12 +1114,11 @@ default_config :: proc() -> Config {
 		queries = false,
 	}
 	c.server = Server_Config {
-		// Both zero: worked out at load from the CPUs and memory this machine
-		// actually has. A fixed 128 and 64 sized every installation for five
-		// thousand cache misses a second, and the threads that pays for keep
-		// their scratch arenas resident whether or not the load ever arrives.
+		// All zero: worked out at load from the CPUs and memory this machine
+		// actually has.
 		workers                    = 0,
 		upstream_workers           = 0,
+		running_workers            = 0,
 		client_timeout             = 10 * time.Second,
 		max_connections            = 512,
 		// Zero, and worked out from `max_connections` at load: an operator who

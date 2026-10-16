@@ -45,11 +45,11 @@ server:
   # second with peaks in the tens. Every worker fewer is ~0.26 MB of scratch
   # arena not allocated.
   #
-  # Left unset, the derivation would land somewhere between 4 and 16 here
-  # depending on what it can measure - 4 per usable CPU, floored at 16, lowered
-  # when the threads that implies would take more than a thirty-second of
-  # memory, which on a small board is the term that binds: measured, a 64 MiB
-  # limit derives 4 workers, 128 MiB derives 5 and 256 MiB derives 10. A number
+  # Left unset, the derivation would land somewhere between 4 and 128 here
+  # depending on what it can measure - 128, lowered when the threads that
+  # implies would take more than a thirty-second of memory, which on a small
+  # board is the term that binds: measured, a 64 MiB limit derives 4 workers,
+  # 128 MiB derives 5 and 256 MiB derives 10. A number
   # written here is the same number whether or not the box's kernel reports a
   # limit at all, which on embedded firmware is not a given.
   #

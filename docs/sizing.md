@@ -4,8 +4,9 @@ Left unset (`0`, as the shipped configuration has them), the worker counts are
 derived at startup from the machine:
 
 ```
-workers           = clamp(usable_cpus * 4, 16, 128), lowered if the threads
-                    that implies would take more than 1/32 of usable memory
+workers           = 128, lowered if the threads that implies would take more
+                    than 1/32 of usable memory (42 on a 1 GiB machine)
+running_workers   = usable_cpus * 2, at most workers
 upstream_workers  = workers / 2
 max_pending       = workers * 8
 ```
@@ -13,27 +14,56 @@ max_pending       = workers * 8
 - "Usable" is what this process can have: the CPU affinity mask, and a cgroup CPU
   or memory limit where there is one (`CPUQuota=`/`MemoryMax=` in a unit, or a
   container's limits).
-- A number in the configuration always wins. The two worker counts can be set
-  independently; an unset `upstream_workers` follows a configured `workers`.
+- A number in the configuration always wins. The worker counts can be set
+  independently; an unset `upstream_workers` follows a configured `workers`, and
+  an unset `running_workers` is read off the CPUs whatever `workers` is.
+- Where the CPUs could not be counted, `running_workers` is the whole pool: no
+  limit.
 - What it settled on is logged after startup and printed by `--check`:
 
 ```console
 $ elodin --check
 /etc/elodin/elodin.yaml is valid: 2 upstreams, 0 zone routes, 4 blocklists, 0 rewrites
-  workers=16 upstream_workers=8 max_pending=128 chain_walks=12 connection_walks=384 (derived from 4 usable CPUs and 7.7 GiB)
+  workers=128 running_workers=4 upstream_workers=64 max_pending=1024 chain_walks=96 connection_walks=384 (derived from 2 usable CPUs and 7.7 GiB)
   answering queries from 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, ::1/128, fc00::/7, fe80::/10; every other source is refused
-  udp: 4 readers, asking for 1MiB of receive buffer each (derived from 4 usable CPUs)
+  udp: 2 readers, asking for 1MiB of receive buffer each (derived from 2 usable CPUs)
   connections: at most 512 at once across TCP, DoT and DoH, of which one client prefix (/24, /64) may hold 256; connections past a prefix's share are refused and counted as conn_refused=
 ```
 
-A worker is held for the whole upstream round trip, so sustained cache-miss
-throughput is roughly `server.workers / upstream_rtt`.
+## Workers and running workers
 
-- **Every query shares the pool**, so running short on workers delays cache hits
-  as much as misses.
-- **Memory scales with workers**, as a floor: each worker keeps its scratch arena
-  from its first query on (Odin's temp allocator `free_all` keeps the first
-  block).
+A worker is held for the whole upstream round trip, so sustained cache-miss
+throughput is roughly `server.workers / upstream_rtt`: the derived 128 against a
+20 ms upstream is up to about 6,400 misses a second, on two cores as on thirty-two.
+
+Only `running_workers` of them run at once. A worker waiting on an upstream, on
+another client's identical query, or on a DoH client's flow-control window is
+not counted, so the limit bounds the threads competing for the cores rather than
+the queries in flight. Cache hits are then answered by a worker already awake
+instead of each waking one of its own. On two cores against a 20 ms mock
+upstream, 128 clients over UDP
+([`bench/results/2026-10-16-pool-width.md`](../bench/results/2026-10-16-pool-width.md),
+`mise run bench -- -only sizing`):
+
+| `workers` / `running_workers` | cache misses | cache hits |
+|---|---|---|
+| 16 / no limit | 493 qps | 435k qps |
+| 128 / no limit | 3,794 qps | 208k qps |
+| 128 / 4 (derived) | 4,066 qps | 360k qps |
+
+Run-to-run spread on the hit rows is around ten percent; interleaved runs put
+the first and last rows' hit rates within it of each other.
+
+- **Every query shares the pool.** Running short of workers delays cache hits as
+  much as misses, since a hit queues behind the misses holding every worker.
+- **Raise `workers` for misses, not `running_workers`.** Measured at eight times
+  the cores, the running limit buys contention, not throughput. Lowering it below the cores
+  leaves a core idle.
+- **Memory scales with the workers the load reaches.** Each worker keeps its
+  scratch arena (about 0.26 MB) from its first query on, since Odin's temp
+  allocator `free_all` keeps the first block. The pool wakes the worker that
+  went idle last, so a resolver answering a few queries a second touches a few
+  arenas; a burst that reaches all 128 leaves all 128 resident.
 
 Past `max_pending` queries are dropped, not queued: the client times out and
 retries. A DoH client over HTTP/2 is answered `503` instead.

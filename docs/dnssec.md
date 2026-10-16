@@ -120,7 +120,7 @@ below one still costs a DS lookup per label.
 
 | setting | covers | default (0) |
 |---|---|---|
-| `max_chain_walks` | the shared handler pool: UDP and DoH over HTTP/2 | `server.workers` less a reserved quarter (at least two): 12 of 16 workers |
+| `max_chain_walks` | the shared handler pool: UDP and DoH over HTTP/2 | `server.workers` less a reserved quarter (at least two): 96 of 128 workers |
 | `max_connection_walks` | per-connection threads: TCP, DoT and DoH over HTTP/1.1 | the same from `server.max_connections`: 384 of 512 connections |
 
 The two are counted separately, so a flood on one transport cannot spend the

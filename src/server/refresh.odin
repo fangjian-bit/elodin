@@ -394,7 +394,9 @@ refresh_take :: proc(
 	finished := r.done
 	sync.mutex_unlock(&r.mu)
 	if !finished {
+		pool.blocking_begin()
 		finished = sync.sema_wait_with_timeout(&r.sema, timeout)
+		pool.blocking_end()
 	}
 	if !finished {
 		return nil, .Failed, 0, false

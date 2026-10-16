@@ -46,10 +46,10 @@ server:
 
   # Left to derive from the machine. A resolver for a household or an office
   # floor is not throughput-bound - a busy home network is a few dozen queries
-  # a second, most of them cache hits - and the derivation (4 per usable CPU,
-  # floor 16) is already generous for that. Set a number only if you have
-  # measured a need: `target_qps * upstream_rtt` is the shape of it, so 2,000
-  # queries a second of cache misses against a 20 ms upstream wants 40.
+  # a second, most of them cache hits - and the derivation (128, fewer on a
+  # machine under 3 GiB) is already generous for that. Set a number only if
+  # you have measured a need: `target_qps * upstream_rtt` is the shape of it,
+  # so 2,000 queries a second of cache misses against a 20 ms upstream wants 40.
   workers: 0
 
   # The whole table, and all of it available to one prefix.

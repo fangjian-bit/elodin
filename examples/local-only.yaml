@@ -40,11 +40,11 @@ server:
     - ::1/128
 
   # Sized for one client rather than for a network. Left unset, the derivation
-  # lands at 16 on any machine with a few GB of memory - 4 per usable CPU,
-  # floored at 16 - and every worker holds a 256 KiB scratch arena from its
-  # first query onward, about 0.26 MB resident each, measured. Eight is still
-  # 400 cache misses a second against a 20 ms upstream, which is more than a
-  # desktop's whole browsing session asks for in a burst.
+  # lands at 128 on any machine with a few GB of memory, and every worker a
+  # burst reaches holds a 256 KiB scratch arena from then on, about 0.26 MB
+  # resident each, measured. Eight is still 400 cache misses a second against
+  # a 20 ms upstream, which is more than a desktop's whole browsing session
+  # asks for in a burst.
   workers: 8
   # The racer pool is created whatever the strategy, and with `failover` below
   # nothing is ever submitted to it. One thread rather than the four this

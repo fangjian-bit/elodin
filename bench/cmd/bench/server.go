@@ -21,8 +21,13 @@ type serverOpts struct {
 
 	workers         int
 	upstreamWorkers int
-	maxConnections  int
-	maxPending      int
+	// runningWorkers is written as given, so 0 is the derived limit.
+	runningWorkers int
+	maxConnections int
+	maxPending     int
+	// cpus pins the server to these CPUs with taskset, in its -c syntax, so a
+	// run can describe a small machine on a large one.
+	cpus string
 
 	cache        bool
 	cacheEntries int
@@ -133,6 +138,7 @@ func (h *harness) start(o serverOpts) (*server, error) {
 server:
   workers: %d
   upstream_workers: %d
+  running_workers: %d
   max_connections: %d
   # The whole table to one prefix, for the same reason the limiter is off below:
   # every client here is 127.0.0.1, so all of them are one client to a per-prefix
@@ -194,7 +200,7 @@ rewrites:
     answer: 192.0.2.10
 `,
 		o.logLevel, o.logQueries, filepath.Join(h.dir, o.name+".log"),
-		o.workers, o.upstreamWorkers, o.maxConnections, o.maxConnections, o.maxPending,
+		o.workers, o.upstreamWorkers, o.runningWorkers, o.maxConnections, o.maxConnections, o.maxPending,
 		dnsPort, dnsPort, dotPort,
 		filepath.Join(h.dir, o.certKind+"-cert.pem"), filepath.Join(h.dir, o.certKind+"-key.pem"),
 		dohPort,
@@ -230,6 +236,11 @@ blocking:
 		logPath: filepath.Join(h.dir, o.name+".log"),
 	}
 	s.cmd = exec.Command(h.binary, "--config", cfgPath, "--no-fetch")
+	if o.cpus != "" {
+		// taskset execs the server in its own place, so the pid sampled below
+		// is still elodin's.
+		s.cmd = exec.Command("taskset", "-c", o.cpus, h.binary, "--config", cfgPath, "--no-fetch")
+	}
 	s.cmd.Stdout = nil
 	s.cmd.Stderr = nil
 	if err := s.cmd.Start(); err != nil {

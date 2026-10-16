@@ -8,22 +8,16 @@ GIB :: i64(1024 * 1024 * 1024)
 MIB :: i64(1024 * 1024)
 
 /*
-The shape the derivation is meant to have: a household box lands on the floor
-rather than on the old 128, a large resolver keeps what it used to get, and
-nothing in between overshoots the ceiling.
+The pool is as wide as the memory allows, whatever the CPU count: a cache miss
+parks its worker for an upstream round trip, so two cores need as many workers
+as thirty-two to carry the same miss rate (issue #493).
 */
 @(test)
-test_derive_workers_scales_with_cpus :: proc(t: ^testing.T) {
-	// A two-core home router: 16 workers, about 800 cache misses a second,
-	// where the old default gave it 128 and the memory to go with them.
-	testing.expect_value(t, derive_workers(Machine{cpus = 2, memory = 8 * GIB}), MIN_DERIVED_WORKERS)
-	// The floor holds until four per CPU passes it.
-	testing.expect_value(t, derive_workers(Machine{cpus = 4, memory = 8 * GIB}), 16)
-	testing.expect_value(t, derive_workers(Machine{cpus = 8, memory = 16 * GIB}), 32)
-	// 32 CPUs is where the old default becomes the derived one.
-	testing.expect_value(t, derive_workers(Machine{cpus = 32, memory = 64 * GIB}), MAX_DERIVED_WORKERS)
-	// And past it the ceiling holds: more workers would be memory spent on
-	// throughput no upstream is going to deliver.
+test_derive_workers_does_not_scale_with_cpus :: proc(t: ^testing.T) {
+	// A two-core box gets the whole pool: 128 against a 20 ms upstream is some
+	// six thousand misses a second, where 16 workers carried a few hundred.
+	testing.expect_value(t, derive_workers(Machine{cpus = 2, memory = 8 * GIB}), MAX_DERIVED_WORKERS)
+	testing.expect_value(t, derive_workers(Machine{cpus = 1, memory = 4 * GIB}), MAX_DERIVED_WORKERS)
 	testing.expect_value(t, derive_workers(Machine{cpus = 128, memory = 256 * GIB}), MAX_DERIVED_WORKERS)
 }
 
@@ -37,7 +31,7 @@ shipped.
 @(test)
 test_derive_workers_ignores_what_it_cannot_measure :: proc(t: ^testing.T) {
 	testing.expect_value(t, derive_workers(Machine{}), MAX_DERIVED_WORKERS)
-	testing.expect_value(t, derive_workers(Machine{cpus = 4}), 16)
+	testing.expect_value(t, derive_workers(Machine{cpus = 4}), MAX_DERIVED_WORKERS)
 	testing.expect_value(t, derive_workers(Machine{memory = 64 * GIB}), MAX_DERIVED_WORKERS)
 }
 
@@ -53,12 +47,27 @@ test_derive_workers_is_capped_by_memory :: proc(t: ^testing.T) {
 	// 256 MiB / 32 = 8 MiB of thread budget, or 16 threads at 512 KiB each,
 	// which buys 10 handlers and the 5 racers that come with them.
 	testing.expect_value(t, derive_workers(Machine{cpus = 16, memory = 256 * MIB}), 10)
+	// A 1 GiB VPS: 64 threads' worth, so 42 handlers and 21 racers.
+	testing.expect_value(t, derive_workers(Machine{cpus = 2, memory = GIB}), 42)
 	// Small enough that the budget buys nothing: the floor answers instead,
 	// because a resolver that has stopped answering has saved nobody memory.
 	testing.expect_value(t, derive_workers(Machine{cpus = 16, memory = 16 * MIB}), MIN_MEMORY_WORKERS)
-	// Roomy enough that the CPU term is what decides, which is the case on
-	// anything an operator would call a server.
-	testing.expect_value(t, derive_workers(Machine{cpus = 4, memory = 4 * GIB}), 16)
+	// 3 GiB is where the whole pool and its racers fit.
+	testing.expect_value(t, derive_workers(Machine{cpus = 4, memory = 3 * GIB}), MAX_DERIVED_WORKERS)
+}
+
+/*
+The running limit follows the cores, not the pool: two per usable CPU, never
+more than the pool, and the whole pool - no limit - where the CPUs could not be
+counted, rather than a small guess that would cap a large host's hit rate.
+*/
+@(test)
+test_derive_running_workers_is_two_per_cpu :: proc(t: ^testing.T) {
+	testing.expect_value(t, derive_running_workers(Machine{cpus = 2}, 128), 4)
+	testing.expect_value(t, derive_running_workers(Machine{cpus = 1, memory = GIB}, 42), 2)
+	testing.expect_value(t, derive_running_workers(Machine{cpus = 96}, 128), 128)
+	testing.expect_value(t, derive_running_workers(Machine{cpus = 4}, 6), 6)
+	testing.expect_value(t, derive_running_workers(Machine{memory = GIB}, 42), 42)
 }
 
 @(test)
@@ -322,6 +331,12 @@ test_unset_workers_are_derived_at_load :: proc(t: ^testing.T) {
 	testing.expect(t, cfg.server.sizing.derived_upstream_workers, "upstream_workers should be marked as derived")
 	testing.expect_value(t, cfg.server.workers, derive_workers(cfg.server.sizing.machine))
 	testing.expect_value(t, cfg.server.upstream_workers, derive_upstream_workers(cfg.server.workers))
+	testing.expect(t, cfg.server.sizing.derived_running_workers, "running_workers should be marked as derived")
+	testing.expect_value(
+		t,
+		cfg.server.running_workers,
+		derive_running_workers(cfg.server.sizing.machine, cfg.server.workers),
+	)
 	// The queue bound follows the derived count rather than the old default.
 	testing.expect_value(t, cfg.server.max_pending, cfg.server.workers * 8)
 	free_all(context.temp_allocator)
@@ -349,11 +364,18 @@ test_configured_workers_win :: proc(t: ^testing.T) {
 	// the file's doing, not the hardware's, and a machine nobody consulted must
 	// not appear in the line that explains where the numbers came from.
 	quiet, qerr := load_string(
-		"upstream:\n  servers: [1.1.1.1]\nserver:\n  workers: 40\n  upstream_workers: 20\nlisteners:\n  udp: { enabled: false }\n",
+		"upstream:\n  servers: [1.1.1.1]\nserver:\n  workers: 40\n  upstream_workers: 20\n  running_workers: 3\nlisteners:\n  udp: { enabled: false }\n",
 		context.temp_allocator,
 	)
 	testing.expect(t, qerr == nil, "expected a clean load")
 	testing.expect_value(t, quiet.server.sizing.machine, Machine{})
+	testing.expect_value(t, quiet.server.running_workers, 3)
+	testing.expect(t, !quiet.server.sizing.derived_running_workers, "a configured limit is not a derived one")
+
+	// The running limit is the machine's to say however the pool was sized, so
+	// a configured `workers` still has it read off the CPUs.
+	testing.expect(t, cfg.server.sizing.derived_running_workers, "the running limit was left underived")
+	testing.expect_value(t, cfg.server.running_workers, derive_running_workers(cfg.server.sizing.machine, 40))
 
 	both := "upstream:\n  servers: [1.1.1.1]\nserver:\n  workers: 40\n  upstream_workers: 40\n"
 	pair, perr := load_string(both, context.temp_allocator)
@@ -367,11 +389,11 @@ test_configured_workers_win :: proc(t: ^testing.T) {
 // Zero means "work it out"; below zero means nothing at all.
 @(test)
 test_negative_worker_counts_are_refused :: proc(t: ^testing.T) {
-	src := "upstream:\n  servers: [1.1.1.1]\nserver:\n  workers: -1\n  upstream_workers: -4\n"
+	src := "upstream:\n  servers: [1.1.1.1]\nserver:\n  workers: -1\n  upstream_workers: -4\n  running_workers: -2\n"
 	_, err := load_string(src, context.temp_allocator)
 	e, has := err.?
 	testing.expect(t, has, "a negative worker count should be refused")
-	testing.expect_value(t, len(e.messages), 2)
+	testing.expect_value(t, len(e.messages), 3)
 	free_all(context.temp_allocator)
 }
 

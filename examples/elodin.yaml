@@ -15,15 +15,22 @@ server:
   # against a 20 ms upstream. Every query shares this pool, so too few workers
   # also delays answers that would have come from the cache. Size it as
   # `target_qps * upstream_rtt` with headroom, and budget ~0.3 MB of resident
-  # memory per worker — which is paid from the worker's first query onward,
-  # not only under load.
+  # memory per worker a burst reaches — paid from the worker's first query
+  # onward, and kept.
   #
-  # 0 works it out at startup from the CPUs and memory this machine has:
-  # `4 per CPU`, no fewer than 16 and no more than 128, and lower still if that
-  # many threads would be a real share of a small machine's memory. A container
-  # or systemd CPU/memory limit counts for more than what the host has. The
-  # numbers it settled on are in the first lines of the log and in `--check`.
+  # 0 works it out at startup from the memory this machine has: 128, and
+  # fewer if that many threads would be past a thirty-second of it (42 on a
+  # 1 GiB machine). A container or systemd memory limit counts for more than
+  # what the host has. The numbers it settled on are in the first lines of the
+  # log and in `--check`.
   workers: 0
+  # How many workers may be on the CPU at once. A worker waiting on an
+  # upstream or on another query is not counted, so this is about cores, not
+  # queries in flight: it keeps cache hits on a few warm threads instead of
+  # waking one per query. 0 is twice the usable CPUs (the affinity mask and any
+  # cgroup CPU limit), or no limit where they cannot be counted. Raise
+  # `workers` for misses, not this.
+  running_workers: 0
   upstream_workers: 0 # threads used by the "race" strategy; 0 is half of `workers`
   max_connections: 512 # concurrent TCP / DoT / DoH connections
   # How many of those one client may hold. 0 derives half of max_connections,

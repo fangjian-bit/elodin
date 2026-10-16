@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -56,6 +57,8 @@ type loadOpts struct {
 	qname       string
 	rate        int
 	duration    time.Duration
+	// cpus pins the generator, the same way serverOpts.cpus pins the server.
+	cpus string
 	// repeat runs the scenario this many times and keeps the median by
 	// throughput. Run-to-run spread on a machine with other things on it is
 	// about ten percent, which is larger than several of the differences these
@@ -139,6 +142,9 @@ func (h *harness) loadOnce(s *server, o loadOpts) (Result, sample, error) {
 	}
 
 	cmd := exec.Command(h.loadgen, args...)
+	if o.cpus != "" {
+		cmd = exec.Command("taskset", append([]string{"-c", o.cpus, h.loadgen}, args...)...)
+	}
 	var stdout strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = nil
@@ -185,6 +191,7 @@ func (h *harness) runAll(filter string) (string, error) {
 		{"handshake", h.handshakes},
 		{"memory", h.memory},
 		{"shedding", h.shedding},
+		{"sizing", h.sizing},
 		{"logging", h.loggingCost},
 	}
 
@@ -273,6 +280,50 @@ func (h *harness) workloads() (section, error) {
 	row(&sb, "sustained cache misses", rm, smm.PeakRSS)
 
 	return section{title: "Workloads", body: sb.String()}, nil
+}
+
+// sizing is what the pool's width costs cache hits, with and without the
+// running limit, on a two-core server: the case the derived sizing is for,
+// since a pool sized for misses on two cores is far wider than the cores.
+func (h *harness) sizing() (section, error) {
+	if runtime.NumCPU() < 4 {
+		return section{title: "Pool width and the running limit", body: "Skipped: needs four CPUs, two for the server and two for the generator.\n"}, nil
+	}
+	var sb strings.Builder
+	sb.WriteString("Server pinned to CPUs 0-1, generator to 2-3, 128 clients over UDP, `max_pending` 1024 throughout.\n\n")
+	sb.WriteString("| workers / running_workers | cache misses | miss p99 | cache hits | hit p99 |\n|---|---|---|---|---|\n")
+	rows := []struct {
+		label            string
+		workers, running int
+	}{
+		{"16 / 16 (no limit)", 16, 16},
+		{"128 / 128 (no limit)", 128, 128},
+		{"128 / derived (4)", 128, 0},
+	}
+	for _, rw := range rows {
+		s, err := h.start(serverOpts{
+			name: "sizing", cache: true, workers: rw.workers, runningWorkers: rw.running,
+			maxPending: 1024, cpus: "0-1",
+		})
+		if err != nil {
+			return section{}, err
+		}
+		miss, _, err := h.load(s, loadOpts{transport: "udp", clients: 128, qmode: "unique", cpus: "2-3"})
+		if err == nil {
+			err = expectRcode(miss, "noerror")
+		}
+		var hit Result
+		if err == nil {
+			hit, _, err = h.load(s, loadOpts{transport: "udp", clients: 128, cpus: "2-3"})
+		}
+		s.stop()
+		if err != nil {
+			return section{}, fmt.Errorf("%s: %w", rw.label, err)
+		}
+		fmt.Fprintf(&sb, "| %s | %s qps | %s | %s qps | %s |\n",
+			rw.label, thousands(miss.QPS), ms(miss.P99ms), thousands(hit.QPS), ms(hit.P99ms))
+	}
+	return section{title: "Pool width and the running limit", body: sb.String()}, nil
 }
 
 // transports is the second table of a run: every listener, each client holding

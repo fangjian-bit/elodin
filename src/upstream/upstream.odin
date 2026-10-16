@@ -10,6 +10,7 @@ import "elodin:dns"
 import "elodin:h2"
 import "elodin:logx"
 import "elodin:netx"
+import "elodin:pool"
 import "elodin:tlsx"
 
 Error :: enum u8 {
@@ -655,6 +656,10 @@ take several, and every bound above - a group's budget, a question's
 	*/
 	entered := time.tick_now()
 	deadline := time.tick_add(entered, timeout)
+	// Every transport's round trip, and the bootstrap lookup before it, waits
+	// on the network rather than the CPU: another handler runs meanwhile.
+	pool.blocking_begin()
+	defer pool.blocking_end()
 	/*
 	A hostname the bootstrap resolvers were asked about and did not resolve is a
 	failure like any other, recorded so it counts towards the cooldown. With a
