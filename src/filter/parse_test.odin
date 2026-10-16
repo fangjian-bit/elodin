@@ -633,6 +633,19 @@ test_a_rule_whose_name_is_not_ascii_is_counted :: proc(t: ^testing.T) {
 		set_destroy(block)
 		set_destroy(allow)
 	}
+	{
+		// A digit or a mark past ASCII is in a label as well as a letter, and so
+		// are the joiners and punctuation RFC 5892 appendix A admits in context:
+		// a combining acute, a Devanagari vowel sign, Arabic-Indic digits, a
+		// Persian ZWNJ and a Catalan middle dot.
+		block, allow := parsed(
+			"0.0.0.0 éte.example किताब.example ١٢.example می‌خواهم.example col·legi.example\n",
+			.Hosts,
+		)
+		defer set_destroy(block)
+		defer set_destroy(allow)
+		testing.expect_value(t, block.not_ascii, 5)
+	}
 	// A name refused for a `/` or a control byte is not counted even when it
 	// holds a byte past ASCII too: punycode would not make it match. Nor is one
 	// whose bytes past ASCII are no letter: a no-break or zero-width space, a

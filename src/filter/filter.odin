@@ -56,8 +56,9 @@ Set :: struct {
 	regex_bytes:   int,
 	// Patterns turned away because `regex_bytes` was already at its budget.
 	regex_refused: int,
-	// Names refused for holding a byte past ASCII, such as an international name
-	// written in UTF-8 rather than punycode (#400), so the loader can say so.
+	// Names refused only for an international name's characters past ASCII,
+	// written in UTF-8 rather than punycode (#400), so the loader can say so; see
+	// `rule_key` for which characters those are.
 	not_ascii:     int,
 	// What `regex_add` parses and trial-compiles into, emptied after each call:
 	// a fresh arena a pattern cost a map and unmap, 4 µs a line.
@@ -318,9 +319,10 @@ engine_stats :: proc(e: ^Engine) -> Stats {
 // A query spells a control or non-ASCII byte as \DDD, so a rule holding one raw
 // can never match; and a slash marks a line the parser mis-split. `not_ascii`
 // says a byte past ASCII is all that refused it, so its punycode form would match:
-// every such character is a letter, digit or mark, which a label can hold. A
-// no-break or zero-width space, a BOM, a symbol, or a byte that is not UTF-8
-// (decoded as U+FFFD) has no punycode form a stub sends.
+// every such character is a letter, digit or mark, which a label can hold, or a
+// joiner or punctuation mark RFC 5892 appendix A admits in context. A no-break or
+// zero-width space, a BOM, a symbol, or a byte that is not UTF-8 (decoded as
+// U+FFFD) has no punycode form a stub sends.
 @(private)
 rule_key :: proc(domain: string, buf: []u8) -> (key: string, ok: bool, not_ascii: bool) {
 	key, ok = normalise(domain, buf)
@@ -334,8 +336,15 @@ rule_key :: proc(domain: string, buf: []u8) -> (key: string, ok: bool, not_ascii
 		return
 	}
 	for r in key {
-		if r >= 0x80 && !unicode.is_letter(r) && !unicode.is_number(r) && !unicode.is_nonspacing_mark(r) && !unicode.is_spacing_mark(r) {
-			return "", false, false
+		switch r {
+		case 0x00 ..< 0x80, 0x200c, 0x200d, 0x00b7, 0x0375, 0x05f3, 0x05f4, 0x30fb:
+		// ASCII, or RFC 5892 appendix A's CONTEXTJ and CONTEXTO code points:
+		// the joiners and the middle dot, keraia, geresh, gershayim and katakana
+		// middle dot.
+		case:
+			if !unicode.is_letter(r) && !unicode.is_number(r) && !unicode.is_nonspacing_mark(r) && !unicode.is_spacing_mark(r) {
+				return "", false, false
+			}
 		}
 	}
 	return "", false, true
