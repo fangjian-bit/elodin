@@ -296,6 +296,54 @@ test_a_cached_page_is_not_a_list :: proc(t: ^testing.T) {
 	testing.expect_value(t, text, "")
 }
 
+/*
+A copy an earlier build cached under a list's whole url, query and key included,
+moves to the name the list goes by now, so an offline start still loads it and
+the key leaves the cache directory; with a copy already there it is removed. A
+file that is another list's cache under its own name is not touched (#487).
+*/
+@(test)
+test_a_cache_named_by_a_query_moves :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	dir := fmt.tprintf("/tmp/elodin-server-lists-test-move-%d", os.get_pid())
+	testing.expect(t, os.make_directory(dir) == nil)
+	defer os.remove(dir)
+	cfg := config.default_config()
+	cfg.blocking.cache_dir = dir
+	moved := config.Block_List{name = "http://192.0.2.1/a", url = "http://192.0.2.1/a?key=SECRET", format = .Hosts, enabled = true}
+	stale := config.Block_List{name = "http://192.0.2.1/b", url = "http://192.0.2.1/b?key=SECRET", format = .Hosts, enabled = true}
+	kept := config.Block_List{name = "http://192.0.2.1/c?key=SECRET", url = "http://192.0.2.1/c?key=SECRET", format = .Hosts, enabled = true}
+	other := config.Block_List{name = "http://192.0.2.1/c", url = "http://192.0.2.1/c?key=SECRET", format = .Hosts, enabled = true}
+	cfg.blocking.lists = []config.Block_List{moved, stale, kept, other}
+
+	path_of :: proc(dir, name: string) -> string {
+		return strings.concatenate({dir, "/", config.list_cache_name(name)}, context.temp_allocator)
+	}
+	files := []string{path_of(dir, moved.url), path_of(dir, stale.url), path_of(dir, stale.name), path_of(dir, kept.name)}
+	bodies := []string{"0.0.0.0 moved.example\n", "0.0.0.0 stale.example\n", "0.0.0.0 current.example\n", "0.0.0.0 kept.example\n"}
+	for f, i in files {
+		testing.expect(t, os.write_entire_file(f, bodies[i]) == nil)
+	}
+	defer {
+		for f in ([]string{path_of(dir, moved.name), path_of(dir, other.name)}) {
+			os.remove(f)
+		}
+		for f in files {
+			os.remove(f)
+		}
+	}
+
+	block, allow := build_filter_sets(&cfg, false)
+	defer filter.set_destroy(block)
+	defer filter.set_destroy(allow)
+	testing.expect(t, filter.set_lookup(block, "moved.example"), "the old copy did not stand in offline")
+	testing.expect(t, filter.set_lookup(block, "current.example"), "the current copy was replaced")
+	testing.expect(t, !os.exists(files[0]), "the old copy is still under its url")
+	testing.expect(t, os.exists(path_of(dir, moved.name)), "the old copy did not move to the list's name")
+	testing.expect(t, !os.exists(files[1]), "the old copy beside a current one was kept")
+	testing.expect(t, os.exists(files[3]), "another list's own cache was touched")
+}
+
 @(private = "file")
 One_List :: struct {
 	listener: net.TCP_Socket,

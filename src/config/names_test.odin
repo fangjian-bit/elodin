@@ -76,6 +76,8 @@ test_a_default_name_names_one_thing :: proc(t: ^testing.T) {
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/a_b\", \"https://l.example/a/b\"]\n", false},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/h?k=1\", {name: two, url: \"https://l.example/h?k=2\"}, {url: \"https://l.example/h?k=3\", enabled: false}]\n", true},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/h?k=1\"]\n  allowlists: [\"https://l.example/h?k=1\"]\n", true},
+		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/h?k=1\", \"https://l.example/h?k=1#x\"]\n", true},
+		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [{url: \"https://l.example/h?k=1\", file: /a}, {url: \"https://l.example/h?k=2\", file: /b}]\n", true},
 	}
 	for c in cases {
 		_, err := load_string(c.src, context.temp_allocator)

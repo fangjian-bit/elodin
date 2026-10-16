@@ -68,6 +68,7 @@ one fared.
 build_filter_sets :: proc(cfg: ^config.Config, allow_network: bool, loads: []List_Load = nil) -> (block, allow: ^filter.Set) {
 	block = filter.set_make()
 	allow = filter.set_make()
+	move_query_named_caches(cfg)
 
 	for list, i in cfg.blocking.lists {
 		load := load_one_list(cfg, list, block, allow, allow_network, false)
@@ -104,6 +105,45 @@ build_filter_sets :: proc(cfg: ^config.Config, allow_network: bool, loads: []Lis
 	}
 
 	return
+}
+
+/*
+A list the file names only by a url with a query was cached, before #487, under
+the whole url, so the file name held whatever key the query carried. Each such
+copy moves to the name the list goes by now, or is removed when a copy is there
+already: the key leaves `cache_dir`, and a box that boots offline still has the
+list. A file that is some list's own cache under its current name is left alone.
+*/
+@(private)
+move_query_named_caches :: proc(cfg: ^config.Config) {
+	lists := [][]config.Block_List{cfg.blocking.lists, cfg.blocking.allow_lists}
+	current := make(map[string]bool, context.temp_allocator)
+	for set in lists {
+		for list in set {
+			current[config.list_cache_name(list.name)] = true
+		}
+	}
+	for set in lists {
+		for list in set {
+			if list.url == "" || list.file != "" || list.name == list.url || list.name != config.url_name(list.url) {
+				continue
+			}
+			old := config.list_cache_name(list.url)
+			if current[old] {
+				continue
+			}
+			old_path, _ := filepath.join({cfg.blocking.cache_dir, old}, context.temp_allocator)
+			if !os.exists(old_path) {
+				continue
+			}
+			path := list_cache_path(cfg, list)
+			if os.exists(path) {
+				os.remove(old_path)
+			} else if err := os.rename(old_path, path); err != nil {
+				logx.warnf("list %s: cannot move the cached copy to %s (%v)", list.name, path, err)
+			}
+		}
+	}
 }
 
 // What a pair of sets holds. Said of the sets being swapped in, so that a

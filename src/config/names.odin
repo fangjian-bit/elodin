@@ -72,21 +72,22 @@ A downloaded list is cached under its name, so two lists with different urls
 that come to one cache file - one name, or two names that differ only where the
 file name cannot hold them - would read each other's copy whenever a download
 fails. Refused at load, by the name that would be shared. A disabled list is
-never downloaded, and two entries for one url are one list.
+never downloaded, nor is one with a `file:`, which is read in place of its url.
+Two entries for one url are one list, the fragment aside, which is never sent.
 */
 @(private)
 check_list_cache_names :: proc(l: ^Loader, cfg: ^Config) {
 	seen := make(map[string]Block_List, context.temp_allocator)
 	for lists in ([][]Block_List{cfg.blocking.lists, cfg.blocking.allow_lists}) {
 		for bl in lists {
-			if bl.url == "" || !bl.enabled {
+			if bl.url == "" || bl.file != "" || !bl.enabled {
 				continue
 			}
 			file := list_cache_name(bl.name)
 			prev, found := seen[file]
 			if !found {
 				seen[file] = bl
-			} else if prev.url != bl.url {
+			} else if strings.truncate_to_byte(prev.url, '#') != strings.truncate_to_byte(bl.url, '#') {
 				errorf(l, "blocking: the lists named %q and %q would share the cache file %s; give one a different 'name:'", prev.name, bl.name, file)
 			}
 		}
