@@ -84,6 +84,8 @@ test_a_default_name_names_one_thing :: proc(t: ^testing.T) {
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [{name: \"https://dns.example/q\", url: \"https://other.example/q?a=1\"}, \"https://dns.example/q?a=1\"]\n", false},
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [\"https://dns.example/q?a=1\"]\n  zones:\n    - domains: [corp.example]\n      servers: [\"https://dns.example/q?a=1#x\"]\n", true},
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [{name: a, url: \"https://dns.example/q?a=1\"}, {name: b, url: \"https://dns.example/q?a=2\"}]\n", true},
+		// A fragment is cut too: a given name equal to a cut url on another host.
+		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [\"https://dns.example/q#x\", {name: \"https://dns.example/q\", url: \"https://other.example/z\"}]\n", false},
 		// One name the file gives two servers, though it spells a url up to a query.
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [{name: \"https://dns.example/q\", url: \"https://dns.example/q?a=1\"}, {name: \"https://dns.example/q\", url: \"https://dns.example/q?a=2\"}]\n", true},
 		// The cut server is one url with the first and another server with the

@@ -95,7 +95,9 @@ blocking:
 			check(r, !strings.contains(page, "SECRET"), "the scrape shows a query:\n%s", page)
 		}
 		log := read_log(&srv)
-		check(r, strings.contains(log, fmt.tprintf("upstream %s", dead)), "the dead upstream's failure is not logged under its name:\n%s", log)
+		// The warn line's own shape: a debug line names the upstream too, and a
+		// name with the query still in it would match a bare prefix.
+		check(r, strings.contains(log, fmt.tprintf("upstream %s (HTTPS ", dead)), "the dead upstream's failure is not logged under its name:\n%s", log)
 		check(r, !strings.contains(log, "SECRET"), "the log shows a query:\n%s", log)
 		list_name := fmt.tprintf("http://127.0.0.1:%d/hosts.txt", http_port)
 		file := config.list_cache_file(config.Block_List{name = list_name, url = fmt.tprintf("%s?key=SECRET3", list_name)})

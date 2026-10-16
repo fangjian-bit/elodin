@@ -153,12 +153,7 @@ move_query_named_caches :: proc(cfg: ^config.Config) {
 				continue
 			}
 			// Named by this very url, so it is this url's copy.
-			os.remove(source_path(path))
-			if src, has := source_of(list); has {
-				if werr := write_cache_file(source_path(path), transmute([]byte)src); werr != nil {
-					warn_cache_unwritable(cfg, path, werr)
-				}
-			}
+			mark_copy_source(cfg, list, path)
 		}
 	}
 }
@@ -339,6 +334,9 @@ cached_copy :: proc(cfg: ^config.Config, list: config.Block_List, load: List_Loa
 	// A copy of another query is another list: `?category=ads` does not stand
 	// in for `?category=malware`.
 	if !copy_is_of(list, cache_path) {
+		if os.exists(cache_path) {
+			logx.infof("list %s: the cached copy at %s is of another url", list.name, cache_path)
+		}
 		return "", .Unavailable
 	}
 	data, err := os.read_entire_file(cache_path, context.allocator)
@@ -377,8 +375,15 @@ save_cached_copy :: proc(cfg: ^config.Config, list: config.Block_List, text: str
 		warn_cache_unwritable(cfg, cache_path, werr)
 		return
 	}
+	mark_copy_source(cfg, list, cache_path)
+}
+
+// The fingerprint of `list`'s url beside its copy at `cache_path`, or none for a
+// url with no query.
+@(private)
+mark_copy_source :: proc(cfg: ^config.Config, list: config.Block_List, cache_path: string) {
 	if sp := source_path(cache_path); os.exists(sp) {
-		// Left in place, it marks the new copy as another url's for good.
+		// Left in place, it marks the copy as another url's for good.
 		if rerr := os.remove(sp); rerr != nil {
 			logx.warnf("list %s: cannot remove the old fingerprint at %s (%v)", list.name, sp, rerr)
 		}

@@ -49,7 +49,7 @@ A default name stops at the url's query, so two DoH servers whose urls differ
 only there would come to share one: they would sum into one series on /metrics
 and read as one in the log, with nothing in the file to tell them apart. That is
 refused, as is a name the file gives that is another server's url up to its
-query. Every other shared name the file held already before the query was cut,
+query, and the same for a fragment, which is cut too. Every other shared name the file held already before the query was cut,
 and is left as it was: one url listed twice or pinned to two addresses, two DoT
 servers on one address, a name the file gives to several servers. Those sum by
 the operator's own spelling of the file.
@@ -72,16 +72,16 @@ check_default_upstream_names :: proc(l: ^Loader, cfg: ^Config) {
 			// a server on another host, so the path alone does not tell.
 			one_url := prev.kind == .HTTPS && s.kind == .HTTPS && url_sent(prev.url) == url_sent(s.url)
 			if !one_url && (cut_a_query(prev) || cut_a_query(s)) {
-				errorf(l, "upstream: two different servers both go by %q, a url cut at its query; give one a 'name:' (in the map form of a server)", s.name)
+				errorf(l, "upstream: two different servers both go by %q, a url cut at its query or fragment; give one a 'name:' (in the map form of a server)", s.name)
 				break
 			}
 		}
 	}
 
-	// A default name that is shorter than the url it came from, the fragment
-	// aside. A name the file gives is its own, whatever it spells.
+	// A default name shorter than the url it came from: a query or a fragment
+	// was cut. A name the file gives is its own, whatever it spells.
 	cut_a_query :: proc(s: Upstream_Spec) -> bool {
-		return s.kind == .HTTPS && !s.named && s.name != url_sent(s.url)
+		return s.kind == .HTTPS && !s.named && s.name != s.url
 	}
 }
 
