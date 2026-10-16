@@ -565,7 +565,7 @@ render_metrics :: proc(s: ^Server, l: ^Listeners, allocator := context.allocator
 		&b,
 		"elodin_dnssec_answers_total",
 		.Counter,
-		"Answers by what validation made of them. `bogus` counts queries refused for failing to validate rather than validations run: a verdict is remembered for a minute (see cache.BOGUS_TTL), and every query refused from that memory is counted here, which is what keeps the figure honest now that only one refusal a minute is logged.",
+		"Answers by what validation made of them. `bogus` counts queries refused for failing to validate rather than validations run: a verdict is remembered for a minute (see cache.BOGUS_TTL), and every query refused from that memory is counted here, which keeps the figure honest where the log has at most one line a minute for each verdict.",
 	)
 	metrics.sample(&b, "elodin_dnssec_answers_total", st.secure, metrics.Label{"result", "secure"})
 	metrics.sample(&b, "elodin_dnssec_answers_total", st.bogus, metrics.Label{"result", "bogus"})

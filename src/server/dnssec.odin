@@ -358,8 +358,8 @@ Say that a lookup the chain walk needed could not be made.
 The cause of every `Indeterminate` verdict that is not this server's own
 allowance running out, and the only place it is written down: the verdict that
 follows names a step ("chain of trust unavailable") and not the upstream error
-behind it, so at `debug` only, which this was, the client's SERVFAIL had no
-explanation anywhere once the incident was over.
+behind it, so without this line at `warn` the client's SERVFAIL has no
+explanation anywhere once the incident is over.
 
 Once a window per kind of error, with the number held back, because a name the
 group cannot reach is the client's to ask for as often as it likes - and one
@@ -371,16 +371,11 @@ chain_fetch_failed_reported: [upstream.Error]logx.Gate
 
 @(private)
 report_chain_fetch_failed :: proc(type: dns.Type, name: string, uerr: upstream.Error) {
-	loud, held := logx.gate_pass_now(&chain_fetch_failed_reported[uerr])
-	switch {
-	case loud && uerr == .None:
-		logx.warnf_held(held, "dnssec: %s %s could not be fetched: the group answered with a referral", dns.type_name(type), name)
-	case loud:
-		logx.warnf_held(held, "dnssec: %s %s could not be fetched: %v", dns.type_name(type), name, uerr)
-	case uerr == .None:
-		logx.debugf("dnssec: %s %s could not be fetched: the group answered with a referral", dns.type_name(type), name)
-	case:
-		logx.debugf("dnssec: %s %s could not be fetched: %v", dns.type_name(type), name, uerr)
+	g := &chain_fetch_failed_reported[uerr]
+	if uerr == .None {
+		logx.gated_warnf(g, "dnssec: %s %s could not be fetched: the group answered with a referral", dns.type_name(type), name)
+	} else {
+		logx.gated_warnf(g, "dnssec: %s %s could not be fetched: %v", dns.type_name(type), name, uerr)
 	}
 }
 
@@ -495,26 +490,18 @@ present_response :: proc(
 			bit down with it.
 			*/
 			/*
-			Once at warn, then at debug, like `report_udp_ceiling`. The condition
+			Once a window at warn, then at debug, through a `logx.Gate`. The condition
 			is per-answer and remotely reachable, so a name that trips it every
 			time would otherwise let whoever queries it decide how much this
 			server writes to disk.
 			*/
 			name := dns.name_trim_root(query.question[0].name if len(query.question) > 0 else "?")
-			if loud, held := logx.gate_pass_now(&prune_failure_reported); loud {
-				logx.warnf_held(
-					held,
-					"dnssec: %s %s validated but could not be rebuilt without its unauthenticated records; answering without the AD bit",
-					dns.type_name(qtype),
-					name,
-				)
-			} else {
-				logx.debugf(
-					"dnssec: %s %s validated but could not be rebuilt without its unauthenticated records; answering without the AD bit",
-					dns.type_name(qtype),
-					name,
-				)
-			}
+			logx.gated_warnf(
+				&prune_failure_reported,
+				"dnssec: %s %s validated but could not be rebuilt without its unauthenticated records; answering without the AD bit",
+				dns.type_name(qtype),
+				name,
+			)
 			secure = false
 		}
 	}
@@ -697,12 +684,13 @@ per-unit limit along with every legitimate line or filling the disk where
 through each window, saying how many it passed over (`held=`); the rest are
 `debug`, and `bogus=` in the stats line carries the count.
 
-The gate used to open once per process, and that lost an incident: the
-first refusal since start spent the only `warn`, so a zone that broke four hours
-later was `debug` and nowhere, with nothing to say which step of its chain had
-failed. `result.detail` is that: the zone and the step. The memory this server
-keeps of the verdict (`cache.BOGUS_TTL`) bounds the upstream traffic behind
-them; this bounds what they write down.
+A window rather than once per process, so a zone that breaks hours after the
+first refusal still reaches `warn`, with `result.detail` naming the zone and the
+step of its chain that failed. The client is left out: a `warn` a minute naming
+it would keep a record of who asked whether or not `log.queries` is on, and the
+query line carries it when it is. The memory this server keeps of the verdict
+(`cache.BOGUS_TTL`) bounds the upstream traffic behind them; this bounds what
+they write down.
 */
 @(private)
 bogus_reported: logx.Gate
@@ -728,20 +716,19 @@ report_bogus :: proc(q: dns.Question, client: string, result: dnssec.Result, fro
 		return
 	}
 	gate := &bogus_reported if result.status == .Bogus else &indeterminate_reported
-	loud, held := logx.gate_pass_now(gate)
-	if !loud && !logx.enabled(.Debug) {
-		return
-	}
 	why := result.reason
 	if result.detail != "" {
 		why = fmt.tprintf("%s: %s", result.reason, result.detail)
 	}
-	format := "dnssec: %s %s from %s did not validate: %v (%s); answer came from %s"
-	if !loud {
-		logx.debugf(format, dns.type_name(q.type), dns.name_trim_root(q.name), client, result.status, why, from)
-		return
-	}
-	logx.warnf_held(held, format, dns.type_name(q.type), dns.name_trim_root(q.name), client, result.status, why, from)
+	logx.gated_warnf(
+		gate,
+		"dnssec: %s %s did not validate: %v (%s); answer came from %s",
+		dns.type_name(q.type),
+		dns.name_trim_root(q.name),
+		result.status,
+		why,
+		from,
+	)
 }
 
 /*

@@ -740,7 +740,7 @@ open_stream :: proc(
 		// reason is the whole diagnosis of a failing DoT or DoH upstream and
 		// `Error` has nowhere to carry it, so an operator who never sees this
 		// line has `TLS_Failed` and nothing else to go on.
-		if loud, held := handshake_failure_due(u); loud {
+		if loud, held := handshake_failure_due(u, ferr); loud {
 			logx.warnf_held(held, "upstream %s: TLS handshake with %q failed: %s", u.spec.name, hostname, detail)
 		} else if u != nil {
 			logx.debugf("upstream %s: TLS handshake with %q failed: %s", u.spec.name, hostname, detail)

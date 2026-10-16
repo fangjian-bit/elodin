@@ -1041,37 +1041,6 @@ validate :: proc(
 	// The client question's upstream deadline, for the lookups; see `Query_Proc`.
 	deadline: ^time.Tick = nil,
 ) -> Result {
-	broken: string
-	result := validate_walk(v, qname, qtype, wire, now, allocator, shared_worker, spent, deadline, &broken)
-	// Only the verdict a step produced has one to name. `broken` is the last
-	// walk's, cleared as each starts, so it is that walk's step - but a verdict
-	// that failed for another reason, or that a step's `Bogus` was turned into
-	// `Indeterminate` for, must not borrow it.
-	if result.status == .Bogus && result.reason == BROKEN_CHAIN {
-		result.detail = broken
-	}
-	return result
-}
-
-/*
-`validate`, with the step its walk called broken written to `broken`.
-
-The walk has returns in a dozen places, so the detail comes out through a
-pointer for `validate` to attach once rather than each of them carrying it.
-*/
-@(private)
-validate_walk :: proc(
-	v: ^Validator,
-	qname: string,
-	qtype: dns.Type,
-	wire: []u8,
-	now: time.Time,
-	allocator: mem.Allocator,
-	shared_worker: bool,
-	spent: ^int,
-	deadline: ^time.Tick,
-	broken: ^string,
-) -> Result {
 	msg, derr := dns.decode_message(wire, allocator, spent)
 	if derr != .None {
 		/*
@@ -1101,7 +1070,6 @@ validate_walk :: proc(
 	budget.spent = spent
 	budget.deadline = deadline
 	defer end_walk(v, &budget)
-	defer broken^ = budget.broken
 
 	/*
 	REFUSED, SERVFAIL and the rest carry nothing to authenticate. Demanding a
@@ -1890,6 +1858,9 @@ validate_answer :: proc(
 ) -> Result {
 	worst := Status.Secure
 	reason: string
+	// The step behind `reason`, when that is `BROKEN_CHAIN`. Read as the RRset's
+	// walk ends, since the next RRset's walk clears it.
+	detail: string
 	expansions := make([dynamic]Wildcard_Expansion, 0, 1, allocator)
 	checked := 0
 
@@ -2012,6 +1983,7 @@ validate_answer :: proc(
 			// client's extended error, for a refusal that was anything but.
 			if worse(worst, status) != worst {
 				reason = why
+				detail = budget.broken if why == BROKEN_CHAIN else ""
 			}
 			worst = worse(worst, status)
 			continue
@@ -2221,7 +2193,7 @@ validate_answer :: proc(
 	records from an answer nobody is vouching for anyway.
 	*/
 	if worst != .Secure {
-		return {status = worst, reason = reason}
+		return {status = worst, reason = reason, detail = detail}
 	}
 	/*
 	Last, and after the verdict is settled. The hints spend what the answer and
@@ -2280,7 +2252,7 @@ validate_denial :: proc(
 	case .Insecure:
 		return {status = .Insecure, reason = "unsigned zone"}
 	case .Bogus:
-		return {status = .Bogus, reason = BROKEN_CHAIN}
+		return {status = .Bogus, reason = BROKEN_CHAIN, detail = budget.broken}
 	case .Indeterminate:
 		return {status = .Indeterminate, reason = walk_reason(budget)}
 	}

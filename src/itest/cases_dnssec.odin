@@ -141,19 +141,28 @@ run_dnssec_cases :: proc(r: ^Runner) {
 		with every legitimate line. The first one is the warning an operator has
 		to have; the rest within the window are debug, and `bogus=` in the stats line counts them.
 
-		A different name from the first refusal's, and the cache is off in this
-		configuration, so this really is a second trip through the branch rather
-		than a question that never reached it.
+		Different names from the first refusal's, and the cache is off in this
+		configuration, so each really is a trip through the branch rather than a
+		question that never reached it. Two of them back to back: the earlier
+		cases may have taken long enough for the first refusal's window to pass,
+		which lets the first of these warn, but the second follows it within
+		the window either way.
 		*/
 		before := log_count(&srv, "did not validate")
 		if check(r, before == 1, "expected one refusal warning before this case, found %d", before) {
-			res := query_udp(udp_port, build_query("second.test.", u16(dns.Type.A)))
-			if check(r, res.ok, "no response") {
-				h := parse_header(r, res.wire)
-				check_eq_int(r, h.rcode, int(dns.Rcode.Serv_Fail), "rcode for the second refusal")
+			mid := before
+			for name, i in ([]string{"second.test.", "third.test."}) {
+				res := query_udp(udp_port, build_query(name, u16(dns.Type.A)))
+				if check(r, res.ok, "no response for %s", name) {
+					h := parse_header(r, res.wire)
+					check_eq_int(r, h.rcode, int(dns.Rcode.Serv_Fail), "rcode for a later refusal")
+				}
+				if i == 0 {
+					mid = log_count(&srv, "did not validate")
+				}
 			}
 			after := log_count(&srv, "did not validate")
-			check(r, after == before, "a second refusal wrote another warning (%d lines now)", after)
+			check(r, after == mid, "a refusal inside the window wrote another warning (%d lines, %d before it)", after, mid)
 		}
 	}
 	end_case(r)

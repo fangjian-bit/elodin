@@ -711,12 +711,12 @@ test_an_expanded_ds_or_soa_answer_is_not_secure_either :: proc(t: ^testing.T) {
 /*
 A verdict of "broken chain of trust" names the step that broke.
 
-The reason alone says a chain is broken and not where: an operator told that a
-name did not validate had no way to learn whether the DS the parent signed was
-refused, a denial proved nothing, or the zone's keys did not match, and an
-incident that was over by the time debug logging was switched on left nothing to
-reconstruct it from. The reason stays what it was - it goes to the client as
-extended error text - and `detail` carries the zone and the step, for the log.
+The reason alone says a chain is broken and not where: it cannot tell a DS the
+parent signed that was refused from a denial that proved nothing or keys that
+did not match, and an incident over by the time debug logging is switched on
+leaves nothing else to reconstruct it from. The reason is unchanged - it goes to
+the client as extended error text - and `detail` carries the zone and the step,
+for the log.
 */
 @(test)
 test_a_broken_chain_names_the_zone_and_the_step :: proc(t: ^testing.T) {
@@ -755,5 +755,45 @@ test_a_bogus_that_is_not_a_chain_step_carries_no_detail :: proc(t: ^testing.T) {
 	testing.expect_value(t, result.status, Status.Bogus)
 	testing.expect_value(t, result.reason, WC_UNPROVEN)
 	testing.expect_value(t, result.detail, "")
+	free_all(context.temp_allocator)
+}
+
+/*
+The detail belongs to the record set whose verdict is returned.
+
+An answer holds more than one RRset - a CNAME and its target in another zone is
+the everyday case - and each walks its own chain. The verdict is the worst one,
+so the step that explains it is the one that set the worst, not whichever walk
+ran last: a later RRset in a zone that holds up must not leave the broken one's
+verdict with nothing to say for it.
+*/
+@(test)
+test_a_broken_chain_keeps_its_detail_past_a_later_rrset :: proc(t: ^testing.T) {
+	evil, eerr := dns.decode_message(wc_reply("wd_evil_answer"), context.temp_allocator)
+	fine, ferr := dns.decode_message(wc_reply("wd_fine_answer"), context.temp_allocator)
+	testing.expect_value(t, eerr, dns.Decode_Error.None)
+	testing.expect_value(t, ferr, dns.Decode_Error.None)
+	answer := make([dynamic]dns.Record, 0, len(evil.answer) + len(fine.answer), context.temp_allocator)
+	append(&answer, ..evil.answer)
+	append(&answer, ..fine.answer)
+	evil.answer = answer[:]
+	wire, _, encerr := dns.encode_message(evil, context.temp_allocator, compress = false)
+	testing.expect_value(t, encerr, dns.Encode_Error.None)
+
+	anchor, parsed := parse_trust_anchor(WC_ANCHOR, context.temp_allocator)
+	testing.expect(t, parsed, "the anchor did not parse")
+	anchors := []Trust_Anchor{anchor}
+	v := make_validator(wc_query, nil, Options{anchors = anchors})
+	defer destroy_validator(v)
+	result := validate(v, "evil.wdtest.", .A, wire, time.unix(FIXTURE_TIME, 0))
+
+	testing.expect_value(t, result.status, Status.Bogus)
+	testing.expect_value(t, result.reason, BROKEN_CHAIN)
+	testing.expectf(
+		t,
+		strings.contains(result.detail, "evil.wdtest"),
+		"the detail does not name the zone whose step broke: %q",
+		result.detail,
+	)
 	free_all(context.temp_allocator)
 }

@@ -137,8 +137,8 @@ expect_rfc3339_stamp :: proc(t: ^testing.T, line: string, i: int) {
 
 /*
 A warning that fires once per process says nothing about the second time it
-happens, which is how an hours-long fault went unlogged: the first Bogus verdict
-since start spent the only `warn`, and everything after it was `debug`.
+happens: the first Bogus verdict since start spends the only `warn`, and an
+hours-long fault after it is `debug` and unlogged.
 
 A gate lets one event through per window instead - the first immediately, so an
 operator has a line to grep for, then one a window - and counts what it held

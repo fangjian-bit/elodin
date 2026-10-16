@@ -6,10 +6,9 @@ import "elodin:logx"
 /*
 A kind of failure is reported again once its window has passed.
 
-It used to be reported once per upstream per kind for the life of the process, so
-an upstream that had timed out on its first day and began refusing handshakes on
-its fortieth was `debug` from then on: the counters moved and the log said
-nothing about why. The clock is the case's own, so the window can be crossed
+Once per upstream per kind for the life of the process would leave an upstream
+that timed out on its first day and began refusing handshakes on its fortieth
+at `debug` from then on: the counters move and the log says nothing about why. The clock is the case's own, so the window can be crossed
 without waiting for it.
 */
 @(test)
@@ -40,15 +39,15 @@ A handshake failure is one event and says so once.
 The transport writes the line with the reason and `record_failure` then asks
 about the same event. Asking the same gate twice counted it twice, and at a
 window's edge handed the warning to the generic line, so the reason went to
-debug. The handshake has a gate of its own, and the generic `TLS_Failed` line
-waits for it.
+debug. The handshake has a gate of its own per kind, and the generic line for
+that kind waits for it.
 */
 @(test)
 test_a_handshake_failure_is_said_once_with_its_reason :: proc(t: ^testing.T) {
 	u: Upstream
 	now := i64(1_000_000)
 
-	loud, _ := logx.gate_pass(&u.handshake, now)
+	loud, _ := logx.gate_pass(&u.handshake[.TLS_Failed], now)
 	testing.expect(t, loud, "the handshake line was not due")
 
 	holdback: u64
@@ -67,4 +66,36 @@ test_a_handshake_failure_is_said_once_with_its_reason :: proc(t: ^testing.T) {
 	// for a TLS_Failed that did not come through the handshake path.
 	loud, _ = note_failure_kind_at(&u, .TLS_Failed, now + i64(logx.GATE_WINDOW))
 	testing.expect(t, loud, "the generic line stayed silent after the handshake window")
+}
+
+
+/*
+Each kind a handshake can fail as waits only for its own handshake line.
+
+`handshake_failure` maps a handshake to `TLS_Failed`, `Verify_Failed` or
+`Timeout`. With one gate for all three, a handshake that timed out would silence
+the first `TLS_Failed` - and, with a timeout a minute, every one after it - and a
+`Verify_Failed` handshake would be said twice: once with its reason, once more by
+the kind's own line, which nothing held back.
+*/
+@(test)
+test_a_handshake_holds_back_only_its_own_kind :: proc(t: ^testing.T) {
+	kinds := [?]Error{.TLS_Failed, .Verify_Failed, .Timeout}
+	now := i64(1_000_000)
+	for kind in kinds {
+		u: Upstream
+		loud, _ := logx.gate_pass(&u.handshake[kind], now)
+		testing.expectf(t, loud, "the %v handshake line was not due", kind)
+
+		loud, _ = note_failure_kind_at(&u, kind, now + 1)
+		testing.expectf(t, !loud, "a %v handshake was said twice", kind)
+
+		for other in kinds {
+			if other == kind {
+				continue
+			}
+			loud, _ = note_failure_kind_at(&u, other, now + 1)
+			testing.expectf(t, loud, "a %v handshake silenced the first %v", kind, other)
+		}
+	}
 }

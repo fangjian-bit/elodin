@@ -56,12 +56,14 @@ A client that did not set DO gets the DNSSEC records stripped.
 The first refusal of each verdict is logged at `warn` with the verdict, the
 reason, the zone and step of the chain that broke, and the upstream the answer
 came from. After that one refusal a minute is logged at `warn` too, with
-`held=<n>` counting the others in that minute; the rest are `debug`. Every
+`held=<n>` counting the others in that minute; the rest are `debug`. The line
+does not name the client, which would otherwise be recorded every minute with
+`log.queries` off; the query line names it when that is on. Every
 refusal's query line carries `outcome=failed detail=dnssec:<upstream>`, or
 `detail=dnssec:cache` when answered from the cache:
 
 ```
-ts=2026-08-07T09:12:52Z level=warn msg="dnssec: A xc.example.com from 192.0.2.10:44188 did not validate: Bogus (broken chain of trust: example.com: the reply to the DS question held neither a DS nor a denial signed by the parent); answer came from quad9-dot"
+ts=2026-08-07T09:12:52Z level=warn msg="dnssec: A xc.example.com did not validate: Bogus (broken chain of trust: example.com: the reply to the DS question held neither a DS nor a denial signed by the parent); answer came from quad9-dot"
 ts=2026-08-07T09:12:52Z level=info msg=query client=192.0.2.10 port=44188 proto=udp qtype=A qname=xc.example.com outcome=failed detail=dnssec:quad9-dot ms=126.5
 ```
 

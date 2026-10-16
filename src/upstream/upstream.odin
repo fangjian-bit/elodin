@@ -154,9 +154,9 @@ Upstream :: struct {
 	// One gate per kind of failure, so each is said at `warn` once a window and
 	// left to `debug` between; see `record_failure`.
 	reported:     [Error]logx.Gate,
-	// The same for a TLS handshake failure's reason, which has its own line; see
-	// `handshake_failure_due`.
-	handshake:    logx.Gate,
+	// The same for a TLS handshake failure's reason, which has its own line, per
+	// kind it maps to; see `handshake_failure_due`.
+	handshake:    [Error]logx.Gate,
 
 	stats:        Stats,
 	allocator:    mem.Allocator,
@@ -345,9 +345,10 @@ something to say about a failure says it often enough to be found and rarely
 enough to be bounded however often the failure comes back. The caller holds
 `u.mu`.
 
-Except a `TLS_Failed` that a handshake line has just been written for, which
-stays quiet: its line carries the reason, and a second one saying only
-`TLS_Failed` is the same event twice.
+Except a kind that a handshake line has just been written for, which stays
+quiet: that line carries the reason, and a second one saying only the kind is
+the same event twice. Only that kind: a handshake that timed out says nothing
+about a `TLS_Failed`.
 */
 @(private)
 note_failure_kind :: proc(u: ^Upstream, err: Error) -> (loud: bool, held: u64) {
@@ -357,7 +358,7 @@ note_failure_kind :: proc(u: ^Upstream, err: Error) -> (loud: bool, held: u64) {
 // `note_failure_kind` against a clock the caller names.
 @(private)
 note_failure_kind_at :: proc(u: ^Upstream, err: Error, now: i64) -> (loud: bool, held: u64) {
-	if err == .TLS_Failed && logx.gate_shut(&u.handshake, now) {
+	if logx.gate_shut(&u.handshake[err], now) {
 		return false, 0
 	}
 	return logx.gate_pass(&u.reported[err], now)
@@ -369,20 +370,21 @@ The same, for the transports that know more about a failure than its kind.
 A TLS handshake carries a reason string that `Error` has no room for, and it is
 worth more than the enum is: "certificate has expired" and "no application
 protocol" are different problems that both arrive here as `TLS_Failed`. Asked
-where the reason is still in hand, with a gate of its own, so the one line this
-failure gets in a window is the one with the reason on it: `note_failure_kind`
-holds back its own `TLS_Failed` line while this one's window is open.
+where the reason is still in hand, with a gate of its own per kind, so the one
+line this failure gets in a window is the one with the reason on it:
+`note_failure_kind` holds back its own line for that kind while this one's window
+is open.
 
 Not the kind's gate, which `record_failure` passes for the same event a moment
 later: one event asking the same gate twice would count itself twice and could
 hand the line to the one without the reason.
 */
 @(private)
-handshake_failure_due :: proc(u: ^Upstream) -> (loud: bool, held: u64) {
+handshake_failure_due :: proc(u: ^Upstream, err: Error) -> (loud: bool, held: u64) {
 	if u == nil {
 		return false, 0
 	}
-	return logx.gate_pass_now(&u.handshake)
+	return logx.gate_pass_now(&u.handshake[err])
 }
 
 /*

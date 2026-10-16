@@ -173,10 +173,9 @@ eventf :: proc(level: Level, msg: string, format: string, args: ..any) {
 Lets one event in a window through at `warn`, and counts the others in it.
 
 For a condition a peer can provoke as often as it likes, where a `warn` per
-occurrence would let it write to this server's disk. A gate that opens once per
-process, which this replaced, kept that bound and lost everything else: the
-first occurrence since start spent the only `warn`, so a fault that began hours
-later - or a second, different one - was `debug` and therefore nowhere.
+occurrence would let it write to this server's disk. Once a window rather than
+once per process: a fault that begins hours after the first one, or a second,
+different one, still reaches `warn`.
 
 The first event opens it at once, so there is a line to find; after that it
 opens once per `GATE_WINDOW`, and the line says how many it passed over.
@@ -232,6 +231,18 @@ warnf_held :: proc(held: u64, format: string, args: ..any) {
 		return
 	}
 	write_line(.Warn, fmt.tprintf(format, ..args), fmt.tprintf("held=%d", held))
+}
+
+/*
+`warnf` through a `Gate`, with the number it held back, and `debugf` while the
+gate is shut.
+*/
+gated_warnf :: proc(g: ^Gate, format: string, args: ..any) {
+	if loud, held := gate_pass_now(g); loud {
+		warnf_held(held, format, ..args)
+	} else {
+		debugf(format, ..args)
+	}
 }
 
 debugf :: proc(format: string, args: ..any) {
