@@ -24,7 +24,7 @@ run_list_download_cases :: proc(r: ^Runner) {
 		"/hosts.txt",
 		"# a hosts list\n127.0.0.1 localhost\n0.0.0.0 downloaded.test\n0.0.0.0 second.downloaded.test\n",
 	)
-	http_mock_serve(http, "/abp.txt", "[Adblock Plus 2.0]\n||fetched.test^\n@@||ok.fetched.test^\n")
+	http_mock_serve(http, "/abp.txt", "[Adblock Plus 2.0]\n||fetched.test^\n@@||ok.fetched.test^\n||b\u00fccher.test^\n")
 	// No format given, and a comment that mentions adblock syntax (#322).
 	http_mock_serve(http, "/auto.txt", "# not adblock: no ||rule^ here\n0.0.0.0 sniffed.test # nor ||here^\n0.0.0.0 second.sniffed.test ! nor ||here^\n")
 	if !http_mock_start(http) {
@@ -101,6 +101,13 @@ blocking:
 			h := parse_header(r, allowed.wire)
 			check(r, h.rcode == int(dns.Rcode.No_Error), "the allow rule from the download was lost")
 		}
+	}
+	end_case(r)
+
+	start_case(r, "lists: a name written in UTF-8 is skipped with a warning naming its list")
+	{
+		check(r, log_contains(&srv, "list abp-list: 1 names skipped as not ASCII"), "the UTF-8 entry was dropped without a word:\n%s", read_log(&srv))
+		check(r, !log_contains(&srv, "list hosts-list: 1 names skipped"), "a list with no UTF-8 entry was warned of")
 	}
 	end_case(r)
 

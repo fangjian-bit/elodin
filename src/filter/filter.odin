@@ -55,6 +55,9 @@ Set :: struct {
 	regex_bytes:   int,
 	// Patterns turned away because `regex_bytes` was already at its budget.
 	regex_refused: int,
+	// Names refused for holding a byte past ASCII, such as an international name
+	// written in UTF-8 rather than punycode (#400), so the loader can say so.
+	not_ascii:     int,
 	// What `regex_add` parses and trial-compiles into, emptied after each call:
 	// a fresh arena a pattern cost a map and unmap, 4 µs a line.
 	regex_scratch: virtual.Arena,
@@ -127,6 +130,9 @@ set_add :: proc(s: ^Set, domain: string, flags: Rule_Flags) -> (stored: bool) {
 	buf: [MAX_NORMALISED]u8
 	key, ok := rule_key(domain, buf[:])
 	if !ok {
+		if !is_ascii(domain) {
+			s.not_ascii += 1
+		}
 		return false
 	}
 	add := flags - s.cancelled[key]
@@ -321,6 +327,16 @@ rule_key :: proc(domain: string, buf: []u8) -> (key: string, ok: bool) {
 		}
 	}
 	return
+}
+
+@(private)
+is_ascii :: proc(s: string) -> bool {
+	for c in transmute([]u8)s {
+		if c >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 @(private)

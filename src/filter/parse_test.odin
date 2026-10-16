@@ -616,3 +616,25 @@ test_a_cosmetic_rule_blocks_nothing :: proc(t: ^testing.T) {
 		testing.expectf(t, matches(rule, .Adblock, "example.com.") == .None, "%q matched", rule)
 	}
 }
+
+@(test)
+test_a_rule_whose_name_is_not_ascii_is_counted :: proc(t: ^testing.T) {
+	// A UTF-8 name never matches (a query spells those bytes as \DDD, and a stub
+	// asks for the punycode form), so the loader is told how many it skipped
+	// (#400), whichever syntax the list writes it in. Other refusals are not counted.
+	cases := []struct {
+		text:   string,
+		format: Format,
+	}{{"0.0.0.0 bücher.example ok.example\n", .Hosts}, {"bücher.example\nok.example\n", .Domains}, {"||bücher.example^\n||ok.example^\n", .Adblock}}
+	for c in cases {
+		block, allow := parsed(c.text, c.format)
+		testing.expectf(t, block.not_ascii == 1, "%v: not_ascii = %d", c.format, block.not_ascii)
+		testing.expect_value(t, block.count, 1)
+		set_destroy(block)
+		set_destroy(allow)
+	}
+	block, allow := parsed("0.0.0.0 a\x01b.example example.com/path\n", .Hosts)
+	defer set_destroy(block)
+	defer set_destroy(allow)
+	testing.expect_value(t, block.not_ascii, 0)
+}

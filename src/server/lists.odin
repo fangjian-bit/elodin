@@ -226,7 +226,7 @@ load_one_list :: proc(
 		target_block = allow
 	}
 
-	added, held_rules := parse_list_text(target_block, target_allow, text, list.format)
+	added, held_rules, not_ascii := parse_list_text(target_block, target_allow, text, list.format)
 	if downloaded {
 		/*
 		A download replaces the cached copy only once it has been parsed and
@@ -249,10 +249,19 @@ load_one_list :: proc(
 				// list it cannot reach. It stays not current, and so retried.
 				return .Empty
 			}
-			added, _ = parse_list_text(target_block, target_allow, text, list.format)
+			added, _, not_ascii = parse_list_text(target_block, target_allow, text, list.format)
 		}
 	}
 	logx.infof("list %s: %d rules", list.name, added)
+	/*
+	A stub asks for an international name in punycode (RFC 5891 section 5), and
+	a query spells any other byte past ASCII as \DDD, so such an entry can never
+	match. AdGuard Home's urlfilter refuses it likewise; converting it needs the
+	IDNA2008 and NFC tables RFC 5891 section 5 asks of a lookup.
+	*/
+	if not_ascii > 0 {
+		logx.warnf("list %s: %d names skipped as not ASCII; an international name matches only when written in punycode (xn--...)", list.name, not_ascii)
+	}
 	return load
 }
 
@@ -261,15 +270,19 @@ Parse a list's text into the sets, and say whether it held rules: it added some,
 took some back with `$badfilter`, or had regex rules refused because the lists
 before it used up the budget. `added` alone would read a list of `$badfilter`
 rules, or of regexes past the budget, as empty: never cached, never current.
+
+`not_ascii` is how many of its names were refused for a byte past ASCII.
 */
 @(private)
-parse_list_text :: proc(block, allow: ^filter.Set, text: string, format: config.List_Format) -> (added: int, held_rules: bool) {
+parse_list_text :: proc(block, allow: ^filter.Set, text: string, format: config.List_Format) -> (added: int, held_rules: bool, not_ascii: int) {
 	cancels := block.cancels + allow.cancels
+	skipped := block.not_ascii + allow.not_ascii
 	refused := block.regex_refused + allow.regex_refused
 	// config.List_Format and filter.Format are declared in the same order so a
 	// list's configured format maps straight across.
 	added = filter.parse_list(block, allow, text, filter.Format(format))
 	held_rules = added > 0 || block.cancels + allow.cancels > cancels || block.regex_refused + allow.regex_refused > refused
+	not_ascii = block.not_ascii + allow.not_ascii - skipped
 	return
 }
 
