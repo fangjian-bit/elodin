@@ -372,10 +372,11 @@ chain_fetch_failed_reported: [upstream.Error]logx.Gate
 @(private)
 report_chain_fetch_failed :: proc(type: dns.Type, name: string, uerr: upstream.Error) {
 	g := &chain_fetch_failed_reported[uerr]
+	shown := dns.name_trim_root(name)
 	if uerr == .None {
-		logx.gated_warnf(g, "dnssec: %s %s could not be fetched: the group answered with a referral", dns.type_name(type), name)
+		logx.gated_warnf(g, "dnssec: %s %s could not be fetched: the group answered with a referral", dns.type_name(type), shown)
 	} else {
-		logx.gated_warnf(g, "dnssec: %s %s could not be fetched: %v", dns.type_name(type), name, uerr)
+		logx.gated_warnf(g, "dnssec: %s %s could not be fetched: %v", dns.type_name(type), shown, uerr)
 	}
 }
 
@@ -691,7 +692,7 @@ they write down.
 One gate per zone rather than one for every zone, or a zone that stays broken
 and busy takes every window and one that breaks later, asked for once a minute,
 is never heard: the case the window is here for. A fixed table, so the bound is
-`BOGUS_GATES` lines a window whatever names are asked, keyed on the zone the
+`ZONE_GATES` lines a window whatever names are asked, keyed on the zone the
 detail names, or on the name's parent where there is no detail - which is the
 zone for most names, and the same slot for every name a flood invents one label
 under it. Best effort, not a guarantee: two zones can share a slot, an apex
@@ -699,13 +700,13 @@ question keys on its parent, and a flood that spreads over many parents can hold
 all sixteen - what it cannot do is write more than sixteen lines a window.
 */
 @(private)
-BOGUS_GATES :: 16
+ZONE_GATES :: 16
 
 @(private)
-bogus_reported: [BOGUS_GATES]logx.Gate
+bogus_reported: [ZONE_GATES]logx.Gate
 
 @(private)
-bogus_gate :: proc(q: dns.Question, result: dnssec.Result) -> ^logx.Gate {
+zone_gate :: proc(table: ^[ZONE_GATES]logx.Gate, q: dns.Question, result: dnssec.Result) -> ^logx.Gate {
 	zone := dns.name_parent(q.name)
 	if i := strings.index(result.detail, ": "); i >= 0 {
 		zone = result.detail[:i]
@@ -721,22 +722,24 @@ bogus_gate :: proc(q: dns.Question, result: dnssec.Result) -> ^logx.Gate {
 		}
 		h = (h ~ u32(c)) * 0x01000193
 	}
-	return &bogus_reported[h % BOGUS_GATES]
+	return &table[h % ZONE_GATES]
 }
 
 /*
-A gate of its own for the verdict that is not one.
+A table of its own for the verdict that is not one, keyed the same way.
 
 `Indeterminate` reaches this procedure beside `Bogus` because both are SERVFAIL
 to the client, and it is the cheap one to provoke: a lost DNSKEY datagram or a
 walk that ran out of its allowance under load produces it, and unlike a `Bogus`
-verdict nothing remembers it, so it stays cheap. Sharing one gate, a stream of
-such transients would keep taking the window, and a zone that really is broken
-would be debug lines for as long as they lasted - which is the guarantee this is
-here to make, lost to the failure mode least worth hearing about.
+verdict nothing remembers it, so it stays cheap. Sharing the Bogus table, a
+stream of such transients would keep taking the windows, and a zone that really
+is broken would be debug lines for as long as they lasted - which is the
+guarantee this is here to make, lost to the failure mode least worth hearing
+about. Per zone for the reason the Bogus table is: one zone whose authority is
+unreachable must not keep a second from `warn`.
 */
 @(private)
-indeterminate_reported: logx.Gate
+indeterminate_reported: [ZONE_GATES]logx.Gate
 
 @(private)
 report_bogus :: proc(q: dns.Question, client: string, result: dnssec.Result, from: string, shed := false) {
@@ -744,7 +747,7 @@ report_bogus :: proc(q: dns.Question, client: string, result: dnssec.Result, fro
 		report_shed_walk(q, client)
 		return
 	}
-	gate := bogus_gate(q, result) if result.status == .Bogus else &indeterminate_reported
+	gate := zone_gate(&bogus_reported if result.status == .Bogus else &indeterminate_reported, q, result)
 	// The detail as arguments rather than formatted in here, so a refusal the
 	// gate sends to a disabled `debug` formats nothing.
 	logx.gated_warnf_from(

@@ -3185,6 +3185,8 @@ with the rcode named, the way the rebinding guard and the validator explain
 their own refusals. A client that queried without EDNS has nowhere to put one
 and gets the bare SERVFAIL.
 */
+// For a reply no upstream can be named for, which the per-upstream gate cannot
+// hold; see `upstream.Upstream.unreadable`.
 @(private)
 unreadable_rcode_reported: logx.Gate
 
@@ -3245,7 +3247,7 @@ unreadable_rcode_refusal :: proc(
 	name := dns.name_trim_root(q.name)
 	shown := rcode_text(rcode)
 	logx.gated_warnf_from(
-		&unreadable_rcode_reported,
+		&winner.unreadable if winner != nil else &unreadable_rcode_reported,
 		client,
 		"upstream %s answered %s for %s %s, which a client would read as another rcode; answering SERVFAIL",
 		from,

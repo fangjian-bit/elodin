@@ -548,9 +548,9 @@ test_a_bogus_zone_has_a_gate_of_its_own :: proc(t: ^testing.T) {
 	broken := dnssec.Result{status = .Bogus, reason = "broken chain of trust", detail = "busy.example: the DNSKEY reply held no keys"}
 	forged := dnssec.Result{status = .Bogus, reason = "no valid signature"}
 
-	busy := bogus_gate(dns.Question{name = "a1.busy.example.", type = .A}, forged)
-	testing.expect(t, busy == bogus_gate(dns.Question{name = "ZZ9.Busy.Example.", type = .A}, forged), "two names under one zone took two gates")
-	testing.expect(t, busy == bogus_gate(dns.Question{name = "deep.under.busy.example.", type = .A}, broken), "the zone the walk named was not the key")
-	testing.expect(t, busy != bogus_gate(dns.Question{name = "www.quiet.example.", type = .A}, forged), "another zone shared the busy one's gate")
+	busy := zone_gate(&bogus_reported, dns.Question{name = "a1.busy.example.", type = .A}, forged)
+	testing.expect(t, busy == zone_gate(&bogus_reported, dns.Question{name = "ZZ9.Busy.Example.", type = .A}, forged), "two names under one zone took two gates")
+	testing.expect(t, busy == zone_gate(&bogus_reported, dns.Question{name = "deep.under.busy.example.", type = .A}, broken), "the zone the walk named was not the key")
+	testing.expect(t, busy != zone_gate(&bogus_reported, dns.Question{name = "www.quiet.example.", type = .A}, forged), "another zone shared the busy one's gate")
 	free_all(context.temp_allocator)
 }

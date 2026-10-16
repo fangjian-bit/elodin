@@ -1,6 +1,7 @@
 package upstream
 
 import "core:testing"
+import "core:time"
 import "elodin:logx"
 
 /*
@@ -37,10 +38,10 @@ test_a_failure_kind_is_reported_again_after_its_window :: proc(t: ^testing.T) {
 A handshake failure is one event and says so once.
 
 The transport writes the line with the reason and `record_failure` then asks
-about the same event. Asking the same gate twice counted it twice, and at a
-window's edge handed the warning to the generic line, so the reason went to
-debug. The handshake has a gate of its own per kind, and the generic line for
-that kind waits for it.
+about the same event. One gate asked twice would count the event twice, and at
+a window's edge hand the warning to the generic line, sending the reason to
+debug. So the handshake has a gate of its own per kind, and the generic line
+for that kind waits for it.
 */
 @(test)
 test_a_handshake_failure_is_said_once_with_its_reason :: proc(t: ^testing.T) {
@@ -101,4 +102,19 @@ test_a_handshake_holds_back_only_its_own_kind :: proc(t: ^testing.T) {
 			testing.expectf(t, loud, "a %v handshake silenced the first %v", kind, other)
 		}
 	}
+}
+
+/*
+A swept refusal is gated per upstream, so the line naming one member, and its
+`held=`, are that member's: a filtering member refusing all day cannot keep a
+second one that starts refusing from being named.
+*/
+@(test)
+test_a_swept_refusal_is_gated_per_upstream :: proc(t: ^testing.T) {
+	// A bare header: REFUSED, no OPT record, so no extended error saying why.
+	refused := []u8{0x12, 0x34, 0x81, 0x85, 0, 0, 0, 0, 0, 0, 0, 0}
+	a, b: Upstream
+	report_swept_refusal(&a, refused)
+	testing.expect(t, logx.gate_shut(&a.swept, time.tick_now()._nsec), "the refusal did not pass its upstream's gate")
+	testing.expect(t, !logx.gate_shut(&b.swept, time.tick_now()._nsec), "one upstream's refusal spent another's gate")
 }

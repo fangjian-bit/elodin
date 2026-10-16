@@ -50,8 +50,8 @@ rest.
 
 Failures that repeat — an upstream error, a query that got no answer, a
 DNSSEC refusal, a chain lookup that could not be made — are logged at `warn`
-the first time and then at most once a minute per kind (per zone for a Bogus
-verdict, through 16 slots zones can share), with `held=<n>` counting the ones
+the first time and then at most once a minute per kind (per zone for a DNSSEC
+refusal, through 16 slots zones can share), with `held=<n>` counting the ones
 not logged at `warn` since the line before it; the rest are at `debug`. These lines name the query name, so with
 `log.queries` off a name that fails still reaches the log about once a minute.
 They name the client only at `debug`.

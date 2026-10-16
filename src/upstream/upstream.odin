@@ -157,6 +157,14 @@ Upstream :: struct {
 	// The same for a TLS handshake failure's reason, which has its own line, per
 	// kind it maps to; see `handshake_failure_due`.
 	handshake:    [Error]logx.Gate,
+	/*
+	The same for the two lines that name this upstream for a reply it sent
+	rather than a failure: a REFUSED swept to another member, and an rcode a
+	client cannot read. Per upstream, so a line's `held=` is this upstream's
+	and one member's stream cannot keep another's first one from `warn`.
+	*/
+	swept:        logx.Gate,
+	unreadable:   logx.Gate,
 
 	stats:        Stats,
 	allocator:    mem.Allocator,
