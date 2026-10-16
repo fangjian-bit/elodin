@@ -160,8 +160,9 @@ rule written the same way. Keep rule texts per name if that ever matters.
 */
 set_cancel :: proc(s: ^Set, domain: string, flags: Rule_Flags) {
 	buf: [MAX_NORMALISED]u8
-	key, ok, _ := rule_key(domain, buf[:])
+	key, ok, not_ascii := rule_key(domain, buf[:])
 	if !ok {
+		s.not_ascii += int(not_ascii)
 		return
 	}
 	s.cancels += 1
@@ -321,8 +322,8 @@ engine_stats :: proc(e: ^Engine) -> Stats {
 // says a byte past ASCII is all that refused it, so its punycode form would match:
 // every such character is a letter, digit or mark, which a label can hold, or a
 // joiner or punctuation mark RFC 5892 appendix A admits in context. A no-break or
-// zero-width space, a BOM, a symbol, or a byte that is not UTF-8 (decoded as
-// U+FFFD) has no punycode form a stub sends.
+// zero-width space, a BOM, a symbol, a byte that is not UTF-8 (decoded as
+// U+FFFD), or ASCII no label holds (`*`, `:`) has no punycode form a stub sends.
 @(private)
 rule_key :: proc(domain: string, buf: []u8) -> (key: string, ok: bool, not_ascii: bool) {
 	key, ok = normalise(domain, buf)
@@ -337,10 +338,12 @@ rule_key :: proc(domain: string, buf: []u8) -> (key: string, ok: bool, not_ascii
 	}
 	for r in key {
 		switch r {
-		case 0x00 ..< 0x80, 0x200c, 0x200d, 0x00b7, 0x0375, 0x05f3, 0x05f4, 0x30fb:
-		// ASCII, or RFC 5892 appendix A's CONTEXTJ and CONTEXTO code points:
-		// the joiners and the middle dot, keraia, geresh, gershayim and katakana
-		// middle dot.
+		case 'a' ..= 'z', '0' ..= '9', '-', '_', '.', 0x200c, 0x200d, 0x00b7, 0x0375, 0x05f3, 0x05f4, 0x30fb, 0x3002, 0xff0e, 0xff61:
+		// The ASCII a label holds; RFC 5892 appendix A's CONTEXTJ and CONTEXTO
+		// code points: the joiners and the middle dot, keraia, geresh, gershayim
+		// and katakana middle dot; and the ideographic, fullwidth and halfwidth
+		// full stops, which a lookup reads as a dot (RFC 3490 section 3.1). Any
+		// other ASCII is a symbol, refused below.
 		case:
 			if !unicode.is_letter(r) && !unicode.is_number(r) && !unicode.is_nonspacing_mark(r) && !unicode.is_spacing_mark(r) {
 				return "", false, false
