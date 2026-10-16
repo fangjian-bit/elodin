@@ -313,6 +313,8 @@ Block_List :: struct {
 	file:    string,
 	format:  List_Format,
 	enabled: bool,
+	// The file gave `name:`; otherwise it is the url up to its query, or the file.
+	named:   bool,
 }
 
 Blocking_Config :: struct {

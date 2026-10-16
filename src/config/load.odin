@@ -1621,6 +1621,7 @@ load_block_lists :: proc(l: ^Loader, n: ^yaml.Node, path: string) -> []Block_Lis
 			continue
 		}
 		opt_string(l, e, "name", &bl.name, item_path)
+		bl.named = bl.name != ""
 		opt_string(l, e, "url", &bl.url, item_path)
 		opt_string(l, e, "file", &bl.file, item_path)
 		opt_bool(l, e, "enabled", &bl.enabled, item_path)

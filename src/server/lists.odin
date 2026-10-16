@@ -128,7 +128,7 @@ move_query_named_caches :: proc(cfg: ^config.Config) {
 	}
 	for set in lists {
 		for list in set {
-			if list.url == "" || list.file != "" || !list.enabled || list.name != config.url_name(list.url) {
+			if list.url == "" || list.file != "" || !list.enabled || list.named {
 				continue
 			}
 			old := config.list_cache_name(list.url)
@@ -377,7 +377,12 @@ save_cached_copy :: proc(cfg: ^config.Config, list: config.Block_List, text: str
 		warn_cache_unwritable(cfg, cache_path, werr)
 		return
 	}
-	os.remove(source_path(cache_path))
+	if sp := source_path(cache_path); os.exists(sp) {
+		// Left in place, it marks the new copy as another url's for good.
+		if rerr := os.remove(sp); rerr != nil {
+			logx.warnf("list %s: cannot remove the old fingerprint at %s (%v)", list.name, sp, rerr)
+		}
+	}
 	if src, has := source_of(list); has {
 		if werr := write_cache_file(source_path(cache_path), transmute([]byte)src); werr != nil {
 			warn_cache_unwritable(cfg, cache_path, werr)
@@ -418,7 +423,7 @@ names: a build before #487 cached that under its name and wrote none.
 copy_is_of :: proc(list: config.Block_List, cache_path: string) -> bool {
 	src, has := source_of(list)
 	if !os.exists(source_path(cache_path)) {
-		return !has || list.name != config.url_name(list.url)
+		return !has || list.named
 	}
 	if !has {
 		return false
