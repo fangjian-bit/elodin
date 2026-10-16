@@ -39,7 +39,9 @@ throughput is roughly `server.workers / upstream_rtt`: the derived 128 against a
 Only `running_workers` of them run at once. A worker waiting on an upstream, on
 another client's identical query, or on a DoH client's flow-control window is
 not counted, so the limit bounds the threads competing for the cores rather than
-the queries in flight. Cache hits are then answered by a worker already awake
+the queries in flight. The pool answers UDP and DoH over HTTP/2; TCP, DoT and
+HTTP/1.1 answer on [their connection's own thread](#transports), which the limit
+does not see. Cache hits are then answered by a worker already awake
 instead of each waking one of its own. On two cores against a 20 ms mock
 upstream, 128 clients over UDP
 ([`bench/results/2026-10-16-pool-width.md`](../bench/results/2026-10-16-pool-width.md),

@@ -177,6 +177,11 @@ sizing_origin :: proc(s: config.Server_Config) -> string {
 	switch {
 	case s.sizing.derived_workers:
 		m := s.sizing.machine
+		// `workers` reads only the memory; the CPUs are named when they
+		// decided `running_workers`, and not for a limit the file set.
+		if !s.sizing.derived_running_workers {
+			m.cpus = 0
+		}
 		switch {
 		case m.cpus > 0 && m.memory > 0:
 			return fmt.tprintf("derived from %s and %#.1M", usable_cpus(m.cpus), m.memory)

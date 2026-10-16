@@ -206,6 +206,46 @@ test_a_blocked_worker_hands_its_slot_on :: proc(t: ^testing.T) {
 	testing.expect(t, gate_release(&blocked, 1))
 }
 
+/*
+A worker back from a block runs past the limit only until its own job ends. With
+jobs still queued it parks rather than taking the next, or a backlog that never
+drains would leave every worker an upstream reply brought back running.
+*/
+@(test)
+test_a_worker_back_from_a_block_over_the_limit_parks :: proc(t: ^testing.T) {
+	p := make_pool(4, limit = 1)
+	defer destroy(p)
+	testing.expect(t, await_idle(p, 4))
+
+	blocked := Gate{blocks = 1}
+	testing.expect(t, submit(p, gate_job, &blocked))
+	testing.expect(t, await_entered(&blocked, 1))
+	busy: Gate
+	for _ in 0 ..< 3 {
+		testing.expect(t, submit(p, gate_job, &busy))
+	}
+	testing.expect(t, await_entered(&busy, 1))
+
+	// Back from its block with the slot taken, and two jobs queued behind it.
+	testing.expect(t, gate_release(&blocked, 1))
+	start := time.tick_now()
+	for {
+		sync.mutex_lock(&busy.mu)
+		entered := busy.entered
+		sync.mutex_unlock(&busy.mu)
+		if entered + state_of(p).idle == 4 {
+			testing.expect_value(t, entered, 1)
+			testing.expect_value(t, state_of(p), State{active = 1, idle = 3, unclaimed = 2})
+			break
+		}
+		if !testing.expect(t, time.tick_since(start) < WAIT, "the workers never settled") {
+			break
+		}
+		time.sleep(time.Millisecond)
+	}
+	testing.expect(t, gate_release(&busy, 3))
+}
+
 // Off a worker thread the calls are no-ops, so code that runs on a connection's
 // thread as well as on the pool need not know which it is on.
 @(test)

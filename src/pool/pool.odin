@@ -62,7 +62,7 @@ Pool :: struct {
 	idle:      [dynamic]^Worker,
 	// Workers awake and not inside `blocking_begin`, and the most `wake` brings
 	// that to; a `limit` of zero is none. A worker coming back from a block is
-	// not held to it, so `active` can run over until the queue drains.
+	// not held to it, so `active` can run over until that worker's job ends.
 	active:    int,
 	limit:     int,
 	running:   bool,
@@ -79,8 +79,10 @@ make_pool :: proc(workers: int, limit := 0, allocator := context.allocator) -> ^
 	p.allocator = allocator
 	p.queue = make([dynamic]Job, 0, 64, allocator)
 	p.running = true
-	p.limit = max(limit, 0)
 	n := max(workers, 1)
+	// A limit as wide as the pool can never bind, and as zero it spares every
+	// `blocking_begin`/`blocking_end` pair two trips through `mu`.
+	p.limit = limit if 0 < limit && limit < n else 0
 	p.threads = make([]^thread.Thread, n, allocator)
 	p.workers = make([]Worker, n, allocator)
 	p.idle = make([dynamic]^Worker, 0, n, allocator)
@@ -125,6 +127,14 @@ worker_loop :: proc(w: ^Worker) {
 
 		sync.mutex_lock(&p.mu)
 		p.pending -= 1
+		// Back from a block past the limit: the job it already had was not held
+		// to it, the next one is. Otherwise a backlog that never drains keeps
+		// every worker that comes back from an upstream running, and the limit
+		// is gone exactly when the load is highest.
+		if p.running && p.limit > 0 && p.active > p.limit {
+			p.active -= 1
+			park(p, w)
+		}
 	}
 }
 

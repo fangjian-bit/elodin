@@ -591,11 +591,14 @@ Server_Config :: struct {
 	*/
 	upstream_workers:           int,
 	/*
-	Workers that may be on the CPU at once. A worker waiting on an upstream or
-	on another query's answer is not counted, so this bounds the threads
-	competing for the cores rather than the queries in flight: a cache hit is
-	answered by a worker that is already awake rather than by waking one of
-	its own, which is where a wide pool's hit rate would otherwise go.
+	Workers of the shared pool (UDP and DoH over HTTP/2) that may be on the
+	CPU at once. A worker waiting on an upstream or on another query's answer
+	is not counted, so this bounds the pool's threads competing for the cores
+	rather than its queries in flight: a cache hit is answered by a worker that
+	is already awake rather than by waking one of its own, which is where a
+	wide pool's hit rate would otherwise go. TCP, DoT and DoH over HTTP/1.1
+	answer on their connection's own thread and are bounded by
+	`max_connections` instead.
 
 	Zero derives it as twice the usable CPUs, or the whole pool where the CPUs
 	could not be counted.
