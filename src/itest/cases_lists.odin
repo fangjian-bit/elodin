@@ -3,7 +3,6 @@ package itest
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
-import "core:strings"
 import "core:time"
 import "elodin:dns"
 
@@ -108,7 +107,7 @@ blocking:
 	start_case(r, "lists: a name written in UTF-8 is skipped with a warning naming its list")
 	{
 		check(r, log_contains(&srv, "list abp-list: 1 names skipped as not ASCII"), "the UTF-8 entry was dropped without a word:\n%s", read_log(&srv))
-		warned := strings.count(read_log(&srv), "names skipped as not ASCII")
+		warned := log_count(&srv, "names skipped as not ASCII")
 		check(r, warned == 1, "%d lists were warned of, but only abp-list holds a UTF-8 name", warned)
 	}
 	end_case(r)

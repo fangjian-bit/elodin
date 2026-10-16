@@ -137,12 +137,14 @@ blocklists routinely contain syntax that only a full ad blocker understands, and
 dropping the entire file over one such line would be worse than ignoring it.
 */
 parse_list :: proc(block, allow: ^Set, text: string, format: Format) -> (added: int) {
+	// A UTF-8 byte order mark, as a Windows editor saves one, is no part of the
+	// first rule: read as one, it drops that rule and counts it as not ASCII.
+	rest := strings.trim_prefix(text, "\xef\xbb\xbf")
 	fmt_ := format
 	if fmt_ == .Auto {
-		fmt_ = detect_format(text)
+		fmt_ = detect_format(rest)
 	}
 
-	rest := text
 	for len(rest) > 0 {
 		line: string
 		if idx := strings.index_byte(rest, '\n'); idx >= 0 {

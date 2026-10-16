@@ -640,3 +640,20 @@ test_a_rule_whose_name_is_not_ascii_is_counted :: proc(t: ^testing.T) {
 	defer set_destroy(allow)
 	testing.expect_value(t, block.not_ascii, 0)
 }
+
+@(test)
+test_a_byte_order_mark_is_not_part_of_the_first_rule :: proc(t: ^testing.T) {
+	// A list saved by a Windows editor opens with a UTF-8 BOM. Read as part of
+	// the first name, it would drop that rule and count it as not ASCII.
+	cases := []struct {
+		text:   string,
+		format: Format,
+	}{{"\xef\xbb\xbf0.0.0.0 ads.example\n", .Hosts}, {"\xef\xbb\xbfads.example\n", .Domains}, {"\xef\xbb\xbf||ads.example^\n", .Adblock}, {"\xef\xbb\xbf||ads.example^\n", .Auto}}
+	for c in cases {
+		block, allow := parsed(c.text, c.format)
+		testing.expectf(t, block.count == 1, "%v: count = %d", c.format, block.count)
+		testing.expectf(t, block.not_ascii == 0, "%v: not_ascii = %d", c.format, block.not_ascii)
+		set_destroy(block)
+		set_destroy(allow)
+	}
+}
