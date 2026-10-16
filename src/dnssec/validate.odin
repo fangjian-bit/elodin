@@ -544,6 +544,9 @@ walk_reason :: proc(budget: ^Budget) -> string {
 
 // Give up on a step, saying why. The words reach the client as an extended
 // error, so they are the ones an operator would want to read first.
+// The reason of a verdict that a step of the chain of trust produced.
+BROKEN_CHAIN :: "broken chain of trust"
+
 @(private)
 broke_at :: proc(budget: ^Budget, zone, why: string, allocator: mem.Allocator) {
 	if budget.broken != "" {
@@ -884,9 +887,10 @@ Result :: struct {
 	reason:    string,
 	/*
 	Where the walk broke and why, for the log and never for the client: the zone
-	and the step, in words. Set on `Bogus` and `Indeterminate` verdicts that a
-	chain-of-trust step produced, and empty on every other verdict, including
-	ones that failed for a reason local to the message.
+	and the step, in words. Set only on a `Bogus` verdict whose reason is
+	`BROKEN_CHAIN`, which is the one a chain-of-trust step produced; empty on
+	every other, including ones that failed for a reason local to the message or
+	that a step's `Bogus` was turned into something else for.
 	*/
 	detail:    string,
 	/*
@@ -1039,9 +1043,11 @@ validate :: proc(
 ) -> Result {
 	broken: string
 	result := validate_walk(v, qname, qtype, wire, now, allocator, shared_worker, spent, deadline, &broken)
-	// Only a verdict that failed has a step to name: a `Secure` one that had
-	// to look past a broken step elsewhere has not failed at it.
-	if result.status == .Bogus || result.status == .Indeterminate {
+	// Only the verdict a step produced has one to name. `broken` is the last
+	// walk's, cleared as each starts, so it is that walk's step - but a verdict
+	// that failed for another reason, or that a step's `Bogus` was turned into
+	// `Indeterminate` for, must not borrow it.
+	if result.status == .Bogus && result.reason == BROKEN_CHAIN {
 		result.detail = broken
 	}
 	return result
@@ -2274,7 +2280,7 @@ validate_denial :: proc(
 	case .Insecure:
 		return {status = .Insecure, reason = "unsigned zone"}
 	case .Bogus:
-		return {status = .Bogus, reason = "broken chain of trust"}
+		return {status = .Bogus, reason = BROKEN_CHAIN}
 	case .Indeterminate:
 		return {status = .Indeterminate, reason = walk_reason(budget)}
 	}
@@ -2658,7 +2664,7 @@ validate_rrset :: proc(
 	case .Indeterminate:
 		return .Indeterminate, "", walk_reason(budget), "", {}
 	case .Bogus:
-		return .Bogus, "", "broken chain of trust", "", {}
+		return .Bogus, "", BROKEN_CHAIN, "", {}
 	case .Secure:
 	}
 
@@ -3413,6 +3419,7 @@ zone_trust :: proc(
 	// walk's own answer and not one left behind by an earlier proof.
 	budget.walk_stopped = ""
 	budget.walk_past_ceiling = false
+	budget.broken = ""
 	/*
 	The walk asks for a slot at its first upstream lookup and gives it back
 	here. One that never needs a lookup never takes one, so a flood holding

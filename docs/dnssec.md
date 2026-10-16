@@ -56,7 +56,7 @@ A client that did not set DO gets the DNSSEC records stripped.
 The first refusal of each verdict is logged at `warn` with the verdict, the
 reason, the zone and step of the chain that broke, and the upstream the answer
 came from. After that one refusal a minute is logged at `warn` too, with
-`held=<n>` counting the ones it passed over; the rest are `debug`. Every
+`held=<n>` counting the others in that minute; the rest are `debug`. Every
 refusal's query line carries `outcome=failed detail=dnssec:<upstream>`, or
 `detail=dnssec:cache` when answered from the cache:
 

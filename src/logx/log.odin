@@ -170,7 +170,7 @@ eventf :: proc(level: Level, msg: string, format: string, args: ..any) {
 }
 
 /*
-Lets one event in a window through at `warn`, and counts the ones it held back.
+Lets one event in a window through at `warn`, and counts the others in it.
 
 For a condition a peer can provoke as often as it likes, where a `warn` per
 occurrence would let it write to this server's disk. A gate that opens once per
@@ -208,10 +208,16 @@ gate_pass_now :: proc(g: ^Gate) -> (loud: bool, held: u64) {
 	return gate_pass(g, time.tick_now()._nsec)
 }
 
-// For a condition that has ended, so that its next occurrence is a new first.
-gate_reset :: proc(g: ^Gate) {
-	sync.atomic_store(&g.next, 0)
-	sync.atomic_store(&g.held, 0)
+// Whether a gate is inside its window, without spending it: for a caller that
+// leaves the line to another one on the same event and only needs to know that
+// one has just been said.
+gate_shut :: proc(g: ^Gate, now: i64) -> bool {
+	next := sync.atomic_load(&g.next)
+	return next != 0 && now < next
+}
+
+gate_shut_now :: proc(g: ^Gate) -> bool {
+	return gate_shut(g, time.tick_now()._nsec)
 }
 
 /*

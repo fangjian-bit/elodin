@@ -170,8 +170,11 @@ test_a_gate_opens_once_a_window_and_counts_what_it_held :: proc(t: ^testing.T) {
 	loud, held = gate_pass(&g, start + window + 1)
 	testing.expect(t, !loud, "the window did not restart when the gate opened")
 
-	gate_reset(&g)
-	loud, held = gate_pass(&g, start + window + 2)
-	testing.expect(t, loud, "a reset gate did not open for the next event")
-	testing.expect_value(t, held, 0)
+	// Looking is not spending: it neither opens the gate nor counts an event.
+	testing.expect(t, gate_shut(&g, start + window + 2), "a gate inside its window was not shut")
+	testing.expect(t, !gate_shut(&g, start + 2 * window + 1), "a gate past its window was shut")
+	testing.expect(t, !gate_shut(&Gate{}, start), "a gate nothing has passed was shut")
+	loud, held = gate_pass(&g, start + 2 * window + 1)
+	testing.expect(t, loud, "looking at a gate spent its window")
+	testing.expect_value(t, held, 1)
 }

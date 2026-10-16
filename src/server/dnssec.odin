@@ -336,7 +336,7 @@ validator_query :: proc(
 	*/
 	response, _, uerr := upstream.resolve_answerable(s.group, asked, allocator, deadline)
 	if uerr != .None {
-		report_chain_fetch_failed(type, name, fmt.tprintf("%v", uerr))
+		report_chain_fetch_failed(type, name, uerr)
 		return nil, false
 	}
 	/*
@@ -346,7 +346,7 @@ validator_query :: proc(
 	walk would call the chain forged - Bogus - rather than unavailable.
 	*/
 	if dns.peek_referral(response) {
-		report_chain_fetch_failed(type, name, "the group answered with a referral")
+		report_chain_fetch_failed(type, name, .None)
 		return nil, false
 	}
 	return response, true
@@ -361,20 +361,27 @@ follows names a step ("chain of trust unavailable") and not the upstream error
 behind it, so at `debug` only, which this was, the client's SERVFAIL had no
 explanation anywhere once the incident was over.
 
-Once a window, with the number held back, because a name the group cannot reach
-is the client's to ask for as often as it likes.
+Once a window per kind of error, with the number held back, because a name the
+group cannot reach is the client's to ask for as often as it likes - and one
+kind of failure must not take the window of another. `.None` is the referral,
+which fetched nothing without being an error.
 */
 @(private)
-chain_fetch_failed_reported: logx.Gate
+chain_fetch_failed_reported: [upstream.Error]logx.Gate
 
 @(private)
-report_chain_fetch_failed :: proc(type: dns.Type, name: string, why: string) {
-	loud, held := logx.gate_pass_now(&chain_fetch_failed_reported)
-	if loud {
-		logx.warnf_held(held, "dnssec: %s %s could not be fetched: %s", dns.type_name(type), name, why)
-		return
+report_chain_fetch_failed :: proc(type: dns.Type, name: string, uerr: upstream.Error) {
+	loud, held := logx.gate_pass_now(&chain_fetch_failed_reported[uerr])
+	switch {
+	case loud && uerr == .None:
+		logx.warnf_held(held, "dnssec: %s %s could not be fetched: the group answered with a referral", dns.type_name(type), name)
+	case loud:
+		logx.warnf_held(held, "dnssec: %s %s could not be fetched: %v", dns.type_name(type), name, uerr)
+	case uerr == .None:
+		logx.debugf("dnssec: %s %s could not be fetched: the group answered with a referral", dns.type_name(type), name)
+	case:
+		logx.debugf("dnssec: %s %s could not be fetched: %v", dns.type_name(type), name, uerr)
 	}
-	logx.debugf("dnssec: %s %s could not be fetched: %s", dns.type_name(type), name, why)
 }
 
 /*
@@ -426,7 +433,7 @@ survived the prune above. One that did not has the DNSSEC records taken back
 out, because RFC 4035 says not to send them unasked and because they would
 otherwise push ordinary answers past the point where they need a retry over TCP.
 */
-// Set once the first answer has lost its AD bit to a failed rebuild; see below.
+// Opens once a window for an answer that lost its AD bit to a failed rebuild; see below.
 @(private)
 prune_failure_reported: logx.Gate
 
@@ -743,9 +750,10 @@ so the line says so and names the setting - and leaves the upstream out of
 it, since blaming a server that answered perfectly well for a lookup this
 one declined to make would send an operator to the wrong place entirely.
 
-Still once per process, unlike the two above: a shed is provoked by a flood and
-counted as `elodin_dnssec_queries_shed_total`, which a flood cannot make an
-operator miss, so a line per window would only be the flood's to write.
+Still once per process, unlike the two above, and deliberately: a shed is
+provoked by a flood and the figure for it, `elodin_dnssec_queries_shed_total`,
+is one a flood cannot make an operator miss - unlike a Bogus verdict, whose
+cause only the log holds. A line per window would only be the flood's to write.
 */
 @(private)
 report_shed_walk :: proc(q: dns.Question, client: string) {

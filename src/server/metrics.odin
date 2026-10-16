@@ -565,7 +565,7 @@ render_metrics :: proc(s: ^Server, l: ^Listeners, allocator := context.allocator
 		&b,
 		"elodin_dnssec_answers_total",
 		.Counter,
-		"Answers by what validation made of them. `bogus` counts queries refused for failing to validate rather than validations run: a verdict is remembered for a minute (see cache.BOGUS_TTL), and every query refused from that memory is counted here, which is what keeps the figure honest now that only the first refusal since start is logged.",
+		"Answers by what validation made of them. `bogus` counts queries refused for failing to validate rather than validations run: a verdict is remembered for a minute (see cache.BOGUS_TTL), and every query refused from that memory is counted here, which is what keeps the figure honest now that only one refusal a minute is logged.",
 	)
 	metrics.sample(&b, "elodin_dnssec_answers_total", st.secure, metrics.Label{"result", "secure"})
 	metrics.sample(&b, "elodin_dnssec_answers_total", st.bogus, metrics.Label{"result", "bogus"})
@@ -876,7 +876,7 @@ render_upstream_metrics :: proc(b: ^strings.Builder, s: ^Server) {
 
 	`elodin_upstream_failures_total` says an upstream is failing and never
 	which way, and the log cannot fill that gap: each kind is warned about
-	once per process, so a window of it shows whichever kinds were new in that
+	once a minute, so a window of it shows whichever kinds were new in that
 	window and nothing about how often any of them happen. An operator looking
 	at a failure rate needs the split to know what to do about it - a
 	`timeout` against a server is a different problem from a `tls_failed`, and

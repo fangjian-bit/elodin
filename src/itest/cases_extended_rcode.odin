@@ -251,8 +251,8 @@ run_extended_rcode_cases :: proc(r: ^Runner) {
 		defer stop_server(&srv)
 
 		/*
-		The warning naming the upstream is said once per process and demoted to
-		debug after it, because the two bytes behind it are ones an on-path
+		The warning naming the upstream is said once a window and demoted to
+		debug between, because the two bytes behind it are ones an on-path
 		attacker can write into any reply it can reach. That is only sound
 		while something else goes on counting - the same argument
 		`conn_refused` is written on - so this is the figure a deployment that

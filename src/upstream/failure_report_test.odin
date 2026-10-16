@@ -33,3 +33,38 @@ test_a_failure_kind_is_reported_again_after_its_window :: proc(t: ^testing.T) {
 	testing.expect(t, loud, "a timeout was not reported again after its window")
 	testing.expect_value(t, held, 1)
 }
+
+/*
+A handshake failure is one event and says so once.
+
+The transport writes the line with the reason and `record_failure` then asks
+about the same event. Asking the same gate twice counted it twice, and at a
+window's edge handed the warning to the generic line, so the reason went to
+debug. The handshake has a gate of its own, and the generic `TLS_Failed` line
+waits for it.
+*/
+@(test)
+test_a_handshake_failure_is_said_once_with_its_reason :: proc(t: ^testing.T) {
+	u: Upstream
+	now := i64(1_000_000)
+
+	loud, _ := logx.gate_pass(&u.handshake, now)
+	testing.expect(t, loud, "the handshake line was not due")
+
+	holdback: u64
+	loud, holdback = note_failure_kind_at(&u, .TLS_Failed, now + 1)
+	testing.expect(t, !loud, "the generic line repeated a handshake failure that has its reason")
+	testing.expect_value(t, holdback, 0)
+
+	// The kind's own count is untouched, so it does not drift from the events.
+	testing.expect_value(t, u.reported[.TLS_Failed].held, 0)
+
+	// A failure of another kind is not a handshake failure.
+	loud, _ = note_failure_kind_at(&u, .Timeout, now + 1)
+	testing.expect(t, loud, "a timeout was held back by a handshake window")
+
+	// And once the handshake window has passed the generic line speaks again,
+	// for a TLS_Failed that did not come through the handshake path.
+	loud, _ = note_failure_kind_at(&u, .TLS_Failed, now + i64(logx.GATE_WINDOW))
+	testing.expect(t, loud, "the generic line stayed silent after the handshake window")
+}

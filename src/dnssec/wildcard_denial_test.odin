@@ -746,3 +746,14 @@ test_a_secure_verdict_carries_no_detail :: proc(t: ^testing.T) {
 	testing.expect_value(t, result.detail, "")
 	free_all(context.temp_allocator)
 }
+
+// A `Bogus` that is about the message and not a step of the chain has no step to
+// name, and must not carry one left over from elsewhere in the question.
+@(test)
+test_a_bogus_that_is_not_a_chain_step_carries_no_detail :: proc(t: ^testing.T) {
+	result := wc_validate("wc_relocated_nxdomain", "www.wctest.", .A)
+	testing.expect_value(t, result.status, Status.Bogus)
+	testing.expect_value(t, result.reason, WC_UNPROVEN)
+	testing.expect_value(t, result.detail, "")
+	free_all(context.temp_allocator)
+}

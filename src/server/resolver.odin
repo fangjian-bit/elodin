@@ -2386,10 +2386,11 @@ resolve_query :: proc(
 	} else if uerr != .None {
 		/*
 		The only line that says why a query answered `outcome=failed
-		detail=upstream`, which names no cause of its own. Once a window, with
-		the number held back: which name fails is the client's to choose.
+		detail=upstream`, which names no cause of its own. Once a window per
+		kind of error, with the number held back: which name fails is the
+		client's to choose.
 		*/
-		if loud, held := logx.gate_pass_now(&query_failed_reported); loud {
+		if loud, held := logx.gate_pass_now(&query_failed_reported[uerr]); loud {
 			logx.warnf_held(held, "query %s %s from %s failed: %v", dns.type_name(q.type), q.name, client, uerr)
 		} else {
 			logx.debugf("query %s %s from %s failed: %v", dns.type_name(q.type), q.name, client, uerr)
@@ -3174,9 +3175,10 @@ with the rcode named, the way the rebinding guard and the validator explain
 their own refusals. A client that queried without EDNS has nowhere to put one
 and gets the bare SERVFAIL.
 */
-// Opens once a window for a query that got no answer from its upstreams.
+// Opens once a window per kind of error for a query that got no answer from its
+// upstreams, so that one kind of failure does not take the window of another.
 @(private)
-query_failed_reported: logx.Gate
+query_failed_reported: [upstream.Error]logx.Gate
 
 // Opens once a window for a reply refused for an unreadable rcode; see below.
 @(private)
