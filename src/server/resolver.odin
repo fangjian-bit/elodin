@@ -2395,8 +2395,16 @@ resolve_query :: proc(
 		kind of error, with the number held back: which name fails is the
 		client's to choose. The client only on the `debug` line; see
 		`logx.gated_warnf_from`.
+
+		Not for a detached refresh, which no client is waiting on: taking the
+		window there would leave a client's own failure of the same kind as a
+		`held=` count. The upstream's own line for the kind says it failed.
 		*/
-		logx.gated_warnf_from(&query_failed_reported[uerr], client, "query %s %s failed: %v", dns.type_name(q.type), dns.name_trim_root(q.name), uerr)
+		if unanswered != nil {
+			logx.debugf("refresh of %s %s failed: %v", dns.type_name(q.type), dns.name_trim_root(q.name), uerr)
+		} else {
+			logx.gated_warnf_from(&query_failed_reported[uerr], client, "query %s %s failed: %v", dns.type_name(q.type), dns.name_trim_root(q.name), uerr)
+		}
 	}
 	// Not by setting `uerr`: every value it has names a transport failure, and
 	// `.Not_Resolved` is an upstream hostname that would not resolve.
