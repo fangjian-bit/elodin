@@ -236,6 +236,7 @@ flight_follow :: proc(
 	landed: bool,
 	same: bool,
 ) {
+	pool.blocking_begin()
 	sync.mutex_lock(&s.inflight.mu)
 	start := time.tick_now()
 	for !f.landed {
@@ -250,6 +251,7 @@ flight_follow :: proc(
 		result = f.landing
 	}
 	sync.mutex_unlock(&s.inflight.mu)
+	pool.blocking_end()
 
 	// Copied outside the lock, which every miss on the server takes: the bytes
 	// cannot change while this follower is still counted, since the leader waits

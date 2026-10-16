@@ -39,7 +39,8 @@ harness owns all of them rather than inheriting them from the machine:
   validation is off (see below), rate limiting is off (the generator is one
   address asking as fast as it can, which is what the limiter exists to stop),
   `server.workers` / `server.upstream_workers` are pinned at 128 / 64 rather than
-  derived from the machine, and `upstream.attempts` is 1 so a failure reads as
+  derived from the machine (`server.running_workers` is left to derive, except
+  in `sizing`, which varies it), and `upstream.attempts` is 1 so a failure reads as
   one rather than as a slower success. `cmd/bench/server.go` is where that
   template lives.
 - **Its own certificates.** ECDSA P-256 and RSA-2048, generated per run, so the
@@ -91,6 +92,7 @@ That control is how the query-logging result was confirmed rather than assumed.
 | `memory` | idle, worker arenas, per blocklist rule, per cache entry |
 | `shedding` | behaviour past capacity, bounded against unbounded queueing |
 | `logging` | what `log.queries` costs and what it writes |
+| `sizing` | misses and hits at 16 and 128 workers, with and without the running limit, the server pinned to two cores (needs four) |
 
 Rows that depend on the server doing a particular thing assert it: the blocked
 row fails unless the answers are NXDOMAIN, so a rule that stopped matching shows

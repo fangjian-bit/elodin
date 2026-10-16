@@ -32,19 +32,19 @@ StateDirectory=elodin
 CacheDirectory=elodin
 ConfigurationDirectory=elodin
 
-# With server.workers and server.upstream_workers left unset, elodin sizes its
-# thread pools from what this unit may use rather than from what the machine
-# has, so a limit named here is also a limit on the threads it raises. Neither
-# is set by default; both are worth having on a machine elodin shares.
+# With the server worker counts left unset, elodin sizes its thread pools from
+# what this unit may use rather than from what the machine has: MemoryMax=
+# lowers server.workers, CPUQuota= lowers server.running_workers. Neither is
+# set by default; both are worth having on a machine elodin shares.
 # CPUQuota=50%
 # MemoryMax=256M
 
 # Every connection elodin holds is a descriptor, and systemd leaves the soft
 # limit at 1024 otherwise. The shipped server.max_connections (512) fits under
-# it, but not by as much as the table alone suggests: the worker pools, the
-# upstream pools and the readers want a couple of hundred more between them, so
-# a 1024 limit is short somewhere above 700 rather than above 1000, and lower
-# again on a box with cores enough to derive more workers. Past the limit the
+# it, but not by as much as the table alone suggests: the worker pools (192
+# threads where memory allows the derived 128 handlers), the upstream pools and
+# the readers want a couple of hundred more between them, so a 1024 limit is
+# short somewhere above 750 rather than above 1000. Past the limit the
 # accept loop cannot take a connection at all: it waits between attempts,
 # escalating to a second, warns once naming this setting, and counts each wait
 # as accept_backoff=. 8192 leaves room to raise max_connections into the thousands without editing the unit;

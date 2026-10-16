@@ -177,19 +177,43 @@ sizing_origin :: proc(s: config.Server_Config) -> string {
 	switch {
 	case s.sizing.derived_workers:
 		m := s.sizing.machine
+		// `workers` reads only the memory; the CPUs are named when they
+		// decided `running_workers`, and not for a limit the file set.
+		// A derived limit the CPUs could not set is no limit, which is said.
+		running := s.sizing.derived_running_workers
+		if !running {
+			m.cpus = 0
+		}
 		switch {
 		case m.cpus > 0 && m.memory > 0:
 			return fmt.tprintf("derived from %s and %#.1M", usable_cpus(m.cpus), m.memory)
 		case m.cpus > 0:
 			return fmt.tprintf("derived from %s", usable_cpus(m.cpus))
+		case m.memory > 0 && running:
+			return fmt.tprintf(
+				"derived from %#.1M of memory; running_workers is the whole pool, this machine's CPUs could not be counted",
+				m.memory,
+			)
 		case m.memory > 0:
 			return fmt.tprintf("derived from %#.1M of memory", m.memory)
-		case:
+		case running:
 			return "derived from defaults; this machine could not be measured"
+		case:
+			return "derived from defaults; this machine's memory could not be measured"
 		}
-	// Nothing was measured: half of a number the file named is still that
-	// number's doing, and naming the machine here would credit it with a
-	// choice an operator made.
+	/*
+	The running limit is the machine's to say however the pool was sized, so it
+	is named on its own; half of a number the file named is still that number's
+	doing, and naming the machine for it would credit it with a choice an
+	operator made.
+	*/
+	case s.sizing.derived_running_workers:
+		running :=
+			fmt.tprintf("running_workers derived from %s", usable_cpus(s.sizing.machine.cpus)) if s.sizing.machine.cpus > 0 else "running_workers is the whole pool; this machine's CPUs could not be counted"
+		if s.sizing.derived_upstream_workers {
+			return fmt.tprintf("%s, upstream_workers from the configured workers", running)
+		}
+		return running
 	case s.sizing.derived_upstream_workers:
 		return "upstream_workers derived from the configured workers"
 	}
@@ -231,8 +255,9 @@ sizing_line :: proc(s: config.Server_Config, chain_walks := 0, connection_walks 
 	walks :=
 		fmt.tprintf(" chain_walks=%d connection_walks=%d", chain_walks, connection_walks) if chain_walks > 0 else ""
 	return fmt.tprintf(
-		"workers=%d upstream_workers=%d max_pending=%d%s (%s)",
+		"workers=%d running_workers=%d upstream_workers=%d max_pending=%d%s (%s)",
 		s.workers,
+		s.running_workers,
 		s.upstream_workers,
 		s.max_pending,
 		walks,
@@ -569,8 +594,9 @@ main :: proc() {
 	logx.eventf(
 		.Info,
 		"sizing",
-		"workers=%d upstream_workers=%d max_pending=%d origin=%s",
+		"workers=%d running_workers=%d upstream_workers=%d max_pending=%d origin=%s",
 		cfg.server.workers,
+		cfg.server.running_workers,
 		cfg.server.upstream_workers,
 		cfg.server.max_pending,
 		logx.quote(sizing_origin(cfg.server)),
@@ -673,7 +699,7 @@ mixed_validation_warning :: proc(cfg: ^config.Config) -> (text: string, say: boo
 }
 
 run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
-	handler_pool := pool.make_pool(cfg.server.workers)
+	handler_pool := pool.make_pool(cfg.server.workers, cfg.server.running_workers)
 	race_pool := pool.make_pool(cfg.server.upstream_workers)
 
 	group, gerr := upstream.make_group(cfg.upstream, race_pool, cookies = cfg.cookies.upstream)

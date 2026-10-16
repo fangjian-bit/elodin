@@ -51,14 +51,15 @@ server:
   # Left to derive, and in a container that is the point rather than a default
   # nobody changed. "Usable" is what this process may have: the affinity mask
   # and the cgroup limits, so `resources.limits` sizes the pool and
-  # `--check` reports what it settled on. The rule is 4 per usable CPU, floored
-  # at 16 and capped at 128, lowered whenever the threads that implies would
-  # take more than a thirty-second of usable memory - so a pod limited to one
-  # CPU and 512 MiB derives 16 workers, the same pod at 256 MiB derives 10, and
-  # at 128 MiB it derives 5.
+  # `--check` reports what it settled on. The rule is 128 workers, lowered
+  # whenever the threads that implies would take more than a thirty-second of
+  # usable memory - so a pod limited to 512 MiB derives 21 workers, at 256 MiB
+  # 10, and at 128 MiB 5 - and twice the usable CPUs of them running at once,
+  # which is 2 for a pod limited to one CPU.
   #
   # If you pin a number here, pin the limits too: a 128-worker pool in a pod
-  # limited to 256 MiB is about 34 MB of scratch arenas out of that budget.
+  # limited to 256 MiB is about 34 MB of scratch arenas out of that budget,
+  # once a burst has reached every worker.
   workers: 0
   upstream_workers: 0
 

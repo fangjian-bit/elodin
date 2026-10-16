@@ -258,6 +258,7 @@ load_server :: proc(l: ^Loader, cfg: ^Config) {
 		"server",
 		"workers",
 		"upstream_workers",
+		"running_workers",
 		"max_connections",
 		"max_connections_per_prefix",
 		"max_pending",
@@ -270,6 +271,7 @@ load_server :: proc(l: ^Loader, cfg: ^Config) {
 	)
 	opt_int(l, n, "workers", &cfg.server.workers, "server")
 	opt_int(l, n, "upstream_workers", &cfg.server.upstream_workers, "server")
+	opt_int(l, n, "running_workers", &cfg.server.running_workers, "server")
 	opt_int(l, n, "max_connections", &cfg.server.max_connections, "server")
 	opt_int(l, n, "max_connections_per_prefix", &cfg.server.max_connections_per_prefix, "server")
 	opt_int(l, n, "max_pending", &cfg.server.max_pending, "server")
@@ -2691,6 +2693,9 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 	if cfg.server.upstream_workers < 0 {
 		errorf(l, "server.upstream_workers must not be negative")
 	}
+	if cfg.server.running_workers < 0 {
+		errorf(l, "server.running_workers must not be negative")
+	}
 	/*
 	Sized before `max_pending` is derived, since that is a multiple of the
 	worker count and would otherwise be derived from a zero.
@@ -2699,10 +2704,11 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 	it agree by construction, and so an operator can see on the machine itself
 	what the file leaves unsaid.
 
-	The machine is measured only when `workers` is the number that needs it. A
-	racer count derived from a configured `workers` owes nothing to the CPUs or
-	the RAM, and reporting a machine it never consulted would tell an operator
-	their own number came from the hardware.
+	The machine is measured only when a number left unset needs it: `workers`,
+	`running_workers` or the UDP readers. A racer count derived from a
+	configured `workers` owes nothing to the CPUs or the RAM, and reporting a
+	machine it never consulted would tell an operator their own number came
+	from the hardware.
 	*/
 	if cfg.server.workers == 0 {
 		cfg.server.sizing.machine = probe_machine()
@@ -2712,6 +2718,15 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 	if cfg.server.upstream_workers == 0 {
 		cfg.server.upstream_workers = derive_upstream_workers(cfg.server.workers)
 		cfg.server.sizing.derived_upstream_workers = true
+	}
+	// From the CPUs whether `workers` was derived or not: how many threads the
+	// cores can run is the machine's to say however wide the pool is.
+	if cfg.server.running_workers == 0 {
+		if !cfg.server.sizing.derived_workers {
+			cfg.server.sizing.machine = probe_machine()
+		}
+		cfg.server.running_workers = derive_running_workers(cfg.server.sizing.machine, cfg.server.workers)
+		cfg.server.sizing.derived_running_workers = true
 	}
 	/*
 	And the chain-walk bound, here rather than at start-up for the reason above:
@@ -2771,7 +2786,7 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 		)
 	}
 	if cfg.listeners.udp.enabled && cfg.listeners.udp.readers == 0 {
-		if !cfg.server.sizing.derived_workers {
+		if !cfg.server.sizing.derived_workers && !cfg.server.sizing.derived_running_workers {
 			cfg.server.sizing.machine = probe_machine()
 		}
 		cfg.listeners.udp.readers = derive_udp_readers(cfg.server.sizing.machine)

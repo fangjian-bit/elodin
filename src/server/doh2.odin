@@ -361,7 +361,12 @@ h2_answer :: proc(data: rawptr) {
 	if !ok {
 		return
 	}
+	// A body waits on the client's flow-control credit, up to the write
+	// timeout, and a client that stops reading is one anybody can open many
+	// of: that wait must not hold one of the pool's running slots.
+	pool.blocking_begin()
 	h2.respond(hc, req.stream_id, resp)
+	pool.blocking_end()
 }
 
 /*

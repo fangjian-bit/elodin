@@ -45,14 +45,14 @@ server:
   # ask for".
   allow_from: []
 
-  # Left to derive: 4 per usable CPU, capped at 128, which a box with 32 or
-  # more cores and a few GB of memory reaches - about 6,400 cache misses a
-  # second against a 20 ms upstream, with cache hits costing a fraction of
-  # that. Below that the core count is what sets it. A worker is held for a
-  # whole upstream round trip, so if you need more than the ceiling, the shape
-  # is `target_qps * upstream_rtt`: set a number here and `--check` will
-  # report it. Budget ~0.3 MB resident per worker, paid from its first query
-  # onward.
+  # Left to derive: 128, which a box with 3 GiB or more of memory reaches -
+  # about 6,400 cache misses a second against a 20 ms upstream, whatever the
+  # core count, with twice the usable CPUs of them running at once so cache
+  # hits keep the rate of a small pool. A 1 GiB VPS derives 42. A worker is
+  # held for a whole upstream round trip, so if you need more than the
+  # ceiling, the shape is `target_qps * upstream_rtt`: set a number here and
+  # `--check` will report it. Budget ~0.3 MB resident per worker a burst
+  # reaches, paid from its first query onward.
   workers: 0
 
   # The table, and one client's share of it.

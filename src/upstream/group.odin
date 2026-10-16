@@ -1036,7 +1036,10 @@ resolve_race :: proc(
 		return resolve_sequential(g, query, 0, budget, allocator, unreachable)
 	}
 
-	if !sync.sema_wait_with_timeout(&st.sema, g.timeout) {
+	pool.blocking_begin()
+	answered := sync.sema_wait_with_timeout(&st.sema, g.timeout)
+	pool.blocking_end()
+	if !answered {
 		// Nobody answered in time. Workers still running will see `done` and
 		// throw their answers away rather than writing into a dead frame.
 		sync.mutex_lock(&st.mu)
