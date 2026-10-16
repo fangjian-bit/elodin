@@ -222,6 +222,9 @@ func (h *harness) runAll(filter string) (string, error) {
 	return sb.String(), nil
 }
 
+// listRules is the synthetic list the workloads and memory tables load.
+const listRules = 250000
+
 // workloads is the first table of a run: what the server costs when
 // the answer comes from the cache, from a rule, and from the upstream.
 func (h *harness) workloads() (section, error) {
@@ -229,7 +232,9 @@ func (h *harness) workloads() (section, error) {
 	sb.WriteString("| workload | throughput | p50 | p99 | peak RSS |\n|---|---|---|---|---|\n")
 
 	// Cache hits and misses share one server: the cache is what separates them.
-	s, err := h.start(serverOpts{name: "workloads", cache: true, blockRules: 1})
+	// Every query is matched against the lists first, so they hold the memory
+	// table's rules: a list of one fits in L1 and hides what a lookup costs.
+	s, err := h.start(serverOpts{name: "workloads", cache: true, blockRules: listRules})
 	if err != nil {
 		return section{}, err
 	}
@@ -460,7 +465,7 @@ func (h *harness) memory() (section, error) {
 	fmt.Fprintf(&sb, "| worker scratch arenas | %.2f MB per worker (%s at 128) |\n",
 		perWorker/(1<<20), mib(int64(perWorker*128)))
 
-	const rules = 250000
+	const rules = listRules
 	withList, err := h.idleRSS(serverOpts{name: "mem-lists", cache: true, blockRules: rules})
 	if err != nil {
 		return section{}, err

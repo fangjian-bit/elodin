@@ -9,14 +9,14 @@ import "core:unicode"
 /*
 Domain matching for sink lists.
 
-Every rule is stored once, keyed by the domain it names, with flags saying what
-the rule covers:
+Every rule is stored once, keyed by the domain it names (see table.odin), with
+flags saying what the rule covers:
 
   - Apex        the domain itself           (hosts entries, "example.com")
   - Subdomains  everything below it         ("*.example.com")
 
 An adblock rule such as `||example.com^` sets both. A lookup therefore costs one
-map probe for the apex plus one probe per parent label, which is bounded by the
+table probe for the apex plus one probe per parent label, which is bounded by the
 domain's depth rather than by the size of the list.
 */
 
@@ -39,14 +39,14 @@ Decision :: enum u8 {
 MAX_NORMALISED :: 1024
 
 Set :: struct {
-	rules:     map[string]Rule_Flags,
+	names:     Table,
 	// What `$badfilter` rules have taken back, kept so a rule arriving later -
 	// further down the list, or from the next one - is cancelled too.
 	cancelled: map[string]Rule_Flags,
 	// How many `$badfilter` rules were taken, so one that adds nothing can be
 	// told from one that was skipped.
 	cancels:   int,
-	// `/re/` rules, matched after the hash maps; `engine_match` says when, and
+	// `/re/` rules, matched after the name tables; `engine_match` says when, and
 	// regex.odin what bounds them.
 	regexes:       [dynamic]Regex_Rule,
 	// The patterns `regexes` holds, so a line is checked against them in one
@@ -105,7 +105,7 @@ set_make :: proc() -> ^Set {
 		panic("filter: cannot create arena")
 	}
 	s.allocator = virtual.arena_allocator(&s.arena)
-	s.rules = make(map[string]Rule_Flags, 1024, s.allocator)
+	table_init(&s.names, context.allocator)
 	s.cancelled = make(map[string]Rule_Flags, s.allocator)
 	s.regexes = make([dynamic]Regex_Rule, s.allocator)
 	s.regex_held = make(map[string]struct{}, s.allocator)
@@ -116,6 +116,7 @@ set_destroy :: proc(s: ^Set) {
 	if s == nil {
 		return
 	}
+	table_destroy(&s.names)
 	virtual.arena_destroy(&s.regex_scratch)
 	virtual.arena_destroy(&s.arena)
 	free(s)
@@ -126,7 +127,8 @@ Add a rule for `domain`, reporting whether the set now covers it.
 
 `domain` is taken as written by the list author; it is lowercased and stripped
 of any trailing dot before being stored. A name no query can spell is refused,
-and so is a rule a `$badfilter` has wholly cancelled.
+and so is a rule a `$badfilter` has wholly cancelled, and a name past the 4 GiB
+of names a set holds (`table_insert`).
 */
 set_add :: proc(s: ^Set, domain: string, flags: Rule_Flags) -> (stored: bool) {
 	buf: [MAX_NORMALISED]u8
@@ -139,11 +141,16 @@ set_add :: proc(s: ^Set, domain: string, flags: Rule_Flags) -> (stored: bool) {
 	if add == {} {
 		return false
 	}
-	if existing, found := s.rules[key]; found {
-		s.rules[key] = existing + add
+	if existing := table_entry(&s.names, key); existing != nil {
+		if existing^ == {} {
+			s.count += 1
+		}
+		existing^ += add
 		return true
 	}
-	s.rules[strings.clone(key, s.allocator)] = add
+	if !table_insert(&s.names, key, add) {
+		return false
+	}
 	s.count += 1
 	return true
 }
@@ -171,21 +178,19 @@ set_cancel :: proc(s: ^Set, domain: string, flags: Rule_Flags) {
 	} else {
 		s.cancelled[strings.clone(key, s.allocator)] = flags
 	}
-	if existing, found := s.rules[key]; found {
-		if rest := existing - flags; rest != {} {
-			s.rules[key] = rest
-		} else {
-			delete_key(&s.rules, key)
+	if existing := table_entry(&s.names, key); existing != nil && existing^ != {} {
+		existing^ -= flags
+		if existing^ == {} {
 			s.count -= 1
 		}
 	}
 }
 
 set_lookup :: proc(s: ^Set, normalised: string) -> bool {
-	if s == nil || len(s.rules) == 0 {
+	if s == nil || s.names.used == 0 {
 		return false
 	}
-	if flags, found := s.rules[normalised]; found && .Apex in flags {
+	if flags := table_entry(&s.names, normalised); flags != nil && .Apex in flags^ {
 		return true
 	}
 	// Walk up the parents; only Subdomains rules apply to them.
@@ -199,7 +204,7 @@ set_lookup :: proc(s: ^Set, normalised: string) -> bool {
 		if rest == "" {
 			return false
 		}
-		if flags, found := s.rules[rest]; found && .Subdomains in flags {
+		if flags := table_entry(&s.names, rest); flags != nil && .Subdomains in flags^ {
 			return true
 		}
 	}
@@ -221,8 +226,18 @@ engine_destroy :: proc(e: ^Engine) {
 }
 
 // Swap in freshly built rule sets, returning the old ones for the caller to
-// destroy once no in-flight query can still be reading them.
+// destroy once no in-flight query can still be reading them. Neither may be a
+// set already swapped in: each is trimmed before the lock, which would move
+// slots under a query reading them.
 engine_swap :: proc(e: ^Engine, block, allow: ^Set) -> (old_block, old_allow: ^Set) {
+	// Before the lock: a set is done growing once it is swapped in, and this
+	// copies its slots, which no query should wait on.
+	if block != nil {
+		table_trim(&block.names)
+	}
+	if allow != nil {
+		table_trim(&allow.names)
+	}
 	sync.rw_mutex_lock(&e.mu)
 	defer sync.rw_mutex_unlock(&e.mu)
 	old_block, old_allow = e.block, e.allow
@@ -276,10 +291,10 @@ Decide what to do with a query name.
 form; both normalise to the same key. Allow rules take precedence, matching how
 Pi-hole and AdGuard treat their allowlists.
 
-The regex rules come after the hash maps, which settle most names in a few
-probes. An allow regex still has to be asked about a name the block map lists,
+The regex rules come after the name tables, which settle most names in a few
+probes. An allow regex still has to be asked about a name the block table lists,
 and about one nothing blocks, since `Allowed` exempts an answer from the CNAME
-walk; a block regex only about a name no map has decided.
+walk; a block regex only about a name no table has decided.
 */
 engine_match :: proc(e: ^Engine, name: string) -> Decision {
 	buf: [MAX_NORMALISED]u8

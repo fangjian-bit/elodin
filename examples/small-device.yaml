@@ -7,9 +7,9 @@
 #
 # What is expensive on such a box, in the order it will hurt:
 #
-#   1. Blocklists, at ~129 bytes a rule. Measured, AdGuard's filter_1 is
-#      179,583 rules and so around 23 MB resident - on a 128 MB router that is
-#      a fifth of the machine, and it is the first thing to cut.
+#   1. Blocklists, at ~35 bytes a rule. Measured, AdGuard's filter_1 is
+#      185,090 rules and about 5 MB resident, about twice that while a
+#      refresh builds the new copy beside the old.
 #   2. The answer cache, at ~463 bytes an entry.
 #   3. Worker threads, at ~0.26 MB each of scratch arena, held from a
 #      worker's first query onward rather than only under load.
@@ -194,18 +194,18 @@ blocking:
   block_ttl: 60
   # One list rather than four, and this is the figure to actually count.
   # Measured on the lists this tree ships as examples: StevenBlack's hosts
-  # file is 79,994 rules, AdGuard's filter_1 is 179,583, and the malware list
-  # below is 77,526 - so at ~129 bytes a rule, one list here is about 10 MB
-  # and the four in examples/lan.yaml are 331,075 unique rules and 58 MB
-  # resident, measured, with the cache still empty. On a 128 MB router that is
-  # the difference between a fifth of the machine and half of it.
+  # file is 73,633 rules, AdGuard's filter_1 is 185,090, and the malware list
+  # below is 98,293 - so at ~35 bytes a rule, one list here is about 3 MB
+  # and the four in examples/lan.yaml are 350,929 unique rules and 12 MB
+  # resident, measured, with the cache still empty. A refresh builds the new
+  # rules beside the old ones, so budget about twice that.
   #
   # Check yours rather than trusting these: the "list <name>: N rules" and
   # "filter: N block rules" lines at startup are what you are paying for,
-  # times ~129 bytes.
+  # times ~35 bytes.
   #
   # Overlapping lists collapse where the domains are identical - those four
-  # parse 337,183 rules and store 331,075 - which is under 2%, so a second
+  # parse 357,096 rules and store 350,929 - which is under 2%, so a second
   # list of the same kind costs very nearly what the first one did. Add one
   # curated list rather than three broad ones.
   lists:
