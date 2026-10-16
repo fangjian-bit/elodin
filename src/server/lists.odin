@@ -125,7 +125,7 @@ move_query_named_caches :: proc(cfg: ^config.Config) {
 	}
 	for set in lists {
 		for list in set {
-			if list.url == "" || list.file != "" || list.name == list.url || list.name != config.url_name(list.url) {
+			if list.url == "" || list.file != "" || list.name != config.url_name(list.url) {
 				continue
 			}
 			old := config.list_cache_name(list.url)
@@ -138,7 +138,9 @@ move_query_named_caches :: proc(cfg: ^config.Config) {
 			}
 			path := list_cache_path(cfg, list)
 			if os.exists(path) {
-				os.remove(old_path)
+				if err := os.remove(old_path); err != nil {
+					logx.warnf("list %s: cannot remove the cached copy named by its url's query (%v)", list.name, err)
+				}
 			} else if err := os.rename(old_path, path); err != nil {
 				logx.warnf("list %s: cannot move the cached copy to %s (%v)", list.name, path, err)
 			}

@@ -27,7 +27,8 @@ that fails falls back to the cached copy if there is one, so a network outage
 does not turn blocking off once a list has been fetched.
 
 A list is logged under its `name`, and cached under it; without one the name is
-the `file`, or the `url` up to its query, so a key in the query is not logged.
+the `url` up to its query, or the `file` when there is no url, so a key in the
+query is not logged.
 Two downloaded lists with different urls that would share a cache file are
 refused at load; give one a different `name:`. Characters other than letters,
 digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share one.

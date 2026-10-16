@@ -52,10 +52,10 @@ test_a_default_name_holds_no_query :: proc(t: ^testing.T) {
 }
 
 /*
-Two different servers, or two lists, that would go by one default name are
-refused: their counters would sum into one series, their log lines read as one,
-and two lists would share one cache file. The same server listed twice, a name
-the file gives to more than one server, and lists that differ in name are not.
+Two servers that come to one name only because the query was cut are refused,
+since their counters would sum into one series; so are two lists that would share
+one cache file. A name two servers shared before the cut, and lists that differ
+in their cache file, are not.
 */
 @(test)
 test_a_default_name_names_one_thing :: proc(t: ^testing.T) {
@@ -66,14 +66,18 @@ test_a_default_name_names_one_thing :: proc(t: ^testing.T) {
 	cases := []Case {
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [\"https://dns.example/q?a=1\", \"https://dns.example/q?a=2\"]\n", false},
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [\"https://dns.example/q?a=1\"]\n  zones:\n    - domains: [corp.example]\n      servers: [{url: \"https://dns.example/q?a=2\"}]\n", false},
-		{"upstream:\n  servers: [\"tls://1.1.1.1#one.one.one.one\", \"tls://1.1.1.1#cloudflare-dns.com\"]\n", false},
+		{"upstream:\n  servers: [\"tls://1.1.1.1#one.one.one.one\", \"tls://1.1.1.1#cloudflare-dns.com\"]\n", true},
+		{"upstream:\n  servers: [{url: \"https://dns.google/dns-query?a=1\", address: 8.8.8.8}, {url: \"https://dns.google/dns-query?a=1\", address: 8.8.4.4}]\n", true},
+		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [{name: \"https://dns.example/q\", url: \"https://dns.example/r\"}, \"https://dns.example/q\"]\n", true},
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [{name: \"https://dns.example/q\", url: \"https://dns.example/r\"}, \"https://dns.example/q?a=1\"]\n", false},
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [\"https://dns.example/q?a=1\"]\n  zones:\n    - domains: [corp.example]\n      servers: [\"https://dns.example/q?a=1#x\"]\n", true},
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [{name: a, url: \"https://dns.example/q?a=1\"}, {name: b, url: \"https://dns.example/q?a=2\"}]\n", true},
 		{"upstream:\n  servers: [{name: cf, address: 1.1.1.1}, {name: cf, address: 1.0.0.1}]\n", true},
+		{"upstream:\n  servers: [\"1.1.1.1\"]\n  zones:\n    - domains: [corp.example]\n      servers: [{address: 1.1.1.1, verify: false, hostname: x.example}]\n", true},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/h?k=1\"]\n  allowlists: [\"https://l.example/h?k=2\"]\n", false},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [{name: x, url: \"https://l.example/a\"}, {name: x, url: \"https://l.example/b\"}]\n", false},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/a_b\", \"https://l.example/a/b\"]\n", false},
+		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  enabled: false\n  lists: [\"https://l.example/a_b\", \"https://l.example/a/b\"]\n", true},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/h?k=1\", {name: two, url: \"https://l.example/h?k=2\"}, {url: \"https://l.example/h?k=3\", enabled: false}]\n", true},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/h?k=1\"]\n  allowlists: [\"https://l.example/h?k=1\"]\n", true},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/h?k=1\", \"https://l.example/h?k=1#x\"]\n", true},

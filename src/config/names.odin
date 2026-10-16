@@ -35,11 +35,14 @@ list_cache_name :: proc(name: string, allocator := context.temp_allocator) -> st
 }
 
 /*
-A default name is one the operator never chose, so two different servers that
-get the same one are refused: they would sum into one series on /metrics and
-read as one in the log, with nothing in the file to tell them apart. One server
-listed twice, in the default group and a route say, is one server. A name the
-file gives to several servers is the operator's choice to count them as one.
+A default name stops at the url's query, so two DoH servers whose urls differ
+only there would come to share one: they would sum into one series on /metrics
+and read as one in the log, with nothing in the file to tell them apart. That is
+refused, as is a name the file gives that is another server's url up to its
+query. Every other shared name the file held already before the query was cut,
+and is left as it was: one url listed twice or pinned to two addresses, two DoT
+servers on one address, a name the file gives to several servers. Those sum by
+the operator's own spelling of the file.
 */
 @(private)
 check_default_upstream_names :: proc(l: ^Loader, cfg: ^Config) {
@@ -51,9 +54,9 @@ check_default_upstream_names :: proc(l: ^Loader, cfg: ^Config) {
 				seen[s.name] = s
 				continue
 			}
-			same := prev.kind == s.kind && prev.address == s.address && prev.port == s.port && prev.hostname == s.hostname && prev.path == s.path && prev.verify == s.verify
-			if !same && (is_default_name(prev) || is_default_name(s)) {
-				errorf(l, "upstream: two different servers both go by %q; give one a 'name:' (in the map form of a server)", s.name)
+			one_url := prev.kind == .HTTPS && s.kind == .HTTPS && prev.path == s.path
+			if !one_url && (cut_a_query(prev) || cut_a_query(s)) {
+				errorf(l, "upstream: two servers whose urls differ in the query both go by %q; give one a 'name:' (in the map form of a server)", s.name)
 			}
 		}
 	}
@@ -62,8 +65,9 @@ check_default_upstream_names :: proc(l: ^Loader, cfg: ^Config) {
 		visit(l, &seen, route.upstream.servers)
 	}
 
-	is_default_name :: proc(s: Upstream_Spec) -> bool {
-		return s.name == describe_upstream(s, context.temp_allocator)
+	// A default name that is shorter than the url it came from, the fragment aside.
+	cut_a_query :: proc(s: Upstream_Spec) -> bool {
+		return s.kind == .HTTPS && s.name == url_name(s.url) && s.name != strings.truncate_to_byte(s.url, '#')
 	}
 }
 
@@ -71,12 +75,16 @@ check_default_upstream_names :: proc(l: ^Loader, cfg: ^Config) {
 A downloaded list is cached under its name, so two lists with different urls
 that come to one cache file - one name, or two names that differ only where the
 file name cannot hold them - would read each other's copy whenever a download
-fails. Refused at load, by the name that would be shared. A disabled list is
-never downloaded, nor is one with a `file:`, which is read in place of its url.
-Two entries for one url are one list, the fragment aside, which is never sent.
+fails. Refused at load, by the name that would be shared. A disabled list, or
+any list while blocking is off, is never downloaded, nor is one with a `file:`,
+which is read in place of its url. Two entries for one url are one list, the
+fragment aside, which is never sent.
 */
 @(private)
 check_list_cache_names :: proc(l: ^Loader, cfg: ^Config) {
+	if !cfg.blocking.enabled {
+		return
+	}
 	seen := make(map[string]Block_List, context.temp_allocator)
 	for lists in ([][]Block_List{cfg.blocking.lists, cfg.blocking.allow_lists}) {
 		for bl in lists {
