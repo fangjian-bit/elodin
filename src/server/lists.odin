@@ -111,8 +111,8 @@ build_filter_sets :: proc(cfg: ^config.Config, allow_network: bool, loads: []Lis
 /*
 A list the file names only by a url with a query was cached, before #487, under
 the whole url, so the file name held whatever key the query carried. Each such
-copy moves to the name the list goes by now, or is removed when a copy is there
-already: the key leaves `cache_dir`, and a box that boots offline still has the
+copy moves to the name the list goes by now, or is removed when that url's copy
+is there already: the key leaves `cache_dir`, and a box that boots offline still has the
 list. A file that is some list's own cache under its current name is left alone,
 and so is a disabled list's copy: nothing loads that list, and its name may be
 another list's, which would then load its rules.
@@ -139,15 +139,22 @@ move_query_named_caches :: proc(cfg: ^config.Config) {
 			if !os.exists(old_path) {
 				continue
 			}
+			// A copy under the current name that is of another url - one with no
+			// query an earlier build cached there - is moved over, not kept.
 			path := list_cache_path(cfg, list)
-			if os.exists(path) {
+			if os.exists(path) && copy_is_of(list, path) {
 				if err := os.remove(old_path); err != nil {
 					logx.warnf("list %s: cannot remove the cached copy named by its url's query (%v)", list.name, err)
 				}
-			} else if err := os.rename(old_path, path); err != nil {
+				continue
+			}
+			if err := os.rename(old_path, path); err != nil {
 				logx.warnf("list %s: cannot move the cached copy to %s (%v)", list.name, path, err)
-			} else if src, has := source_of(list); has {
-				// Named by this very url, so it is this url's copy.
+				continue
+			}
+			// Named by this very url, so it is this url's copy.
+			os.remove(source_path(path))
+			if src, has := source_of(list); has {
 				if werr := write_cache_file(source_path(path), transmute([]byte)src); werr != nil {
 					warn_cache_unwritable(cfg, path, werr)
 				}
@@ -363,13 +370,14 @@ save_cached_copy :: proc(cfg: ^config.Config, list: config.Block_List, text: str
 	if dir := filepath.dir(cache_path); dir != "" {
 		make_directories(dir)
 	}
-	// The fingerprint goes first, so a copy is never beside one of another url:
-	// one left by a query since dropped, or by a write that stopped between the two.
-	os.remove(source_path(cache_path))
+	// The copy goes first: a write that fails leaves the old copy beside its own
+	// fingerprint, which removed first would make it read as a url with no query.
+	// A stop between the two leaves the new copy beside the old url's, or none.
 	if werr := write_cache_file(cache_path, transmute([]byte)text); werr != nil {
 		warn_cache_unwritable(cfg, cache_path, werr)
 		return
 	}
+	os.remove(source_path(cache_path))
 	if src, has := source_of(list); has {
 		if werr := write_cache_file(source_path(cache_path), transmute([]byte)src); werr != nil {
 			warn_cache_unwritable(cfg, cache_path, werr)
@@ -393,7 +401,7 @@ source_of :: proc(list: config.Block_List) -> (src: string, has: bool) {
 	if sent == config.url_name(list.url) {
 		return "", false
 	}
-	return fmt.tprintf("%08x\n", hash.fnv32a(transmute([]byte)sent)), true
+	return fmt.tprintf("%016x\n", hash.fnv64a(transmute([]byte)sent)), true
 }
 
 @(private)
@@ -401,12 +409,19 @@ source_path :: proc(cache_path: string) -> string {
 	return fmt.tprintf("%s.src", cache_path)
 }
 
-// Whether the cached copy at `cache_path` was downloaded from the url `list` names now.
+/*
+Whether the cached copy at `cache_path` was downloaded from the url `list` names
+now. A copy with no fingerprint is of a url with no query, or of a list the file
+names: a build before #487 cached that under its name and wrote none.
+*/
 @(private)
 copy_is_of :: proc(list: config.Block_List, cache_path: string) -> bool {
 	src, has := source_of(list)
+	if !os.exists(source_path(cache_path)) {
+		return !has || list.name != config.url_name(list.url)
+	}
 	if !has {
-		return !os.exists(source_path(cache_path))
+		return false
 	}
 	data, err := os.read_entire_file(source_path(cache_path), context.temp_allocator)
 	return err == nil && string(data) == src

@@ -318,13 +318,16 @@ test_a_cache_named_by_a_query_moves :: proc(t: ^testing.T) {
 	// another list's here, which would load the disabled one's rules.
 	off := config.Block_List{name = "http://192.0.2.1/d", url = "http://192.0.2.1/d?key=SECRET", format = .Hosts}
 	on := config.Block_List{name = "http://192.0.2.1/d", url = "http://192.0.2.9/d", format = .Hosts, enabled = true}
-	cfg.blocking.lists = []config.Block_List{moved, stale, kept, other, off, on}
+	// The copy under its current name is of the url with no query, which an
+	// earlier build cached there: the old copy is this url's, and moves over it.
+	over := config.Block_List{name = "http://192.0.2.1/e", url = "http://192.0.2.1/e?key=SECRET", format = .Hosts, enabled = true}
+	cfg.blocking.lists = []config.Block_List{moved, stale, kept, other, off, on, over}
 
 	path_of :: proc(dir, name: string) -> string {
 		return strings.concatenate({dir, "/", config.list_cache_name(name)}, context.temp_allocator)
 	}
-	files := []string{path_of(dir, moved.url), path_of(dir, stale.url), list_cache_path(&cfg, stale), path_of(dir, kept.name), path_of(dir, off.url)}
-	bodies := []string{"0.0.0.0 moved.example\n", "0.0.0.0 stale.example\n", "0.0.0.0 current.example\n", "0.0.0.0 kept.example\n", "0.0.0.0 off.example\n"}
+	files := []string{path_of(dir, moved.url), path_of(dir, stale.url), list_cache_path(&cfg, stale), path_of(dir, kept.name), path_of(dir, off.url), path_of(dir, over.url), list_cache_path(&cfg, over)}
+	bodies := []string{"0.0.0.0 moved.example\n", "0.0.0.0 stale.example\n", "0.0.0.0 current.example\n", "0.0.0.0 kept.example\n", "0.0.0.0 off.example\n", "0.0.0.0 over.example\n", "0.0.0.0 bare.example\n"}
 	for f, i in files {
 		testing.expect(t, os.write_entire_file(f, bodies[i]) == nil)
 	}
@@ -353,6 +356,9 @@ test_a_cache_named_by_a_query_moves :: proc(t: ^testing.T) {
 	testing.expect(t, os.exists(files[3]), "another list's own cache was touched")
 	testing.expect(t, !filter.set_lookup(block, "off.example"), "a disabled list's old copy loaded as another list")
 	testing.expect(t, os.exists(files[4]), "a disabled list's old copy moved")
+	testing.expect(t, filter.set_lookup(block, "over.example"), "the old copy was removed for another url's")
+	testing.expect(t, !filter.set_lookup(block, "bare.example"), "the url with no query's copy loaded as the list")
+	testing.expect(t, !os.exists(files[5]), "the old copy is still under its url")
 }
 
 /*
@@ -418,6 +424,43 @@ test_a_changed_query_is_not_fresh :: proc(t: ^testing.T) {
 	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
 	_, fresh = fetch_list(&cfg, a)
 	testing.expect_value(t, fresh, Fetch.Failed)
+}
+
+/*
+A list the file names was cached under that name before #487, with no
+fingerprint: that copy is still the list's, fresh and standing in offline. And a
+copy that cannot be written leaves the old one beside its own fingerprint, not
+one that reads as a url with no query's.
+*/
+@(test)
+test_a_named_lists_copy_survives_the_fingerprint :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	dir := fmt.tprintf("/tmp/elodin-server-lists-test-named-%d", os.get_pid())
+	testing.expect(t, os.make_directory(dir) == nil)
+	defer os.remove(dir)
+	cfg := config.default_config()
+	cfg.blocking.cache_dir = dir
+	named := config.Block_List{name = "oisd", url = "http://127.0.0.1:1/l?key=SECRET", format = .Hosts, enabled = true}
+	path := list_cache_path(&cfg, named)
+	defer {
+		os.remove(path)
+		os.remove(source_path(path))
+		os.remove(fmt.tprintf("%s.tmp", path))
+	}
+	testing.expect(t, os.write_entire_file(path, "0.0.0.0 named.example\n") == nil)
+	_, fresh := fetch_list(&cfg, named)
+	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
+	text, load := cached_copy(&cfg, named, .Stale)
+	testing.expect_value(t, load, List_Load.Stale)
+	delete(text)
+
+	// A query copy, then a write of the same name for the url with none fails.
+	save_cached_copy(&cfg, named, "0.0.0.0 named.example\n")
+	testing.expect(t, os.exists(source_path(path)))
+	testing.expect(t, os.make_directory(fmt.tprintf("%s.tmp", path)) == nil)
+	bare := config.Block_List{name = "oisd", url = "http://127.0.0.1:1/l", format = .Hosts, enabled = true}
+	save_cached_copy(&cfg, bare, "0.0.0.0 bare.example\n")
+	testing.expect(t, os.exists(source_path(path)), "a failed write dropped the old copy's fingerprint")
 }
 
 @(private = "file")
