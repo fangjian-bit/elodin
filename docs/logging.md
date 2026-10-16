@@ -42,14 +42,15 @@ Every five minutes, `msg=stats` carries, in order: `queries`, `blocked`,
 ## Repeated refusals
 
 Refusals that repeat — an unauthorised source, a truncation, a connection past
-the limit, a rebinding refusal — are logged once at `warn`, naming the setting,
+the limit, a rebinding refusal for a private address — are logged once at `warn`, naming the setting,
 then at `debug`, so a client does not decide how much these refusals write. The stats counters count the
 rest.
 
 ## Repeated failures
 
 Failures that repeat — an upstream error, a query that got no answer, a
-DNSSEC refusal, a chain lookup that could not be made — are logged at `warn`
+DNSSEC refusal, a chain lookup that could not be made, an answer refused for
+being unreadable — are logged at `warn`
 the first time and then at most once a minute per kind (per zone for a DNSSEC
 refusal, through 16 slots zones can share), with `held=<n>` counting the ones
 not logged at `warn` since the line before it; the rest are at `debug`. These lines name the query name, so with

@@ -10,6 +10,7 @@ import "core:time"
 import "elodin:cache"
 import "elodin:config"
 import "elodin:dns"
+import "elodin:logx"
 import "elodin:upstream"
 
 /*
@@ -1122,6 +1123,63 @@ test_a_referral_is_no_chain_lookup :: proc(t: ^testing.T) {
 
 	testing.expect(t, mock.asked, "the upstream was not asked")
 	testing.expect(t, !ok, "a referral was handed to the chain walk as the DS lookup's reply")
+	free_all(context.temp_allocator)
+}
+
+/*
+A chain lookup the group answered with an error rcode is said at `warn`.
+
+The walk is handed the reply and reads the rcode itself, calling the chain
+unavailable; nothing there says which lookup failed or what came back, so
+`validator_query` does, through a gate of its own.
+*/
+@(test)
+test_a_chain_lookup_answered_servfail_is_reported :: proc(t: ^testing.T) {
+	socket, berr := net.make_bound_udp_socket(net.IP4_Loopback, 0)
+	if !testing.expectf(t, berr == nil, "cannot bind the mock: %v", berr) {
+		return
+	}
+	defer net.close(socket)
+	_ = net.set_option(socket, .Receive_Timeout, MOCK_RECV_TIMEOUT)
+	bound, perr := net.bound_endpoint(socket)
+	if !testing.expectf(t, perr == nil, "cannot read the mock's port: %v", perr) {
+		return
+	}
+
+	cfg := forwarding_config()
+	group := mock_group(t, cfg.upstream, bound.port)
+	defer upstream.destroy_group(group)
+	s := Server {
+		cfg   = &cfg,
+		group = group,
+	}
+
+	question := make([]dns.Question, 1, context.temp_allocator)
+	question[0] = dns.Question{name = "failing.example.", type = .DS, class = .IN}
+	msg := dns.Message{question = question}
+	msg.flags.qr = true
+	msg.flags.rd = true
+	msg.flags.rcode = u8(dns.Rcode.Serv_Fail)
+	reply, _, eerr := dns.encode_message(msg, context.temp_allocator)
+	testing.expect_value(t, eerr, dns.Encode_Error.None)
+
+	mock := Route_Mock {
+		socket = socket,
+		reply  = reply,
+		want   = "failing.example.",
+	}
+	mock_thread := thread.create_and_start_with_poly_data(&mock, serve_route)
+	_, ok := validator_query(&s, "failing.example.", .DS, context.temp_allocator, nil)
+	thread.join(mock_thread)
+	thread.destroy(mock_thread)
+
+	testing.expect(t, mock.asked, "the upstream was not asked")
+	testing.expect(t, ok, "the reply was not handed to the walk to read")
+	testing.expect(
+		t,
+		logx.gate_shut(&chain_fetch_rcode_reported, time.tick_now()._nsec),
+		"the SERVFAIL was not reported through its gate",
+	)
 	free_all(context.temp_allocator)
 }
 

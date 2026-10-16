@@ -349,14 +349,29 @@ validator_query :: proc(
 		report_chain_fetch_failed(type, name, .None)
 		return nil, false
 	}
+	/*
+	And an error rcode, which `resolve_answerable` also hands back where no
+	member did better. The walk reads it itself and calls the chain unavailable,
+	so it is returned as it is; this line is the only place that says which
+	lookup it was and what the group answered.
+	*/
+	if rcode := dns.peek_rcode(response); rcode != .No_Error && rcode != .NX_Domain {
+		logx.gated_warnf(
+			&chain_fetch_rcode_reported,
+			"dnssec: %s %s could not be fetched: the group answered %s",
+			dns.type_name(type),
+			dns.name_trim_root(name),
+			rcode_text(rcode),
+		)
+	}
 	return response, true
 }
 
 /*
 Say that a lookup the chain walk needed could not be made.
 
-The cause of every `Indeterminate` verdict that is not this server's own
-allowance running out, and the only place it is written down: the verdict that
+The cause of an `Indeterminate` verdict whose lookup could not be made, and the
+only place it is written down: the verdict that
 follows names a step ("chain of trust unavailable") and not the upstream error
 behind it, so without this line at `warn` the client's SERVFAIL has no
 explanation anywhere once the incident is over.
@@ -368,6 +383,10 @@ which fetched nothing without being an error.
 */
 @(private)
 chain_fetch_failed_reported: [upstream.Error]logx.Gate
+
+// The same for a lookup the group answered with an error rcode.
+@(private)
+chain_fetch_rcode_reported: logx.Gate
 
 @(private)
 report_chain_fetch_failed :: proc(type: dns.Type, name: string, uerr: upstream.Error) {
