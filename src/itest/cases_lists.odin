@@ -3,6 +3,7 @@ package itest
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
+import "core:strings"
 import "core:time"
 import "elodin:dns"
 
@@ -107,7 +108,8 @@ blocking:
 	start_case(r, "lists: a name written in UTF-8 is skipped with a warning naming its list")
 	{
 		check(r, log_contains(&srv, "list abp-list: 1 names skipped as not ASCII"), "the UTF-8 entry was dropped without a word:\n%s", read_log(&srv))
-		check(r, !log_contains(&srv, "list hosts-list: 1 names skipped"), "a list with no UTF-8 entry was warned of")
+		warned := strings.count(read_log(&srv), "names skipped as not ASCII")
+		check(r, warned == 1, "%d lists were warned of, but only abp-list holds a UTF-8 name", warned)
 	}
 	end_case(r)
 
@@ -310,6 +312,7 @@ run_list_bad_download_cases :: proc(r: ^Runner) {
 	http_mock_serve(http, "/portal.html", "\n<!DOCTYPE html>\n<html><body>Sign in to continue.\n0.0.0.0 portal.example\n</body></html>\n")
 	http_mock_serve(http, "/empty.txt", "")
 	http_mock_serve(http, "/busy.txt", "429 Too Many Requests\n")
+	http_mock_serve(http, "/idn.txt", "0.0.0.0 b\u00fccher.test\n")
 	if !http_mock_start(http) {
 		skip_case(r, "lists: bad download", "cannot start the HTTP mock")
 		return
@@ -333,12 +336,15 @@ run_list_bad_download_cases :: proc(r: ^Runner) {
 	Step :: struct {
 		name: string,
 		path: string,
+		// A line the start must log, when there is one.
+		log:  string,
 	}
 	steps := []Step {
-		{"lists: a good download is cached", "/good.txt"},
-		{"lists: a web page served as a list keeps the cached copy", "/portal.html"},
-		{"lists: an empty download keeps the cached copy", "/empty.txt"},
-		{"lists: a plain-text error page keeps the cached copy", "/busy.txt"},
+		{"lists: a good download is cached", "/good.txt", ""},
+		{"lists: a web page served as a list keeps the cached copy", "/portal.html", ""},
+		{"lists: an empty download keeps the cached copy", "/empty.txt", ""},
+		{"lists: a plain-text error page keeps the cached copy", "/busy.txt", ""},
+		{"lists: a download of only UTF-8 names keeps the cached copy and says why", "/idn.txt", "list the-list: 1 names skipped as not ASCII"},
 	}
 	for step, i in steps {
 		start_case(r, step.name)
@@ -381,6 +387,9 @@ blocking:
 			}
 			if i > 0 {
 				check(r, log_contains(&srv, "using the cached copy"), "the cached copy did not stand in")
+			}
+			if step.log != "" {
+				check(r, log_contains(&srv, step.log), "the log does not say %q:\n%s", step.log, read_log(&srv))
 			}
 			stop_server(&srv)
 		}

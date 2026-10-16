@@ -633,7 +633,9 @@ test_a_rule_whose_name_is_not_ascii_is_counted :: proc(t: ^testing.T) {
 		set_destroy(block)
 		set_destroy(allow)
 	}
-	block, allow := parsed("0.0.0.0 a\x01b.example example.com/path\n", .Hosts)
+	// A name refused for a `/` or a control byte is not counted even when it
+	// holds a byte past ASCII too: punycode would not make it match.
+	block, allow := parsed("0.0.0.0 a\x01b.example example.com/path example.de/über bü\x01cher.example\n", .Hosts)
 	defer set_destroy(block)
 	defer set_destroy(allow)
 	testing.expect_value(t, block.not_ascii, 0)

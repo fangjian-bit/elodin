@@ -128,11 +128,9 @@ and so is a rule a `$badfilter` has wholly cancelled.
 */
 set_add :: proc(s: ^Set, domain: string, flags: Rule_Flags) -> (stored: bool) {
 	buf: [MAX_NORMALISED]u8
-	key, ok := rule_key(domain, buf[:])
+	key, ok, not_ascii := rule_key(domain, buf[:])
 	if !ok {
-		if !is_ascii(domain) {
-			s.not_ascii += 1
-		}
+		s.not_ascii += int(not_ascii)
 		return false
 	}
 	add := flags - s.cancelled[key]
@@ -160,7 +158,7 @@ rule written the same way. Keep rule texts per name if that ever matters.
 */
 set_cancel :: proc(s: ^Set, domain: string, flags: Rule_Flags) {
 	buf: [MAX_NORMALISED]u8
-	key, ok := rule_key(domain, buf[:])
+	key, ok, _ := rule_key(domain, buf[:])
 	if !ok {
 		return
 	}
@@ -317,26 +315,21 @@ engine_stats :: proc(e: ^Engine) -> Stats {
 }
 
 // A query spells a control or non-ASCII byte as \DDD, so a rule holding one raw
-// can never match; and a slash marks a line the parser mis-split.
+// can never match; and a slash marks a line the parser mis-split. `not_ascii`
+// says a byte past ASCII is all that refused it, so its punycode form would match.
 @(private)
-rule_key :: proc(domain: string, buf: []u8) -> (key: string, ok: bool) {
+rule_key :: proc(domain: string, buf: []u8) -> (key: string, ok: bool, not_ascii: bool) {
 	key, ok = normalise(domain, buf)
 	for c in transmute([]u8)key {
-		if c == '/' || c <= 0x20 || c >= 0x7f {
-			return "", false
+		if c == '/' || c <= 0x20 || c == 0x7f {
+			return "", false, false
 		}
+		not_ascii ||= c >= 0x80
+	}
+	if not_ascii {
+		return "", false, true
 	}
 	return
-}
-
-@(private)
-is_ascii :: proc(s: string) -> bool {
-	for c in transmute([]u8)s {
-		if c >= 0x80 {
-			return false
-		}
-	}
-	return true
 }
 
 @(private)

@@ -263,6 +263,9 @@ test_a_list_says_how_many_names_are_not_ascii :: proc(t: ^testing.T) {
 	testing.expect_value(t, not_ascii, 1)
 	_, _, not_ascii = parse_list_text(block, allow, "xn--bcher-kva.example\n", .Domains)
 	testing.expect_value(t, not_ascii, 0)
+	// An allowlist parses into the allow set as both of its targets.
+	_, _, not_ascii = parse_list_text(allow, allow, "bücher.example\n", .Domains)
+	testing.expect_value(t, not_ascii, 1)
 }
 
 @(test)
