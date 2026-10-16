@@ -235,11 +235,28 @@ warnf_held :: proc(held: u64, format: string, args: ..any) {
 gate is shut.
 */
 gated_warnf :: proc(g: ^Gate, format: string, args: ..any) {
+	gated_warnf_from(g, "", format, ..args)
+}
+
+/*
+`gated_warnf` for a line about a client's query: the `debug` line carries the
+client as a field and the `warn` does not, since a `warn` a minute naming it
+would keep a record of who asked whatever `log.queries` says, while `debug` is
+switched on to find out.
+*/
+gated_warnf_from :: proc(g: ^Gate, client: string, format: string, args: ..any) {
 	if loud, held := gate_pass_now(g); loud {
 		warnf_held(held, format, ..args)
-	} else {
-		debugf(format, ..args)
+		return
 	}
+	if client == "" {
+		debugf(format, ..args)
+		return
+	}
+	if !enabled(.Debug) {
+		return
+	}
+	write_line(.Debug, fmt.tprintf(format, ..args), fmt.tprintf("client=%s", quote(client)))
 }
 
 debugf :: proc(format: string, args: ..any) {

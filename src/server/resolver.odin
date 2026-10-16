@@ -2393,10 +2393,10 @@ resolve_query :: proc(
 		The only line that says why a query answered `outcome=failed
 		detail=upstream`, which names no cause of its own. Once a window per
 		kind of error, with the number held back: which name fails is the
-		client's to choose. Without the client, which a `warn` a minute would
-		record whether or not `log.queries` is on; the query line has it.
+		client's to choose. The client only on the `debug` line; see
+		`logx.gated_warnf_from`.
 		*/
-		logx.gated_warnf(&query_failed_reported[uerr], "query %s %s failed: %v", dns.type_name(q.type), dns.name_trim_root(q.name), uerr)
+		logx.gated_warnf_from(&query_failed_reported[uerr], client, "query %s %s failed: %v", dns.type_name(q.type), dns.name_trim_root(q.name), uerr)
 	}
 	// Not by setting `uerr`: every value it has names a transport failure, and
 	// `.Not_Resolved` is an upstream hostname that would not resolve.
@@ -2468,6 +2468,7 @@ resolve_query :: proc(
 		q,
 		resp,
 		winner,
+		client,
 		limit,
 		allocator,
 	); refused {
@@ -3216,6 +3217,7 @@ unreadable_rcode_refusal :: proc(
 	q: dns.Question,
 	resp: []u8,
 	winner: ^upstream.Upstream,
+	client: string,
 	limit: int,
 	allocator: mem.Allocator,
 ) -> (
@@ -3234,8 +3236,9 @@ unreadable_rcode_refusal :: proc(
 	from := answering_upstream(winner)
 	name := dns.name_trim_root(q.name)
 	shown := rcode_text(rcode)
-	logx.gated_warnf(
+	logx.gated_warnf_from(
 		&unreadable_rcode_reported,
+		client,
 		"upstream %s answered %s for %s %s, which a client would read as another rcode; answering SERVFAIL",
 		from,
 		shown,

@@ -1,6 +1,5 @@
 package server
 
-import "core:hash"
 import "core:mem"
 import "core:strings"
 import "core:time"
@@ -683,9 +682,9 @@ through each window, saying how many it passed over (`held=`); the rest are
 
 A window rather than once per process, so a zone that breaks hours after the
 first refusal still reaches `warn`, with `result.detail` naming the zone and the
-step of its chain that failed. The client is left out: a `warn` a minute naming
-it would keep a record of who asked whether or not `log.queries` is on, and the
-query line carries it when it is. The memory this server keeps of the verdict
+step of its chain that failed. The client is on the `debug` line only: a `warn`
+a minute naming it would keep a record of who asked whether or not
+`log.queries` is on. The memory this server keeps of the verdict
 (`cache.BOGUS_TTL`) bounds the upstream traffic behind them; this bounds what
 they write down.
 
@@ -694,7 +693,10 @@ and busy takes every window and one that breaks later, asked for once a minute,
 is never heard: the case the window is here for. A fixed table, so the bound is
 `BOGUS_GATES` lines a window whatever names are asked, keyed on the zone the
 detail names, or on the name's parent where there is no detail - which is the
-zone for most names, and the same slot for every name a flood invents under one.
+zone for most names, and the same slot for every name a flood invents one label
+under it. Best effort, not a guarantee: two zones can share a slot, an apex
+question keys on its parent, and a flood that spreads over many parents can hold
+all sixteen - what it cannot do is write more than sixteen lines a window.
 */
 @(private)
 BOGUS_GATES :: 16
@@ -708,8 +710,18 @@ bogus_gate :: proc(q: dns.Question, result: dnssec.Result) -> ^logx.Gate {
 	if i := strings.index(result.detail, ": "); i >= 0 {
 		zone = result.detail[:i]
 	}
-	key := strings.to_lower(dns.name_trim_root(zone), context.temp_allocator)
-	return &bogus_reported[hash.fnv32a(transmute([]u8)key) % BOGUS_GATES]
+	// FNV-1a over the name with ASCII folded, which is DNS's case rule, in
+	// place: a flood picks the names, so nothing here allocates per refusal.
+	key := dns.name_trim_root(zone)
+	h := u32(0x811c9dc5)
+	for i in 0 ..< len(key) {
+		c := key[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		h = (h ~ u32(c)) * 0x01000193
+	}
+	return &bogus_reported[h % BOGUS_GATES]
 }
 
 /*
@@ -735,8 +747,9 @@ report_bogus :: proc(q: dns.Question, client: string, result: dnssec.Result, fro
 	gate := bogus_gate(q, result) if result.status == .Bogus else &indeterminate_reported
 	// The detail as arguments rather than formatted in here, so a refusal the
 	// gate sends to a disabled `debug` formats nothing.
-	logx.gated_warnf(
+	logx.gated_warnf_from(
 		gate,
+		client,
 		"dnssec: %s %s did not validate: %v (%s%s%s); answer came from %s",
 		dns.type_name(q.type),
 		dns.name_trim_root(q.name),

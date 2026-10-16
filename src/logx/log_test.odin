@@ -33,9 +33,12 @@ test_every_line_is_logfmt :: proc(t: ^testing.T) {
 	errorf("broken")
 	eventf(.Info, "stats", "queries=%d blocked=%d", 12, 3)
 	eventf(.Info, "query", "name=%s", quote("a name with spaces"))
+	g: Gate
+	gated_warnf_from(&g, "192.0.2.1:53000", "query %s failed", "a.example")
+	gated_warnf_from(&g, "192.0.2.1:53000", "query %s failed", "b.example")
 
 	lines := log_lines(t, path)
-	if !testing.expectf(t, len(lines) == 9, "%d lines written, want 9:\n%v", len(lines), lines) {
+	if !testing.expectf(t, len(lines) == 11, "%d lines written, want 11:\n%v", len(lines), lines) {
 		return
 	}
 
@@ -63,6 +66,11 @@ test_every_line_is_logfmt :: proc(t: ^testing.T) {
 	// inside it, which is the whole point of the format.
 	testing.expect_value(t, after_stamp(t, lines[7]), "level=info msg=stats queries=12 blocked=3")
 	testing.expect_value(t, after_stamp(t, lines[8]), `level=info msg=query name="a name with spaces"`)
+
+	// A gated line about a client's query names the client at debug, where it
+	// is asked for, and not on the warn a window, which is written regardless.
+	testing.expect_value(t, after_stamp(t, lines[9]), `level=warn msg="query a.example failed"`)
+	testing.expect_value(t, after_stamp(t, lines[10]), `level=debug msg="query b.example failed" client=192.0.2.1:53000`)
 }
 
 @(private = "file")
