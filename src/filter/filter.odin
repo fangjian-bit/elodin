@@ -320,7 +320,7 @@ engine_stats :: proc(e: ^Engine) -> Stats {
 // A query spells a control or non-ASCII byte as \DDD, so a rule holding one raw
 // can never match; and a slash marks a line the parser mis-split. `not_ascii`
 // says a byte past ASCII is all that refused it, so its punycode form would match:
-// every such character is a letter, digit or mark, which a label can hold, or a
+// every such character is a letter, number or mark, which a label can hold, or a
 // joiner or punctuation mark RFC 5892 appendix A admits in context. A no-break or
 // zero-width space, a BOM, a symbol, a byte that is not UTF-8 (decoded as
 // U+FFFD), or ASCII no label holds (`*`, `:`) has no punycode form a stub sends.

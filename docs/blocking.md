@@ -103,8 +103,9 @@ digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share o
   international name matches only when written in punycode (xn--...)`),
   leaving out a name refused for something punycode cannot carry: a no-break
   or zero-width space, a symbol, a byte that is not UTF-8, or ASCII no label
-  holds, such as `*` or `:`. A UTF-8 byte
-  order mark at the start of a line is ignored.
+  holds, such as `*` or `:`.
+- A UTF-8 byte order mark at the start of a line is ignored, so a list saved
+  with one, or joined from files saved with one, keeps each piece's first rule.
 - `address=/…/` (dnsmasq syntax) is accepted. A `server=/…/` line that names a
   server is skipped, since dnsmasq forwards it rather than blocking.
 - `$important` is dropped and the rest of the rule kept, so an `@@` exception
