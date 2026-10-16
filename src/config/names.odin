@@ -1,5 +1,7 @@
 package config
 
+import "core:fmt"
+import "core:hash"
 import "core:strings"
 
 /*
@@ -18,7 +20,21 @@ url_name :: proc(url: string) -> string {
 	return url
 }
 
-// The file a downloaded list is cached under in `blocking.cache_dir`.
+/*
+The file a downloaded list is cached under in `blocking.cache_dir`: its name,
+and when that is its url cut at the query, a hash of the url as sent too, so a
+query changed in the file - another category, a key rotated - is a list that
+has not been downloaded rather than one whose copy is still fresh.
+*/
+list_cache_file :: proc(bl: Block_List, allocator := context.temp_allocator) -> string {
+	if bl.url == "" || bl.name != url_name(bl.url) || bl.name == url_sent(bl.url) {
+		return list_cache_name(bl.name, allocator)
+	}
+	sent := url_sent(bl.url)
+	return list_cache_name(fmt.tprintf("%s-%08x", bl.name, hash.fnv32a(transmute([]byte)sent)), allocator)
+}
+
+// A name as a file name: `_` for anything but ASCII letters, digits, `-`, `_` and `.`.
 list_cache_name :: proc(name: string, allocator := context.temp_allocator) -> string {
 	b := strings.builder_make(allocator)
 	for i in 0 ..< len(name) {
@@ -46,12 +62,16 @@ the operator's own spelling of the file.
 */
 @(private)
 check_default_upstream_names :: proc(l: ^Loader, cfg: ^Config) {
-	seen := make(map[string]Upstream_Spec, context.temp_allocator)
-	visit :: proc(l: ^Loader, seen: ^map[string]Upstream_Spec, specs: []Upstream_Spec) {
-		for s in specs {
-			prev, found := seen[s.name]
-			if !found {
-				seen[s.name] = s
+	all := make([dynamic]Upstream_Spec, context.temp_allocator)
+	append(&all, ..cfg.upstream.servers)
+	for route in cfg.upstream.zones {
+		append(&all, ..route.upstream.servers)
+	}
+	// Each server against every one before it of its name: "one url" holds
+	// only between https servers, so the first of a name cannot stand for all.
+	for s, i in all {
+		for prev in all[:i] {
+			if prev.name != s.name {
 				continue
 			}
 			// One url, the fragment aside: a given name can equal the cut url of
@@ -59,12 +79,9 @@ check_default_upstream_names :: proc(l: ^Loader, cfg: ^Config) {
 			one_url := prev.kind == .HTTPS && s.kind == .HTTPS && url_sent(prev.url) == url_sent(s.url)
 			if !one_url && (cut_a_query(prev) || cut_a_query(s)) {
 				errorf(l, "upstream: two different servers both go by %q, a url cut at its query; give one a 'name:' (in the map form of a server)", s.name)
+				break
 			}
 		}
-	}
-	visit(l, &seen, cfg.upstream.servers)
-	for route in cfg.upstream.zones {
-		visit(l, &seen, route.upstream.servers)
 	}
 
 	// A default name that is shorter than the url it came from, the fragment
@@ -75,7 +92,6 @@ check_default_upstream_names :: proc(l: ^Loader, cfg: ^Config) {
 }
 
 // What of a url is sent: all of it up to the fragment (RFC 3986 3.5).
-@(private)
 url_sent :: proc(url: string) -> string {
 	return strings.truncate_to_byte(url, '#')
 }
@@ -100,7 +116,7 @@ check_list_cache_names :: proc(l: ^Loader, cfg: ^Config) {
 			if bl.url == "" || bl.file != "" || !bl.enabled {
 				continue
 			}
-			file := list_cache_name(bl.name)
+			file := list_cache_file(bl)
 			prev, found := seen[file]
 			if !found {
 				seen[file] = bl

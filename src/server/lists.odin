@@ -122,7 +122,7 @@ move_query_named_caches :: proc(cfg: ^config.Config) {
 	current := make(map[string]bool, context.temp_allocator)
 	for set in lists {
 		for list in set {
-			current[config.list_cache_name(list.name)] = true
+			current[config.list_cache_file(list)] = true
 		}
 	}
 	for set in lists {
@@ -413,7 +413,7 @@ router or SD-card board `small-device.yaml` is for - leaves a partial list the
 next start without a network would load as the whole of it. So the new copy goes
 to a temporary file beside the old, reaches the disk, and is renamed over it;
 rename(2) replaces the name atomically. The temporary name ends in
-`.tmp`, which no `config.list_cache_name` result does, so it cannot be another list's.
+`.tmp`, which no `config.list_cache_file` result does, so it cannot be another list's.
 */
 @(private)
 write_cache_file :: proc(path: string, body: []byte) -> (err: os.Error) {
@@ -437,7 +437,7 @@ write_cache_file :: proc(path: string, body: []byte) -> (err: os.Error) {
 
 @(private)
 list_cache_path :: proc(cfg: ^config.Config, list: config.Block_List) -> string {
-	joined, _ := filepath.join({cfg.blocking.cache_dir, config.list_cache_name(list.name)}, context.temp_allocator)
+	joined, _ := filepath.join({cfg.blocking.cache_dir, config.list_cache_file(list)}, context.temp_allocator)
 	return joined
 }
 

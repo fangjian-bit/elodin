@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "elodin:config"
 import "elodin:dns"
 
 /*
@@ -40,7 +41,7 @@ run_name_cases :: proc(r: ^Runner) {
 	dead_port := next_port(r)
 	udp_port := next_port(r)
 	metrics_port := next_port(r)
-	config := fmt.tprintf(
+	conf := fmt.tprintf(
 		`log: {{ level: debug }}
 listeners:
   udp: {{ enabled: true, address: "127.0.0.1", port: %d }}
@@ -66,7 +67,7 @@ blocking:
 		cache_dir,
 		http_port,
 	)
-	srv, ok := start_server(r, Server_Options{config = config, udp_port = udp_port, allow_fetch = true})
+	srv, ok := start_server(r, Server_Options{config = conf, udp_port = udp_port, allow_fetch = true})
 	if !ok {
 		skip_case(r, "names: a default name holds no query", "server did not start")
 		return
@@ -96,7 +97,10 @@ blocking:
 		log := read_log(&srv)
 		check(r, strings.contains(log, fmt.tprintf("upstream %s", dead)), "the dead upstream's failure is not logged under its name:\n%s", log)
 		check(r, !strings.contains(log, "SECRET"), "the log shows a query:\n%s", log)
-		cached := filepath.join({cache_dir, fmt.tprintf("http___127.0.0.1_%d_hosts.txt.list", http_port)}, context.temp_allocator) or_else ""
+		list_name := fmt.tprintf("http://127.0.0.1:%d/hosts.txt", http_port)
+		file := config.list_cache_file(config.Block_List{name = list_name, url = fmt.tprintf("%s?key=SECRET3", list_name)})
+		check(r, strings.has_prefix(file, fmt.tprintf("http___127.0.0.1_%d_hosts.txt-", http_port)) && !strings.contains(file, "SECRET"), "the cache file is %s", file)
+		cached := filepath.join({cache_dir, file}, context.temp_allocator) or_else ""
 		check(r, os.exists(cached), "the list is not cached as %s", cached)
 	}
 	end_case(r)
