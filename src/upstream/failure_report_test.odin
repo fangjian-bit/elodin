@@ -55,8 +55,10 @@ test_a_handshake_failure_is_said_once_with_its_reason :: proc(t: ^testing.T) {
 	testing.expect(t, !loud, "the generic line repeated a handshake failure that has its reason")
 	testing.expect_value(t, holdback, 0)
 
-	// The kind's own count is untouched, so it does not drift from the events.
-	testing.expect_value(t, u.reported[.TLS_Failed].held, 0)
+	// Held back but counted, so the kind's next line says it was there: the
+	// handshake line counts only handshakes, and a TLS_Failed on a live
+	// connection inside the window would otherwise be in neither number.
+	testing.expect_value(t, u.reported[.TLS_Failed].held, 1)
 
 	// A failure of another kind is not a handshake failure.
 	loud, _ = note_failure_kind_at(&u, .Timeout, now + 1)
@@ -64,8 +66,9 @@ test_a_handshake_failure_is_said_once_with_its_reason :: proc(t: ^testing.T) {
 
 	// And once the handshake window has passed the generic line speaks again,
 	// for a TLS_Failed that did not come through the handshake path.
-	loud, _ = note_failure_kind_at(&u, .TLS_Failed, now + i64(logx.GATE_WINDOW))
+	loud, holdback = note_failure_kind_at(&u, .TLS_Failed, now + i64(logx.GATE_WINDOW))
 	testing.expect(t, loud, "the generic line stayed silent after the handshake window")
+	testing.expect_value(t, holdback, 1)
 }
 
 

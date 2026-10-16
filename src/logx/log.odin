@@ -178,7 +178,8 @@ once per process: a fault that begins hours after the first one, or a second,
 different one, still reaches `warn`.
 
 The first event opens it at once, so there is a line to find; after that it
-opens once per `GATE_WINDOW`, and the line says how many it passed over.
+opens once per `GATE_WINDOW`, and the line says how many it passed over since
+the one before it - which, after a quiet spell, can be hours back.
 Lock-free, because the callers are accept loops and send loops.
 */
 Gate :: struct {
@@ -213,10 +214,6 @@ gate_pass_now :: proc(g: ^Gate) -> (loud: bool, held: u64) {
 gate_shut :: proc(g: ^Gate, now: i64) -> bool {
 	next := sync.atomic_load(&g.next)
 	return next != 0 && now < next
-}
-
-gate_shut_now :: proc(g: ^Gate) -> bool {
-	return gate_shut(g, time.tick_now()._nsec)
 }
 
 /*

@@ -930,6 +930,12 @@ def wildcard_expanded_ds(root):
     evil_a = [a_rr("evil.wdtest.", "192.0.2.66")]
     emit("wd_evil_answer", "evil.wdtest.", "A",
          message("evil.wdtest.", A, evil_a + [sign(evil_a, ev)]))
+    # An answer below that cut, signed by the parent as an expansion of
+    # `*.wdtest.`. The signature verifies, and the proof the expansion then
+    # calls for walks to the owner's zone - through the cut, which breaks.
+    under_a = [a_rr("x.evil.wdtest.", "192.0.2.68")]
+    emit("wd_wild_under_evil", "x.evil.wdtest.", "A",
+         message("x.evil.wdtest.", A, under_a + [sign(under_a, wd, labels=1)]))
 
     # The control for that one: the same delegation shape a label over, with the
     # DS signed at its own name. Everything else about the two is identical, so

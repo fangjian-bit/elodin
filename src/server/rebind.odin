@@ -657,9 +657,9 @@ report_rebind :: proc(name: string, addr: [16]u8, v6: bool, allocator: mem.Alloc
 }
 
 /*
-Say, once, that an answer was withheld because it could not be read.
+Say, once a window, that an answer was withheld because it could not be read.
 
-A different diagnosis from the one above and so a flag of its own: an operator
+A different diagnosis from the one above and so a gate of its own: an operator
 who saw the private-address warning first would otherwise never be told that this
 is happening at all. What it points at is not a network to exempt but an upstream
 emitting something this decoder rejects - or somebody trying the one way there

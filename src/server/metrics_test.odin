@@ -150,9 +150,9 @@ noisy in this respect is a page that reports nothing at all.
 A failing upstream is published with what went wrong, not only that it failed.
 
 `elodin_upstream_failures_total` is a single number per upstream, and the log
-cannot stand in for the split: each kind is warned about once per process, so
-an operator reading a window of it sees whichever kinds were new in that
-window and nothing about how often any of them happen. Between a `timeout` and
+cannot stand in for the split: each kind is warned about at most once a minute,
+so an operator reading the log sees that a kind happened and nothing about how
+often. Between a `timeout` and
 a `tls_failed` against the same server lie different problems and different
 fixes, so the scrape carries the breakdown.
 
@@ -233,8 +233,8 @@ test_a_failed_exchange_is_published_with_its_kind :: proc(t: ^testing.T) {
 /*
 The upstream that sent an rcode no client could read is named in the scrape.
 
-The line the server logs for one of these is said once per process and demoted
-to debug after it, because the bytes behind it are ones an on-path attacker can
+The line the server logs for one of these is said once a window and demoted
+to debug between, because the bytes behind it are ones an on-path attacker can
 write - so a four-member group with one broken member would otherwise leave an
 operator watching a total climb with no way to tell which member. Nor does
 `elodin_upstream_failures_total` say: `resolve_insisting` refuses to count this

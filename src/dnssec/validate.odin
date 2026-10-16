@@ -542,11 +542,11 @@ walk_reason :: proc(budget: ^Budget) -> string {
 	return budget.walk_stopped if budget.walk_stopped != "" else "chain of trust unavailable"
 }
 
-// Give up on a step, saying why. The words reach the client as an extended
-// error, so they are the ones an operator would want to read first.
 // The reason of a verdict that a step of the chain of trust produced.
 BROKEN_CHAIN :: "broken chain of trust"
 
+// Say which step of the walk broke, for the log only: the first call in a walk
+// wins, since what is tried after the step that broke is a consequence of it.
 @(private)
 broke_at :: proc(budget: ^Budget, zone, why: string, allocator: mem.Allocator) {
 	if budget.broken != "" {
@@ -556,6 +556,8 @@ broke_at :: proc(budget: ^Budget, zone, why: string, allocator: mem.Allocator) {
 	budget.broken = strings.concatenate({shown if shown != "" else ".", ": ", why}, allocator)
 }
 
+// Give up on a step, saying why. The words reach the client as an extended
+// error, so they are the ones an operator would want to read first.
 @(private)
 walk_gave_up :: proc(budget: ^Budget, reason: string) -> Step {
 	budget.walk_stopped = reason
@@ -2136,19 +2138,20 @@ validate_answer :: proc(
 		// same records, read against the same zone, and re-verifying them spends
 		// an allowance the answer needs for its own RRsets.
 		denials := make([dynamic]Verified_Denial, 0, 1, allocator)
-		proof_reason: string
+		proof_reason, proof_detail: string
 		for e in expansions {
 			proof, records, why := validate_wildcard_proof(v, budget, msg, e.owner, e.encloser, class, &denials, unix, now, allocator)
 			// The reason belongs to the verdict that is being returned, so it
 			// moves only when the verdict does.
 			if worse(worst, proof) != worst {
 				proof_reason = why
+				proof_detail = budget.broken if why == BROKEN_CHAIN else ""
 			}
 			worst = worse(worst, proof)
 			append(&proved, ..records)
 		}
 		if worst != .Secure {
-			return {status = worst, reason = proof_reason}
+			return {status = worst, reason = proof_reason, detail = proof_detail}
 		}
 	}
 
@@ -2953,10 +2956,15 @@ validate_wildcard_proof :: proc(
 	// Established from the expanded name, for the same reason as the denial path.
 	trust, keys, established := zone_trust(v, budget, owner, now, allocator)
 	if trust != .Secure {
-		// A chain this server could not walk is not a proof that failed, and the
-		// two must not reach the log or the client saying the same thing.
-		if trust == .Indeterminate {
+		// A chain this server could not walk, or one that broke, is not a proof
+		// that failed, and the two must not reach the log or the client saying
+		// the same thing.
+		switch trust {
+		case .Indeterminate:
 			return trust, nil, walk_reason(budget)
+		case .Bogus:
+			return trust, nil, BROKEN_CHAIN
+		case .Insecure, .Secure:
 		}
 		return trust, nil, "wildcard expansion not proven"
 	}
@@ -3410,9 +3418,6 @@ zone_trust :: proc(
 		// that would send the client a code about the authority instead.
 		if root_status == .Indeterminate && budget.walk_stopped == "" {
 			budget.walk_stopped = "chain of trust unavailable"
-		}
-		if root_status == .Bogus {
-			broke_at(budget, ".", "the root DNSKEY set did not verify against the trust anchors", allocator)
 		}
 		return root_status, nil, "."
 	}
@@ -4114,7 +4119,11 @@ fetch_keys :: proc(
 		return nil, .Indeterminate
 	}
 	if checkable {
-		broke_at(budget, zone, "no DNSKEY both matches a DS the parent published and signs the DNSKEY set", allocator)
+		why := "no DNSKEY both matches a DS the parent published and signs the DNSKEY set"
+		if zone == "." {
+			why = "no DNSKEY both matches a trust anchor and signs the DNSKEY set"
+		}
+		broke_at(budget, zone, why, allocator)
 		return nil, .Bogus
 	}
 	return nil, .Insecure

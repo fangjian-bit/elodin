@@ -348,7 +348,9 @@ enough to be bounded however often the failure comes back. The caller holds
 Except a kind that a handshake line has just been written for, which stays
 quiet: that line carries the reason, and a second one saying only the kind is
 the same event twice. Only that kind: a handshake that timed out says nothing
-about a `TLS_Failed`.
+about a `TLS_Failed`. Counted in the kind's own `held` all the same, since the
+handshake line counts only handshakes and a failure of the kind on a live
+connection would otherwise be in neither number.
 */
 @(private)
 note_failure_kind :: proc(u: ^Upstream, err: Error) -> (loud: bool, held: u64) {
@@ -359,6 +361,7 @@ note_failure_kind :: proc(u: ^Upstream, err: Error) -> (loud: bool, held: u64) {
 @(private)
 note_failure_kind_at :: proc(u: ^Upstream, err: Error, now: i64) -> (loud: bool, held: u64) {
 	if logx.gate_shut(&u.handshake[err], now) {
+		sync.atomic_add(&u.reported[err].held, 1)
 		return false, 0
 	}
 	return logx.gate_pass(&u.reported[err], now)

@@ -277,6 +277,16 @@ WC_FIXTURES := []Fixture{
 			"57547614a10416d2efe4849f8bbb4f5927f74834e3a8498bb54f80025a06",
 	},
 	{
+		key   = "wd_wild_under_evil",
+		name  = "x.evil.wdtest.",
+		type  = .A,
+		rcode = 0,
+		wire  = "1234858000010002000000000178046576696c0677647465737400000100010178046576696c06776474657374000001" +
+			"000100000e100004c00002440178046576696c0677647465737400002e000100000e10005a00010f0100000e107d3b18" +
+			"206a478820e441067764746573740097fc699f627c7cd3c0f940aa47562d0dd9f3bb0fc0a2844b641d5db06468b5a61a" +
+			"6e5bb65a25ff9ee2e8a3c31afb75426e9bfb211c766a0f1c847dc2cebbec09",
+	},
+	{
 		key   = "wd_fine_ds",
 		name  = "fine.wdtest.",
 		type  = .DS,
@@ -793,6 +803,55 @@ test_a_broken_chain_keeps_its_detail_past_a_later_rrset :: proc(t: ^testing.T) {
 		t,
 		strings.contains(result.detail, "evil.wdtest"),
 		"the detail does not name the zone whose step broke: %q",
+		result.detail,
+	)
+	free_all(context.temp_allocator)
+}
+
+/*
+A broken chain met while proving a wildcard expansion names its step too.
+
+The answer verifies against the parent's key as an expansion of `*.wdtest.`, and
+the proof of that expansion walks to the owner's zone, through the cut at
+`evil.wdtest.` whose DS the parent signed as a wildcard. That walk is what
+breaks, so the verdict is the broken chain's and the detail says where.
+*/
+@(test)
+test_a_broken_chain_under_a_wildcard_names_its_step :: proc(t: ^testing.T) {
+	result := wc_validate("wd_wild_under_evil", "x.evil.wdtest.", .A)
+	testing.expect_value(t, result.status, Status.Bogus)
+	testing.expect_value(t, result.reason, BROKEN_CHAIN)
+	testing.expectf(
+		t,
+		strings.contains(result.detail, "evil.wdtest"),
+		"the detail does not name the zone whose step broke: %q",
+		result.detail,
+	)
+	free_all(context.temp_allocator)
+}
+
+/*
+The root is checked against the trust anchors, not a parent's DS, and the
+detail says so: an operator whose anchor is stale is otherwise sent looking for
+a DS the root does not have.
+*/
+@(test)
+test_a_root_that_matches_no_anchor_says_so :: proc(t: ^testing.T) {
+	// The real anchor's key tag and algorithm, with a digest that is not its key's.
+	stale := ". IN DS 38604 15 2 0000000000000000000000000000000000000000000000000000000000000000"
+	anchor, parsed := parse_trust_anchor(stale, context.temp_allocator)
+	testing.expect(t, parsed, "the anchor did not parse")
+	anchors := []Trust_Anchor{anchor}
+	v := make_validator(wc_query, nil, Options{anchors = anchors})
+	defer destroy_validator(v)
+	result := validate(v, "fine.wdtest.", .A, wc_reply("wd_fine_answer"), time.unix(FIXTURE_TIME, 0))
+
+	testing.expect_value(t, result.status, Status.Bogus)
+	testing.expect_value(t, result.reason, BROKEN_CHAIN)
+	testing.expectf(
+		t,
+		strings.has_prefix(result.detail, ".: ") && strings.contains(result.detail, "trust anchor"),
+		"the detail does not say the root matched no trust anchor: %q",
 		result.detail,
 	)
 	free_all(context.temp_allocator)

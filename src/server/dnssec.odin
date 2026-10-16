@@ -1,6 +1,5 @@
 package server
 
-import "core:fmt"
 import "core:mem"
 import "core:time"
 import "elodin:dns"
@@ -716,17 +715,17 @@ report_bogus :: proc(q: dns.Question, client: string, result: dnssec.Result, fro
 		return
 	}
 	gate := &bogus_reported if result.status == .Bogus else &indeterminate_reported
-	why := result.reason
-	if result.detail != "" {
-		why = fmt.tprintf("%s: %s", result.reason, result.detail)
-	}
+	// The detail as arguments rather than formatted in here, so a refusal the
+	// gate sends to a disabled `debug` formats nothing.
 	logx.gated_warnf(
 		gate,
-		"dnssec: %s %s did not validate: %v (%s); answer came from %s",
+		"dnssec: %s %s did not validate: %v (%s%s%s); answer came from %s",
 		dns.type_name(q.type),
 		dns.name_trim_root(q.name),
 		result.status,
-		why,
+		result.reason,
+		": " if result.detail != "" else "",
+		result.detail,
 		from,
 	)
 }

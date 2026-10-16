@@ -172,12 +172,12 @@ Stats :: struct {
 	`unreadable_rcode_refusal`.
 
 	Counted rather than only logged, for the reason `conn_refused` is: the line
-	beside this is said once and demoted to debug after, because the two bytes
-	that trigger it are ones an on-path attacker can write into any reply it can
-	reach, and that reasoning only holds if something else goes on counting.
-	Without this, a deployment whose only upstream started answering an extended
-	rcode - every query a SERVFAIL - would show one `warn` from whenever it
-	began and a `failed=` that says nothing about why.
+	beside this is said once a window and demoted to debug between, because the
+	two bytes that trigger it are ones an on-path attacker can write into any
+	reply it can reach, and that reasoning only holds if something else goes on
+	counting. Without this, a deployment whose only upstream started answering
+	an extended rcode - every query a SERVFAIL - would show one `warn` a minute
+	and a `failed=` that says nothing about how many.
 
 	Apart from `failed`, which it also adds to. `failed` is every query this
 	server could not answer, and a rising one of those is the question "what is
@@ -2396,7 +2396,7 @@ resolve_query :: proc(
 		client's to choose. Without the client, which a `warn` a minute would
 		record whether or not `log.queries` is on; the query line has it.
 		*/
-		logx.gated_warnf(&query_failed_reported[uerr], "query %s %s failed: %v", dns.type_name(q.type), q.name, uerr)
+		logx.gated_warnf(&query_failed_reported[uerr], "query %s %s failed: %v", dns.type_name(q.type), dns.name_trim_root(q.name), uerr)
 	}
 	// Not by setting `uerr`: every value it has names a transport failure, and
 	// `.Not_Resolved` is an upstream hostname that would not resolve.
