@@ -230,7 +230,7 @@ test_a_list_of_badfilter_rules_holds_rules :: proc(t: ^testing.T) {
 	defer filter.set_destroy(block)
 	defer filter.set_destroy(allow)
 
-	added, held := parse_list_text(block, allow, "||x.example^$badfilter\n", .Adblock)
+	added, held, _ := parse_list_text(block, allow, "||x.example^$badfilter\n", .Adblock)
 	testing.expect_value(t, added, 0)
 	testing.expect(t, held, "a list of $badfilter rules was read as empty")
 
@@ -241,13 +241,31 @@ test_a_list_of_badfilter_rules_holds_rules :: proc(t: ^testing.T) {
 			return
 		}
 	}
-	added, held = parse_list_text(block, allow, "/^late[0-9a-f]{60}$/\n", .Adblock)
+	added, held, _ = parse_list_text(block, allow, "/^late[0-9a-f]{60}$/\n", .Adblock)
 	testing.expect_value(t, added, 0)
 	testing.expect(t, held, "a list of regexes past the budget was read as empty")
 
-	_, held = parse_list_text(block, allow, "! only a comment\n\n", .Adblock)
+	_, held, _ = parse_list_text(block, allow, "! only a comment\n\n", .Adblock)
 	testing.expect(t, !held, "a list with no rules was read as holding some")
 	free_all(context.temp_allocator)
+}
+
+@(test)
+test_a_list_says_how_many_names_are_not_ascii :: proc(t: ^testing.T) {
+	// The count is this list's own, not what the lists before it left in the set.
+	block, allow := filter.set_make(), filter.set_make()
+	defer filter.set_destroy(block)
+	defer filter.set_destroy(allow)
+
+	_, _, not_ascii := parse_list_text(block, allow, "b\u00fccher.example\n\u00e9t\u00e9.example\nok.example\n", .Domains)
+	testing.expect_value(t, not_ascii, 2)
+	_, _, not_ascii = parse_list_text(block, allow, "caf\u00e9.example\n", .Domains)
+	testing.expect_value(t, not_ascii, 1)
+	_, _, not_ascii = parse_list_text(block, allow, "xn--bcher-kva.example\n", .Domains)
+	testing.expect_value(t, not_ascii, 0)
+	// An allowlist parses into the allow set as both of its targets.
+	_, _, not_ascii = parse_list_text(allow, allow, "bücher.example\n", .Domains)
+	testing.expect_value(t, not_ascii, 1)
 }
 
 @(test)

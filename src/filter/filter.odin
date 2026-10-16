@@ -4,6 +4,7 @@ import "core:mem"
 import "core:mem/virtual"
 import "core:strings"
 import "core:sync"
+import "core:unicode"
 
 /*
 Domain matching for sink lists.
@@ -55,6 +56,10 @@ Set :: struct {
 	regex_bytes:   int,
 	// Patterns turned away because `regex_bytes` was already at its budget.
 	regex_refused: int,
+	// Names refused only for an international name's characters past ASCII,
+	// written in UTF-8 rather than punycode (#400), so the loader can say so; see
+	// `rule_key` for which characters those are.
+	not_ascii:     int,
 	// What `regex_add` parses and trial-compiles into, emptied after each call:
 	// a fresh arena a pattern cost a map and unmap, 4 µs a line.
 	regex_scratch: virtual.Arena,
@@ -125,8 +130,9 @@ and so is a rule a `$badfilter` has wholly cancelled.
 */
 set_add :: proc(s: ^Set, domain: string, flags: Rule_Flags) -> (stored: bool) {
 	buf: [MAX_NORMALISED]u8
-	key, ok := rule_key(domain, buf[:])
+	key, ok, not_ascii := rule_key(domain, buf[:])
 	if !ok {
+		s.not_ascii += int(not_ascii)
 		return false
 	}
 	add := flags - s.cancelled[key]
@@ -154,8 +160,9 @@ rule written the same way. Keep rule texts per name if that ever matters.
 */
 set_cancel :: proc(s: ^Set, domain: string, flags: Rule_Flags) {
 	buf: [MAX_NORMALISED]u8
-	key, ok := rule_key(domain, buf[:])
+	key, ok, not_ascii := rule_key(domain, buf[:])
 	if !ok {
+		s.not_ascii += int(not_ascii)
 		return
 	}
 	s.cancels += 1
@@ -311,16 +318,39 @@ engine_stats :: proc(e: ^Engine) -> Stats {
 }
 
 // A query spells a control or non-ASCII byte as \DDD, so a rule holding one raw
-// can never match; and a slash marks a line the parser mis-split.
+// can never match; and a slash marks a line the parser mis-split. `not_ascii`
+// says a byte past ASCII is all that refused it, so its punycode form would match:
+// every such character is a letter, number or mark, which a label can hold, or a
+// joiner or punctuation mark RFC 5892 appendix A admits in context. A no-break or
+// zero-width space, a BOM, a symbol, a byte that is not UTF-8 (decoded as
+// U+FFFD), or ASCII no label holds (`*`, `:`) has no punycode form a stub sends.
 @(private)
-rule_key :: proc(domain: string, buf: []u8) -> (key: string, ok: bool) {
+rule_key :: proc(domain: string, buf: []u8) -> (key: string, ok: bool, not_ascii: bool) {
 	key, ok = normalise(domain, buf)
 	for c in transmute([]u8)key {
-		if c == '/' || c <= 0x20 || c >= 0x7f {
-			return "", false
+		if c == '/' || c <= 0x20 || c == 0x7f {
+			return "", false, false
+		}
+		not_ascii ||= c >= 0x80
+	}
+	if !not_ascii {
+		return
+	}
+	for r in key {
+		switch r {
+		case 'a' ..= 'z', '0' ..= '9', '-', '_', '.', 0x200c, 0x200d, 0x00b7, 0x0375, 0x05f3, 0x05f4, 0x30fb, 0x3002, 0xff0e, 0xff61:
+		// The ASCII a label holds; RFC 5892 appendix A's CONTEXTJ and CONTEXTO
+		// code points: the joiners and the middle dot, keraia, geresh, gershayim
+		// and katakana middle dot; and the ideographic, fullwidth and halfwidth
+		// full stops, which a lookup reads as a dot (RFC 3490 section 3.1). Any
+		// other ASCII is a symbol, refused below.
+		case:
+			if !unicode.is_letter(r) && !unicode.is_number(r) && !unicode.is_nonspacing_mark(r) && !unicode.is_spacing_mark(r) {
+				return "", false, false
+			}
 		}
 	}
-	return
+	return "", false, true
 }
 
 @(private)

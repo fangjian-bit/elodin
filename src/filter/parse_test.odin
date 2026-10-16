@@ -616,3 +616,65 @@ test_a_cosmetic_rule_blocks_nothing :: proc(t: ^testing.T) {
 		testing.expectf(t, matches(rule, .Adblock, "example.com.") == .None, "%q matched", rule)
 	}
 }
+
+@(test)
+test_a_rule_whose_name_is_not_ascii_is_counted :: proc(t: ^testing.T) {
+	// A UTF-8 name never matches (a query spells those bytes as \DDD, and a stub
+	// asks for the punycode form), so the loader is told how many it skipped
+	// (#400), whichever syntax the list writes it in. Other refusals are not counted.
+	cases := []struct {
+		text:   string,
+		format: Format,
+	}{{"0.0.0.0 bücher.example ok.example\n", .Hosts}, {"bücher.example\nok.example\n", .Domains}, {"||bücher.example^\n||ok.example^\n", .Adblock}, {"||bücher.example^$badfilter\n||ok.example^\n", .Adblock}}
+	for c in cases {
+		block, allow := parsed(c.text, c.format)
+		testing.expectf(t, block.not_ascii == 1, "%v: not_ascii = %d", c.format, block.not_ascii)
+		testing.expect_value(t, block.count, 1)
+		set_destroy(block)
+		set_destroy(allow)
+	}
+	{
+		// A digit or a mark past ASCII is in a label as well as a letter, and so
+		// are the joiners and punctuation RFC 5892 appendix A admits in context:
+		// a combining acute, a Devanagari vowel sign, Arabic-Indic digits, a
+		// Persian ZWNJ and a Catalan middle dot. An ideographic, fullwidth or
+		// halfwidth full stop is a dot (RFC 3490 section 3.1).
+		block, allow := parsed(
+			"0.0.0.0 éte.example किताब.example ١٢.example می‌خواهم.example col·legi.example 例え。テスト bücher．example bücher｡example\n",
+			.Hosts,
+		)
+		defer set_destroy(block)
+		defer set_destroy(allow)
+		testing.expect_value(t, block.not_ascii, 8)
+	}
+	// A name refused for a `/` or a control byte is not counted even when it
+	// holds a byte past ASCII too: punycode would not make it match. Nor is one
+	// whose bytes past ASCII are no letter: a no-break or zero-width space, a
+	// BOM, or a byte that is not UTF-8, as a Latin-1 file holds. Nor is one
+	// holding ASCII no label holds, such as a `*` or a `:`.
+	block, allow := parsed(
+		"0.0.0.0 a\x01b.example example.com/path example.de/über ads.example\u00a0x.example \u200bads.example \ufeffads.example b\xfccher.example bü\x01cher.example bü*cher.example bücher.example:8080\n",
+		.Hosts,
+	)
+	defer set_destroy(block)
+	defer set_destroy(allow)
+	testing.expect_value(t, block.not_ascii, 0)
+}
+
+@(test)
+test_a_byte_order_mark_is_not_part_of_the_first_rule :: proc(t: ^testing.T) {
+	// A list saved by a Windows editor opens with a UTF-8 BOM, and one built by
+	// joining such files holds one at the start of each. Read as part of a
+	// name, it would drop that rule.
+	cases := []struct {
+		text:   string,
+		format: Format,
+	}{{"\xef\xbb\xbf0.0.0.0 ads.example\n", .Hosts}, {"\xef\xbb\xbfads.example\n", .Domains}, {"\xef\xbb\xbf||ads.example^\n", .Adblock}, {"\xef\xbb\xbf||ads.example^\n", .Auto}, {"# a.txt\n\xef\xbb\xbfads.example\n", .Domains}, {"# a.txt\n\xef\xbb\xbf0.0.0.0 ads.example\n", .Auto}}
+	for c in cases {
+		block, allow := parsed(c.text, c.format)
+		testing.expectf(t, block.count == 1, "%v: count = %d", c.format, block.count)
+		testing.expectf(t, block.not_ascii == 0, "%v: not_ascii = %d", c.format, block.not_ascii)
+		set_destroy(block)
+		set_destroy(allow)
+	}
+}

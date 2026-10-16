@@ -27,6 +27,14 @@ LOCALHOST_NAMES := []string {
 	"0.0.0.0",
 }
 
+/*
+A UTF-8 byte order mark, as a Windows editor saves one, is no part of a rule:
+read as one, it drops that rule, or hides a line from `detect_format`. A list
+built by joining such files holds one at the start of each, so it is cut from
+every line.
+*/
+BOM :: "\xef\xbb\xbf"
+
 @(private)
 is_housekeeping_name :: proc(s: string) -> bool {
 	for n in LOCALHOST_NAMES {
@@ -59,7 +67,7 @@ detect_format :: proc(text: string) -> Format {
 			line = rest[:idx]
 			rest = rest[idx + 1:]
 		}
-		trimmed := strings.trim_space(line)
+		trimmed := strings.trim_space(strings.trim_prefix(line, BOM))
 
 		// A `#` comment is skipped before any probe, and a `||` is looked for
 		// only ahead of a trailing `#` or `!` comment, where the hosts and
@@ -152,7 +160,7 @@ parse_list :: proc(block, allow: ^Set, text: string, format: Format) -> (added: 
 			line = rest
 			rest = ""
 		}
-		line = strings.trim_right(line, "\r \t")
+		line = strings.trim_right(strings.trim_prefix(line, BOM), "\r \t")
 
 		switch fmt_ {
 		case .Hosts:
