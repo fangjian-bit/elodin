@@ -60,8 +60,8 @@ what has to hold around it:
 
 **`container.yaml`** leaves worker counts to the derivation, which reads the
 container's cgroup limits: a pod limited to one CPU and 512 MiB derives 21
-workers with 2 running, at 256 MiB 10. It routes `cluster.local` and the reverse zone to
-kube-dns and forwards everything else over DoT. It writes nothing to disk
+workers with 2 running, at 256 MiB 10. It routes `cluster.local` and the
+reverse zone to kube-dns and forwards everything else over DoT. It writes nothing to disk
 (blocking off, so no list cache). It is the only file that binds the metrics
 endpoint wide, because the scraper is outside the pod.
 

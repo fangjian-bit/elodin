@@ -15,7 +15,7 @@ as thirty-two to carry the same miss rate (issue #493).
 @(test)
 test_derive_workers_does_not_scale_with_cpus :: proc(t: ^testing.T) {
 	// A two-core box gets the whole pool: 128 against a 20 ms upstream is some
-	// six thousand misses a second, where 16 workers carried a few hundred.
+	// six thousand misses a second.
 	testing.expect_value(t, derive_workers(Machine{cpus = 2, memory = 8 * GIB}), MAX_DERIVED_WORKERS)
 	testing.expect_value(t, derive_workers(Machine{cpus = 1, memory = 4 * GIB}), MAX_DERIVED_WORKERS)
 	testing.expect_value(t, derive_workers(Machine{cpus = 128, memory = 256 * GIB}), MAX_DERIVED_WORKERS)

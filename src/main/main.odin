@@ -179,7 +179,9 @@ sizing_origin :: proc(s: config.Server_Config) -> string {
 		m := s.sizing.machine
 		// `workers` reads only the memory; the CPUs are named when they
 		// decided `running_workers`, and not for a limit the file set.
-		if !s.sizing.derived_running_workers {
+		// A derived limit the CPUs could not set is no limit, which is said.
+		running := s.sizing.derived_running_workers
+		if !running {
 			m.cpus = 0
 		}
 		switch {
@@ -187,10 +189,17 @@ sizing_origin :: proc(s: config.Server_Config) -> string {
 			return fmt.tprintf("derived from %s and %#.1M", usable_cpus(m.cpus), m.memory)
 		case m.cpus > 0:
 			return fmt.tprintf("derived from %s", usable_cpus(m.cpus))
+		case m.memory > 0 && running:
+			return fmt.tprintf(
+				"derived from %#.1M of memory; running_workers is the whole pool, this machine's CPUs could not be counted",
+				m.memory,
+			)
 		case m.memory > 0:
 			return fmt.tprintf("derived from %#.1M of memory", m.memory)
-		case:
+		case running:
 			return "derived from defaults; this machine could not be measured"
+		case:
+			return "derived from defaults; this machine's memory could not be measured"
 		}
 	/*
 	The running limit is the machine's to say however the pool was sized, so it

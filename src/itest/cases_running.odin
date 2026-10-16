@@ -336,9 +336,8 @@ run_running_worker_cases :: proc(r: ^Runner, cert_ok: bool) {
 
 	/*
 	The derived sizing, which is what an installation that names no number
-	gets. Before #493 it was four workers per CPU from a floor of 16, so a
-	burst of misses wider than that queued for whole round trips on any box
-	with fewer than 32 cores.
+	gets: a pool as wide as the memory allows, whatever the core count, so a
+	burst of misses wider than the cores still overlaps its round trips.
 	*/
 	start_case(r, "running_workers: the derived pool carries a burst of 64 misses in one round trip")
 	{

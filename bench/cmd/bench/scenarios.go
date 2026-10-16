@@ -289,6 +289,9 @@ func (h *harness) sizing() (section, error) {
 	if runtime.NumCPU() < 4 {
 		return section{title: "Pool width and the running limit", body: "Skipped: needs four CPUs, two for the server and two for the generator.\n"}, nil
 	}
+	if _, err := exec.LookPath("taskset"); err != nil {
+		return section{title: "Pool width and the running limit", body: "Skipped: needs taskset to pin the server and the generator.\n"}, nil
+	}
 	var sb strings.Builder
 	sb.WriteString("Server pinned to CPUs 0-1, generator to 2-3, 128 clients over UDP, `max_pending` 1024 throughout.\n\n")
 	sb.WriteString("| workers / running_workers | cache misses | miss p99 | cache hits | hit p99 |\n|---|---|---|---|---|\n")

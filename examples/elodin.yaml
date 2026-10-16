@@ -27,9 +27,9 @@ server:
   # How many workers (the pool answering UDP and DoH over HTTP/2) may be on
   # the CPU at once. A worker waiting on an upstream or on another query is
   # not counted, so this is about cores, not queries in flight: it keeps cache
-  # hits on a few warm threads instead of waking one per query. 0 is twice the usable CPUs (the affinity mask and any
-  # cgroup CPU limit), or no limit where they cannot be counted. Raise
-  # `workers` for misses, not this.
+  # hits on a few warm threads instead of waking one per query. 0 is twice
+  # the usable CPUs (the affinity mask and any cgroup CPU limit), or no limit
+  # where they cannot be counted. Raise `workers` for misses, not this.
   running_workers: 0
   upstream_workers: 0 # threads used by the "race" strategy; 0 is half of `workers`
   max_connections: 512 # concurrent TCP / DoT / DoH connections
