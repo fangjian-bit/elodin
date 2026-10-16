@@ -40,8 +40,8 @@ those names stop leaking to the public DNS.
 
 **`small-device.yaml`** is the LAN setup sized for memory. It pins 4 workers, 1
 racer and 1 reader with a 256 KiB receive buffer, and carries one blocklist
-instead of four (the four in `lan.yaml`, 331,075 rules, measured 58 MB resident;
-one list about 10 MB). The blocklist cache is on tmpfs so a refresh does not
+instead of four (the four in `lan.yaml`, 350,929 rules, measured 12 MB resident;
+one list about 3 MB). The blocklist cache is on tmpfs so a refresh does not
 write to flash. DoT and DoH are off: a TLS handshake costs about 1,100 µs of CPU
 against 37 µs to answer a query. Local names come from a `home.arpa` route to
 the dnsmasq the box likely runs for DHCP.

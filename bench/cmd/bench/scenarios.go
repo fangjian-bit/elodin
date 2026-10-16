@@ -229,7 +229,9 @@ func (h *harness) workloads() (section, error) {
 	sb.WriteString("| workload | throughput | p50 | p99 | peak RSS |\n|---|---|---|---|---|\n")
 
 	// Cache hits and misses share one server: the cache is what separates them.
-	s, err := h.start(serverOpts{name: "workloads", cache: true, blockRules: 1})
+	// Every query is matched against the lists first, so they hold the memory
+	// table's 250,000 rules: a list of one fits in L1 and hides what a lookup costs.
+	s, err := h.start(serverOpts{name: "workloads", cache: true, blockRules: 250000})
 	if err != nil {
 		return section{}, err
 	}
