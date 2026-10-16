@@ -134,3 +134,44 @@ expect_rfc3339_stamp :: proc(t: ^testing.T, line: string, i: int) {
 		testing.expectf(t, c >= '0' && c <= '9', "line %d: %q is not a digit at %d", i, rune(c), at)
 	}
 }
+
+/*
+A warning that fires once per process says nothing about the second time it
+happens, which is how an hours-long fault went unlogged: the first Bogus verdict
+since start spent the only `warn`, and everything after it was `debug`.
+
+A gate lets one event through per window instead - the first immediately, so an
+operator has a line to grep for, then one a window - and counts what it held
+back so that the line says there was more. The clock is a parameter so the
+window can be crossed without waiting for it.
+*/
+@(test)
+test_a_gate_opens_once_a_window_and_counts_what_it_held :: proc(t: ^testing.T) {
+	g: Gate
+	window := i64(GATE_WINDOW)
+	start := i64(1_000_000)
+
+	loud, held := gate_pass(&g, start)
+	testing.expect(t, loud, "the first event did not open the gate")
+	testing.expect_value(t, held, 0)
+
+	for i in 1 ..= 3 {
+		loud, held = gate_pass(&g, start + i64(i))
+		testing.expectf(t, !loud, "event %d inside the window was loud", i + 1)
+	}
+
+	loud, held = gate_pass(&g, start + window - 1)
+	testing.expect(t, !loud, "the gate opened a nanosecond early")
+
+	loud, held = gate_pass(&g, start + window)
+	testing.expect(t, loud, "the gate stayed shut after its window")
+	testing.expect_value(t, held, 4)
+
+	loud, held = gate_pass(&g, start + window + 1)
+	testing.expect(t, !loud, "the window did not restart when the gate opened")
+
+	gate_reset(&g)
+	loud, held = gate_pass(&g, start + window + 2)
+	testing.expect(t, loud, "a reset gate did not open for the next event")
+	testing.expect_value(t, held, 0)
+}

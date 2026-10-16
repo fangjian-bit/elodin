@@ -2,6 +2,7 @@ package dnssec
 
 import "core:mem"
 import "core:slice"
+import "core:strings"
 import "core:testing"
 import "core:time"
 import "elodin:dns"
@@ -704,5 +705,44 @@ test_an_expanded_ds_or_soa_answer_is_not_secure_either :: proc(t: ^testing.T) {
 		soa.status,
 		soa.reason,
 	)
+	free_all(context.temp_allocator)
+}
+
+/*
+A verdict of "broken chain of trust" names the step that broke.
+
+The reason alone says a chain is broken and not where: an operator told that a
+name did not validate had no way to learn whether the DS the parent signed was
+refused, a denial proved nothing, or the zone's keys did not match, and an
+incident that was over by the time debug logging was switched on left nothing to
+reconstruct it from. The reason stays what it was - it goes to the client as
+extended error text - and `detail` carries the zone and the step, for the log.
+*/
+@(test)
+test_a_broken_chain_names_the_zone_and_the_step :: proc(t: ^testing.T) {
+	result := wc_validate("wd_evil_answer", "evil.wdtest.", .A)
+	testing.expect_value(t, result.status, Status.Bogus)
+	testing.expect_value(t, result.reason, "broken chain of trust")
+	testing.expectf(
+		t,
+		strings.contains(result.detail, "evil.wdtest"),
+		"the detail does not name the zone whose step broke: %q",
+		result.detail,
+	)
+	testing.expectf(
+		t,
+		strings.contains(result.detail, "DS"),
+		"the detail does not say which step broke: %q",
+		result.detail,
+	)
+	free_all(context.temp_allocator)
+}
+
+// A verdict that is not a failure has nothing to explain.
+@(test)
+test_a_secure_verdict_carries_no_detail :: proc(t: ^testing.T) {
+	result := wc_validate("wd_fine_answer", "fine.wdtest.", .A)
+	testing.expect_value(t, result.status, Status.Secure)
+	testing.expect_value(t, result.detail, "")
 	free_all(context.temp_allocator)
 }

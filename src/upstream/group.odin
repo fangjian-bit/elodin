@@ -722,7 +722,7 @@ says why it refused (`POLICY_EDE_FIRST`) that does not happen; where it says
 nothing, which is most of them today, it does. An operator's first sign would
 otherwise be the ads coming back.
 
-Once per process and at debug after that, the shape `unreadable_rcode_refusal`
+Once a window at warn and at debug between, the shape `unreadable_rcode_refusal`
 uses and for the same reason: the line names bytes an upstream chose, so a
 per-query warn would let one decide how much this server writes to disk.
 
@@ -731,7 +731,7 @@ whose authority is down produces them all day - and warning about those would
 bury the one line that means something.
 */
 @(private)
-refusal_reported: bool
+refusal_reported: logx.Gate
 
 @(private)
 report_swept_refusal :: proc(u: ^Upstream, response: []u8) {
@@ -746,11 +746,13 @@ report_swept_refusal :: proc(u: ^Upstream, response: []u8) {
 	if extended_error_within(response, POLICY_EDE_FIRST, POLICY_EDE_LAST) {
 		return
 	}
-	if sync.atomic_exchange(&refusal_reported, true) {
+	loud, held := logx.gate_pass_now(&refusal_reported)
+	if !loud {
 		logx.debugf("upstream %s refused this name without saying why; another member answered it", u.spec.name)
 		return
 	}
-	logx.warnf(
+	logx.warnf_held(
+		held,
 		"upstream %s refused a name without an extended error saying why, and another member of its group answered it: if %s is a filtering resolver, its blocks are being asked elsewhere - see elodin_upstream_swept_rcode_total",
 		u.spec.name,
 		u.spec.name,

@@ -131,15 +131,15 @@ run_dnssec_cases :: proc(r: ^Runner) {
 	start_case(r, "dnssec: a second refusal does not write a second warning")
 	{
 		/*
-		The line is bounded by `report_once`, like every other per-query warning
-		on the client path.
+		The line is bounded by a `logx.Gate`, like every other per-query warning
+		on the client path: one a window, so a second inside it is debug.
 
 		Which name is asked about is the client's to choose, so a line per
 		refusal is a line per query: one client asking for a zone with a broken
 		signature at the rate the limiter allows writes gigabytes a day of
 		identical warnings, and journald's per-unit limit then drops them along
 		with every legitimate line. The first one is the warning an operator has
-		to have; the rest are debug, and `bogus=` in the stats line counts them.
+		to have; the rest within the window are debug, and `bogus=` in the stats line counts them.
 
 		A different name from the first refusal's, and the cache is off in this
 		configuration, so this really is a second trip through the branch rather

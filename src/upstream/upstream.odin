@@ -151,10 +151,9 @@ Upstream :: struct {
 	// a dead server stops costing every query a full timeout.
 	failures:     u32,
 	down_until:   time.Time,
-	// Which kinds of failure this upstream has already been reported for, so
-	// each one is said once at `warn` and left to `debug` after that; see
-	// `record_failure`.
-	reported:     bit_set[Error],
+	// One gate per kind of failure, so each is said at `warn` once a window and
+	// left to `debug` between; see `record_failure`.
+	reported:     [Error]logx.Gate,
 
 	stats:        Stats,
 	allocator:    mem.Allocator,
@@ -335,20 +334,23 @@ record_success :: proc(u: ^Upstream, elapsed: time.Duration) {
 }
 
 /*
-Whether this is the first failure of its kind for this upstream.
+Whether this failure is the one of its kind to say something about this window.
 
-`true` exactly once per upstream per member of `Error`, so a caller with
-something to say about a failure says it once however often the failure comes
-back. The caller holds `u.mu`; `first_failure_of_kind` is the same question
-asked from outside the lock.
+`true` at the first of a kind and then once per `logx.GATE_WINDOW` per upstream
+per member of `Error`, with the number passed over in between, so a caller with
+something to say about a failure says it often enough to be found and rarely
+enough to be bounded however often the failure comes back. The caller holds
+`u.mu`; `first_failure_of_kind` is the same question asked from outside the lock.
 */
 @(private)
-note_failure_kind :: proc(u: ^Upstream, err: Error) -> bool {
-	if err in u.reported {
-		return false
-	}
-	u.reported += {err}
-	return true
+note_failure_kind :: proc(u: ^Upstream, err: Error) -> (loud: bool, held: u64) {
+	return logx.gate_pass_now(&u.reported[err])
+}
+
+// `note_failure_kind` against a clock the caller names.
+@(private)
+note_failure_kind_at :: proc(u: ^Upstream, err: Error, now: i64) -> (loud: bool, held: u64) {
+	return logx.gate_pass(&u.reported[err], now)
 }
 
 /*
@@ -361,9 +363,9 @@ where the reason is still in hand, so the one line this failure gets is the one
 with the reason on it and `record_failure` stays quiet about it afterwards.
 */
 @(private)
-first_failure_of_kind :: proc(u: ^Upstream, err: Error) -> bool {
+first_failure_of_kind :: proc(u: ^Upstream, err: Error) -> (loud: bool, held: u64) {
 	if u == nil {
-		return false
+		return false, 0
 	}
 	sync.mutex_lock(&u.mu)
 	defer sync.mutex_unlock(&u.mu)
@@ -371,16 +373,16 @@ first_failure_of_kind :: proc(u: ^Upstream, err: Error) -> bool {
 }
 
 /*
-Count one failed exchange, and say why the first time each kind happens.
+Count one failed exchange, and say why the first time each kind happens in a window.
 
-The `warn` is once per upstream per kind of failure rather than per exchange:
+The `warn` is once a window per upstream per kind of failure rather than per exchange:
 an upstream that intermittently fails never reaches the threshold below, so
 without it the only trace it left would be a `debug` line nobody has on and a
 counter nobody is scraping - which is how a member of a group can be failing
 every few queries, with the rest of the group covering for it, and nothing in
-the log says so. Once per kind bounds the output at the size of `Error` for
-the life of the process, whatever the query rate does, and a recurrence is
-still on the `debug` line `exchange` writes for every one.
+the log says so. Once a window per kind bounds the output at the size of `Error` per
+window, whatever the query rate does, and a recurrence between warns is still
+on the `debug` line `exchange` writes for every one.
 */
 @(private)
 record_failure :: proc(
@@ -395,8 +397,8 @@ record_failure :: proc(
 	u.stats.queries += 1
 	u.stats.failures += 1
 	u.stats.failure_kinds[err] += 1
-	if note_failure_kind(u, err) {
-		logx.warnf("upstream %s (%v %s): %v", u.spec.name, u.spec.kind, u.spec.address, err)
+	if loud, held := note_failure_kind(u, err); loud {
+		logx.warnf_held(held, "upstream %s (%v %s): %v", u.spec.name, u.spec.kind, u.spec.address, err)
 	}
 	if !charge {
 		return

@@ -389,6 +389,17 @@ Budget :: struct {
 	*/
 	walk_stopped:  string,
 	/*
+	The first step of this question's walk to be called broken, as the zone and
+	what was wrong at it, for the log. `Result.detail` carries it out.
+
+	Not `walk_stopped`: that is the reason a client is sent, which names an
+	allowance and is deliberately the same from one zone to the next. This is the
+	one thing an operator reading "broken chain of trust" has no other way to
+	learn, and the first writer wins because the step that broke the walk is the
+	one that matters - what is tried after it is a consequence.
+	*/
+	broken:        string,
+	/*
 	This walk kept a parent's keys past a DS denial it could not read, because
 	every NSEC3 record in it was above the iteration ceiling (issue #331).
 
@@ -533,6 +544,15 @@ walk_reason :: proc(budget: ^Budget) -> string {
 
 // Give up on a step, saying why. The words reach the client as an extended
 // error, so they are the ones an operator would want to read first.
+@(private)
+broke_at :: proc(budget: ^Budget, zone, why: string, allocator: mem.Allocator) {
+	if budget.broken != "" {
+		return
+	}
+	shown := dns.name_trim_root(zone)
+	budget.broken = strings.concatenate({shown if shown != "" else ".", ": ", why}, allocator)
+}
+
 @(private)
 walk_gave_up :: proc(budget: ^Budget, reason: string) -> Step {
 	budget.walk_stopped = reason
@@ -863,6 +883,13 @@ Result :: struct {
 	// A short phrase for the log line and the extended DNS error.
 	reason:    string,
 	/*
+	Where the walk broke and why, for the log and never for the client: the zone
+	and the step, in words. Set on `Bogus` and `Indeterminate` verdicts that a
+	chain-of-trust step produced, and empty on every other verdict, including
+	ones that failed for a reason local to the message.
+	*/
+	detail:    string,
+	/*
 	Whether this verdict *is* the shedding: a walk of this question was turned
 	away for want of a slot, and that is what the status and reason report.
 
@@ -1010,6 +1037,35 @@ validate :: proc(
 	// The client question's upstream deadline, for the lookups; see `Query_Proc`.
 	deadline: ^time.Tick = nil,
 ) -> Result {
+	broken: string
+	result := validate_walk(v, qname, qtype, wire, now, allocator, shared_worker, spent, deadline, &broken)
+	// Only a verdict that failed has a step to name: a `Secure` one that had
+	// to look past a broken step elsewhere has not failed at it.
+	if result.status == .Bogus || result.status == .Indeterminate {
+		result.detail = broken
+	}
+	return result
+}
+
+/*
+`validate`, with the step its walk called broken written to `broken`.
+
+The walk has returns in a dozen places, so the detail comes out through a
+pointer for `validate` to attach once rather than each of them carrying it.
+*/
+@(private)
+validate_walk :: proc(
+	v: ^Validator,
+	qname: string,
+	qtype: dns.Type,
+	wire: []u8,
+	now: time.Time,
+	allocator: mem.Allocator,
+	shared_worker: bool,
+	spent: ^int,
+	deadline: ^time.Tick,
+	broken: ^string,
+) -> Result {
 	msg, derr := dns.decode_message(wire, allocator, spent)
 	if derr != .None {
 		/*
@@ -1039,6 +1095,7 @@ validate :: proc(
 	budget.spent = spent
 	budget.deadline = deadline
 	defer end_walk(v, &budget)
+	defer broken^ = budget.broken
 
 	/*
 	REFUSED, SERVFAIL and the rest carry nothing to authenticate. Demanding a
@@ -3375,6 +3432,9 @@ zone_trust :: proc(
 		if root_status == .Indeterminate && budget.walk_stopped == "" {
 			budget.walk_stopped = "chain of trust unavailable"
 		}
+		if root_status == .Bogus {
+			broke_at(budget, ".", "the root DNSKEY set did not verify against the trust anchors", allocator)
+		}
 		return root_status, nil, "."
 	}
 
@@ -3550,6 +3610,7 @@ zone_step :: proc(
 		if derr == .Request_Budget {
 			return walk_gave_up(budget, READING_OVER_BUDGET), nil
 		}
+		broke_at(budget, child, "the DS reply could not be decoded", allocator)
 		return .Bogus, nil
 	}
 	/*
@@ -3618,6 +3679,12 @@ zone_step :: proc(
 			returns below - give the skipped name back to the lookup.
 			*/
 			forget_skipped_non_cut(v, parent, child)
+			broke_at(
+				budget,
+				child,
+				"the DS set is not signed by any key of its parent, or its signature expanded a wildcard",
+				allocator,
+			)
 			return .Bogus, nil
 		}
 		// A DS the parent signed, so whatever the walk kept keys past above
@@ -3702,6 +3769,7 @@ zone_step :: proc(
 		drops it for not being the parent's, and both slices are empty.
 		*/
 		forget_skipped_non_cut(v, parent, child)
+		broke_at(budget, child, "the reply to the DS question held neither a DS nor a denial signed by the parent", allocator)
 		return .Bogus, nil
 	}
 
@@ -3750,6 +3818,7 @@ zone_step :: proc(
 	}
 	if step == .Bogus {
 		forget_skipped_non_cut(v, parent, child)
+		broke_at(budget, child, "the signed denial of a DS proves neither an unsigned delegation nor a name that is not a cut", allocator)
 	}
 	switch step {
 	case .Insecure:
@@ -3932,6 +4001,7 @@ fetch_keys :: proc(
 			budget.walk_stopped = READING_OVER_BUDGET
 			return nil, .Indeterminate
 		}
+		broke_at(budget, zone, "the DNSKEY reply could not be decoded", allocator)
 		return nil, .Bogus
 	}
 	// As in `zone_step`: an upstream error leaves the zone's keys unknown, which
@@ -3943,6 +4013,8 @@ fetch_keys :: proc(
 
 	records := records_of(msg.answer, zone, .DNSKEY, class, allocator)
 	if len(records) == 0 || len(records) > MAX_KEYS_PER_ZONE {
+		why := "the DNSKEY reply held no keys" if len(records) == 0 else "the DNSKEY reply held more keys than this server reads"
+		broke_at(budget, zone, why, allocator)
 		return nil, .Bogus
 	}
 	parsed := make([dynamic]Dnskey, 0, len(records), allocator)
@@ -4062,7 +4134,11 @@ fetch_keys :: proc(
 	if exhausted {
 		return nil, .Indeterminate
 	}
-	return nil, .Bogus if checkable else .Insecure
+	if checkable {
+		broke_at(budget, zone, "no DNSKEY both matches a DS the parent published and signs the DNSKEY set", allocator)
+		return nil, .Bogus
+	}
+	return nil, .Insecure
 }
 
 // Does this DNSKEY hash to this DS? The digest runs over the owner name in

@@ -169,6 +169,65 @@ eventf :: proc(level: Level, msg: string, format: string, args: ..any) {
 	write_line(level, msg, fmt.tprintf(format, ..args))
 }
 
+/*
+Lets one event in a window through at `warn`, and counts the ones it held back.
+
+For a condition a peer can provoke as often as it likes, where a `warn` per
+occurrence would let it write to this server's disk. A gate that opens once per
+process, which this replaced, kept that bound and lost everything else: the
+first occurrence since start spent the only `warn`, so a fault that began hours
+later - or a second, different one - was `debug` and therefore nowhere.
+
+The first event opens it at once, so there is a line to find; after that it
+opens once per `GATE_WINDOW`, and the line says how many it passed over.
+Lock-free, because the callers are accept loops and send loops.
+*/
+Gate :: struct {
+	next: i64,
+	held: u64,
+}
+
+GATE_WINDOW :: 60 * time.Second
+
+// `now` is a monotonic clock reading in nanoseconds, a parameter so a test can
+// cross the window without waiting for it.
+gate_pass :: proc(g: ^Gate, now: i64) -> (loud: bool, held: u64) {
+	for {
+		next := sync.atomic_load(&g.next)
+		if next != 0 && now < next {
+			sync.atomic_add(&g.held, 1)
+			return false, 0
+		}
+		if _, swapped := sync.atomic_compare_exchange_strong(&g.next, next, now + i64(GATE_WINDOW)); swapped {
+			return true, sync.atomic_exchange(&g.held, 0)
+		}
+	}
+}
+
+gate_pass_now :: proc(g: ^Gate) -> (loud: bool, held: u64) {
+	return gate_pass(g, time.tick_now()._nsec)
+}
+
+// For a condition that has ended, so that its next occurrence is a new first.
+gate_reset :: proc(g: ^Gate) {
+	sync.atomic_store(&g.next, 0)
+	sync.atomic_store(&g.held, 0)
+}
+
+/*
+`warnf`, saying how many like it a `Gate` passed over since the last one.
+*/
+warnf_held :: proc(held: u64, format: string, args: ..any) {
+	if held == 0 {
+		emit(.Warn, format, ..args)
+		return
+	}
+	if !enabled(.Warn) {
+		return
+	}
+	write_line(.Warn, fmt.tprintf(format, ..args), fmt.tprintf("held=%d", held))
+}
+
 debugf :: proc(format: string, args: ..any) {
 	emit(.Debug, format, ..args)
 }

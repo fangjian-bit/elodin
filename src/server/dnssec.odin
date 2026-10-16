@@ -1,7 +1,7 @@
 package server
 
+import "core:fmt"
 import "core:mem"
-import "core:sync"
 import "core:time"
 import "elodin:dns"
 import "elodin:dnssec"
@@ -336,7 +336,7 @@ validator_query :: proc(
 	*/
 	response, _, uerr := upstream.resolve_answerable(s.group, asked, allocator, deadline)
 	if uerr != .None {
-		logx.debugf("dnssec: %s %s could not be fetched: %v", dns.type_name(type), name, uerr)
+		report_chain_fetch_failed(type, name, fmt.tprintf("%v", uerr))
 		return nil, false
 	}
 	/*
@@ -346,10 +346,35 @@ validator_query :: proc(
 	walk would call the chain forged - Bogus - rather than unavailable.
 	*/
 	if dns.peek_referral(response) {
-		logx.debugf("dnssec: %s %s could not be fetched: the group answered with a referral", dns.type_name(type), name)
+		report_chain_fetch_failed(type, name, "the group answered with a referral")
 		return nil, false
 	}
 	return response, true
+}
+
+/*
+Say that a lookup the chain walk needed could not be made.
+
+The cause of every `Indeterminate` verdict that is not this server's own
+allowance running out, and the only place it is written down: the verdict that
+follows names a step ("chain of trust unavailable") and not the upstream error
+behind it, so at `debug` only, which this was, the client's SERVFAIL had no
+explanation anywhere once the incident was over.
+
+Once a window, with the number held back, because a name the group cannot reach
+is the client's to ask for as often as it likes.
+*/
+@(private)
+chain_fetch_failed_reported: logx.Gate
+
+@(private)
+report_chain_fetch_failed :: proc(type: dns.Type, name: string, why: string) {
+	loud, held := logx.gate_pass_now(&chain_fetch_failed_reported)
+	if loud {
+		logx.warnf_held(held, "dnssec: %s %s could not be fetched: %s", dns.type_name(type), name, why)
+		return
+	}
+	logx.debugf("dnssec: %s %s could not be fetched: %s", dns.type_name(type), name, why)
 }
 
 /*
@@ -403,7 +428,7 @@ otherwise push ordinary answers past the point where they need a retry over TCP.
 */
 // Set once the first answer has lost its AD bit to a failed rebuild; see below.
 @(private)
-prune_failure_reported: bool
+prune_failure_reported: logx.Gate
 
 /*
 And a third, for the verdict this server reached about itself.
@@ -469,19 +494,19 @@ present_response :: proc(
 			server writes to disk.
 			*/
 			name := dns.name_trim_root(query.question[0].name if len(query.question) > 0 else "?")
-			if sync.atomic_exchange(&prune_failure_reported, true) {
-				logx.debugf(
+			if loud, held := logx.gate_pass_now(&prune_failure_reported); loud {
+				logx.warnf_held(
+					held,
 					"dnssec: %s %s validated but could not be rebuilt without its unauthenticated records; answering without the AD bit",
 					dns.type_name(qtype),
 					name,
 				)
 			} else {
-				logx.warnf(
+				logx.debugf(
 					"dnssec: %s %s validated but could not be rebuilt without its unauthenticated records; answering without the AD bit",
 					dns.type_name(qtype),
 					name,
 				)
-				logx.warnf("further answers losing the AD bit this way are logged at debug level")
 			}
 			secure = false
 		}
@@ -639,7 +664,7 @@ without_dnssec :: proc(records: []dns.Record, qtype: dns.Type, allocator: mem.Al
 }
 
 /*
-Say, once, that an answer did not validate.
+Say that an answer did not validate, at most once a window.
 
 Both lines name the upstream the refused answer came from.
 
@@ -656,66 +681,93 @@ stop asking.
 unanswered, the other says who is to blame for that, and an operator reading
 either alone has half the story.
 
-Through `report_once`, like every other per-query warning on the client path.
-Which question is asked is the client's to choose, so a line per refusal is a
-line per query for anyone who cares to ask for a name whose zone is broken - and
-at the rate `ratelimit` allows one source, that is gigabytes a day of identical
-warnings, dropped by journald's per-unit limit along with every legitimate line
-or filling the disk where `log.file` is set. The first refusal since start is the
-`warn` an operator has to have, every one after it is `debug`, and `bogus=` in
-the stats line carries the count. The memory this server keeps of the verdict
-(`cache.BOGUS_TTL`) bounds the upstream traffic behind them; this bounds what
-they write down.
+Through a `logx.Gate` rather than a line per refusal. Which question is asked is
+the client's to choose, so a line per refusal is a line per query for anyone who
+cares to ask for a name whose zone is broken - and at the rate `ratelimit` allows
+one source, that is gigabytes a day of identical warnings, dropped by journald's
+per-unit limit along with every legitimate line or filling the disk where
+`log.file` is set. The first refusal is a `warn` at once and one more is let
+through each window, saying how many it passed over (`held=`); the rest are
+`debug`, and `bogus=` in the stats line carries the count.
+
+The gate used to open once per process, and that lost an incident: the
+first refusal since start spent the only `warn`, so a zone that broke four hours
+later was `debug` and nowhere, with nothing to say which step of its chain had
+failed. `result.detail` is that: the zone and the step. The memory this server
+keeps of the verdict (`cache.BOGUS_TTL`) bounds the upstream traffic behind
+them; this bounds what they write down.
 */
 @(private)
-bogus_reported: bool
+bogus_reported: logx.Gate
 
 /*
-A flag of its own for the verdict that is not one.
+A gate of its own for the verdict that is not one.
 
 `Indeterminate` reaches this procedure beside `Bogus` because both are SERVFAIL
 to the client, and it is the cheap one to provoke: a lost DNSKEY datagram or a
 walk that ran out of its allowance under load produces it, and unlike a `Bogus`
-verdict nothing remembers it, so it stays cheap. Sharing one flag, the first
-such transient since start would spend the single `warn` and a zone that really
-is broken would be debug lines for the life of the process - which is the
-guarantee this is here to make, lost to the failure mode least worth hearing
-about.
+verdict nothing remembers it, so it stays cheap. Sharing one gate, a stream of
+such transients would keep taking the window, and a zone that really is broken
+would be debug lines for as long as they lasted - which is the guarantee this is
+here to make, lost to the failure mode least worth hearing about.
 */
 @(private)
-indeterminate_reported: bool
+indeterminate_reported: logx.Gate
 
 @(private)
 report_bogus :: proc(q: dns.Question, client: string, result: dnssec.Result, from: string, shed := false) {
-	reported := &bogus_reported if result.status == .Bogus else &indeterminate_reported
 	if shed {
-		reported = &chain_walk_shed_reported
+		report_shed_walk(q, client)
+		return
 	}
-	say, first := report_once(reported, logx.enabled(.Debug))
+	gate := &bogus_reported if result.status == .Bogus else &indeterminate_reported
+	loud, held := logx.gate_pass_now(gate)
+	if !loud && !logx.enabled(.Debug) {
+		return
+	}
+	why := result.reason
+	if result.detail != "" {
+		why = fmt.tprintf("%s: %s", result.reason, result.detail)
+	}
+	format := "dnssec: %s %s from %s did not validate: %v (%s); answer came from %s"
+	if !loud {
+		logx.debugf(format, dns.type_name(q.type), dns.name_trim_root(q.name), client, result.status, why, from)
+		return
+	}
+	logx.warnf_held(held, format, dns.type_name(q.type), dns.name_trim_root(q.name), client, result.status, why, from)
+}
+
+/*
+The one verdict here that is about this server rather than about the answer,
+so the line says so and names the setting - and leaves the upstream out of
+it, since blaming a server that answered perfectly well for a lookup this
+one declined to make would send an operator to the wrong place entirely.
+
+Still once per process, unlike the two above: a shed is provoked by a flood and
+counted as `elodin_dnssec_queries_shed_total`, which a flood cannot make an
+operator miss, so a line per window would only be the flood's to write.
+*/
+@(private)
+report_shed_walk :: proc(q: dns.Question, client: string) {
+	say, first := report_once(&chain_walk_shed_reported, logx.enabled(.Debug))
 	if !say {
 		return
 	}
-	format := "dnssec: %s %s from %s did not validate: %v (%s); answer came from %s"
 	if !first {
-		logx.debugf(format, dns.type_name(q.type), dns.name_trim_root(q.name), client, result.status, result.reason, from)
-		return
-	}
-	/*
-	The one verdict here that is about this server rather than about the answer,
-	so the line says so and names the setting - and leaves the upstream out of
-	it, since blaming a server that answered perfectly well for a lookup this
-	one declined to make would send an operator to the wrong place entirely.
-	*/
-	if shed {
-		logx.warnf(
-			"dnssec: %s %s from %s was not validated: this server was already walking as many chains of trust as dnssec.max_chain_walks and dnssec.max_connection_walks allow, so it stopped looking. Counted as elodin_dnssec_queries_shed_total; further ones are logged at debug level",
+		logx.debugf(
+			"dnssec: %s %s from %s was not validated: chain walks are at their limit",
 			dns.type_name(q.type),
 			dns.name_trim_root(q.name),
 			client,
 		)
 		return
 	}
-	logx.warnf(format, dns.type_name(q.type), dns.name_trim_root(q.name), client, result.status, result.reason, from)
+	logx.warnf(
+		"dnssec: %s %s from %s was not validated: this server was already walking as many chains of trust as dnssec.max_chain_walks and dnssec.max_connection_walks allow, so it stopped looking. Counted as elodin_dnssec_queries_shed_total; further ones are logged at debug level",
+		dns.type_name(q.type),
+		dns.name_trim_root(q.name),
+		client,
+	)
 }
 
 /*

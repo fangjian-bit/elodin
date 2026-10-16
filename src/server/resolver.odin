@@ -2384,7 +2384,16 @@ resolve_query :: proc(
 			answering_upstream(winner),
 		)
 	} else if uerr != .None {
-		logx.debugf("query %s %s from %s failed: %v", dns.type_name(q.type), q.name, client, uerr)
+		/*
+		The only line that says why a query answered `outcome=failed
+		detail=upstream`, which names no cause of its own. Once a window, with
+		the number held back: which name fails is the client's to choose.
+		*/
+		if loud, held := logx.gate_pass_now(&query_failed_reported); loud {
+			logx.warnf_held(held, "query %s %s from %s failed: %v", dns.type_name(q.type), q.name, client, uerr)
+		} else {
+			logx.debugf("query %s %s from %s failed: %v", dns.type_name(q.type), q.name, client, uerr)
+		}
 	}
 	// Not by setting `uerr`: every value it has names a transport failure, and
 	// `.Not_Resolved` is an upstream hostname that would not resolve.
@@ -3165,9 +3174,13 @@ with the rcode named, the way the rebinding guard and the validator explain
 their own refusals. A client that queried without EDNS has nowhere to put one
 and gets the bare SERVFAIL.
 */
-// Set once the first reply has been refused for an unreadable rcode; see below.
+// Opens once a window for a query that got no answer from its upstreams.
 @(private)
-unreadable_rcode_reported: bool
+query_failed_reported: logx.Gate
+
+// Opens once a window for a reply refused for an unreadable rcode; see below.
+@(private)
+unreadable_rcode_reported: logx.Gate
 
 /*
 What to call an rcode in a line a person reads.
@@ -3225,8 +3238,9 @@ unreadable_rcode_refusal :: proc(
 	from := answering_upstream(winner)
 	name := dns.name_trim_root(q.name)
 	shown := rcode_text(rcode)
-	if sync.atomic_exchange(&unreadable_rcode_reported, true) {
-		logx.debugf(
+	if loud, held := logx.gate_pass_now(&unreadable_rcode_reported); loud {
+		logx.warnf_held(
+			held,
 			"upstream %s answered %s for %s %s from %s, which a client would read as another rcode; answering SERVFAIL",
 			from,
 			shown,
@@ -3235,7 +3249,7 @@ unreadable_rcode_refusal :: proc(
 			client,
 		)
 	} else {
-		logx.warnf(
+		logx.debugf(
 			"upstream %s answered %s for %s %s from %s, which a client would read as another rcode; answering SERVFAIL",
 			from,
 			shown,
@@ -3243,7 +3257,6 @@ unreadable_rcode_refusal :: proc(
 			name,
 			client,
 		)
-		logx.warnf("further replies refused for an rcode a client cannot read are logged at debug level")
 	}
 	count_answer(&s.stats.failed)
 	sync.atomic_add(&s.stats.unreadable_rcode, 1)
