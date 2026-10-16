@@ -99,9 +99,11 @@ blocking:
 		check(r, !strings.contains(log, "SECRET"), "the log shows a query:\n%s", log)
 		list_name := fmt.tprintf("http://127.0.0.1:%d/hosts.txt", http_port)
 		file := config.list_cache_file(config.Block_List{name = list_name, url = fmt.tprintf("%s?key=SECRET3", list_name)})
-		check(r, strings.has_prefix(file, fmt.tprintf("http___127.0.0.1_%d_hosts.txt-", http_port)) && !strings.contains(file, "SECRET"), "the cache file is %s", file)
+		check_eq_str(r, file, fmt.tprintf("http___127.0.0.1_%d_hosts.txt.list", http_port), "the cache file")
 		cached := filepath.join({cache_dir, file}, context.temp_allocator) or_else ""
 		check(r, os.exists(cached), "the list is not cached as %s", cached)
+		src, _ := os.read_entire_file(fmt.tprintf("%s.src", cached), context.temp_allocator)
+		check(r, len(src) > 0 && !strings.contains(string(src), "SECRET"), "the fingerprint beside the copy is %q", string(src))
 	}
 	end_case(r)
 }

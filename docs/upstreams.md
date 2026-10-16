@@ -42,7 +42,8 @@ A server's `name` is what the log and the `upstream` label on
 `tls://` with the address and port, or for `https` the url up to its query, so
 `https://dns.example/dns-query?token=…` goes by `https://dns.example/dns-query`:
 a key in the query reaches neither. Two `https` servers whose urls differ only
-in the query would share that name, and are refused at load; give one a `name:`,
+in the query would share that name, and are refused at load, as is a `name:`
+that is another server's url up to its query; give one a `name:` of its own,
 which the map form of a server takes. Servers that share a name otherwise, one
 set on several of them included, are counted as one.
 

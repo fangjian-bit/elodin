@@ -1,7 +1,5 @@
 package config
 
-import "core:fmt"
-import "core:hash"
 import "core:strings"
 
 /*
@@ -22,16 +20,12 @@ url_name :: proc(url: string) -> string {
 
 /*
 The file a downloaded list is cached under in `blocking.cache_dir`: its name,
-and when that is its url cut at the query, a hash of the url as sent too, so a
-query changed in the file - another category, a key rotated - is a list that
-has not been downloaded rather than one whose copy is still fresh.
+which holds no query unless the file gave one. A query changed in the file is
+told apart by the fingerprint the server keeps beside the copy, not by the
+file name, which is logged.
 */
 list_cache_file :: proc(bl: Block_List, allocator := context.temp_allocator) -> string {
-	if bl.url == "" || bl.name != url_name(bl.url) || bl.name == url_sent(bl.url) {
-		return list_cache_name(bl.name, allocator)
-	}
-	sent := url_sent(bl.url)
-	return list_cache_name(fmt.tprintf("%s-%08x", bl.name, hash.fnv32a(transmute([]byte)sent)), allocator)
+	return list_cache_name(bl.name, allocator)
 }
 
 // A name as a file name: `_` for anything but ASCII letters, digits, `-`, `_` and `.`.

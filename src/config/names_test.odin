@@ -48,6 +48,17 @@ test_a_default_name_holds_no_query :: proc(t: ^testing.T) {
 	} else {
 		testing.expect_value(t, cfg.upstream.servers[0].name, "mine?x")
 	}
+	// A list's given name keys its copy alone, though it spells the url up to
+	// its query: the copy an earlier build cached under that name is still it.
+	cfg, err = load_string(
+		"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [{name: \"https://l.example/h\", url: \"https://l.example/h?k=1\"}]\n",
+		context.temp_allocator,
+	)
+	if e, has := err.?; has {
+		testing.expectf(t, false, "%v", e.messages)
+	} else {
+		testing.expect_value(t, list_cache_file(cfg.blocking.lists[0]), "https___l.example_h.list")
+	}
 	free_all(context.temp_allocator)
 }
 
@@ -80,7 +91,7 @@ test_a_default_name_names_one_thing :: proc(t: ^testing.T) {
 		{"upstream:\n  bootstrap: [1.1.1.1]\n  servers: [{name: \"https://dns.example/q\", url: \"https://dns.example/q?a=1\"}, \"https://dns.example/q?a=1\", {name: \"https://dns.example/q\", url: \"https://other.example/z\"}]\n", false},
 		{"upstream:\n  servers: [{name: cf, address: 1.1.1.1}, {name: cf, address: 1.0.0.1}]\n", true},
 		{"upstream:\n  servers: [\"1.1.1.1\"]\n  zones:\n    - domains: [corp.example]\n      servers: [{address: 1.1.1.1, verify: false, hostname: x.example}]\n", true},
-		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/h?k=1\"]\n  allowlists: [\"https://l.example/h?k=2\"]\n", true},
+		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/h?k=1\"]\n  allowlists: [\"https://l.example/h?k=2\"]\n", false},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [{name: \"https://l.example/h\", url: \"https://l.example/x\"}]\n  allowlists: [\"https://l.example/h\"]\n", false},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [{name: x, url: \"https://l.example/a\"}, {name: x, url: \"https://l.example/b\"}]\n", false},
 		{"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [\"https://l.example/a_b\", \"https://l.example/a/b\"]\n", false},

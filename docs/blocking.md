@@ -28,9 +28,10 @@ does not turn blocking off once a list has been fetched.
 
 A list is logged under its `name`, and cached under it; without one the name is
 the `url` up to its query, or the `file` when there is no url, so a key in the
-query is not logged. A list whose name was cut from a url with a query is cached
-under the name and a hash of the url, so changing the query in the file
-downloads the list again rather than reading the old query's copy.
+query is not logged. A list whose url has a query keeps a fingerprint of the url
+beside its copy (`<file>.src`), so changing the query in the file downloads the
+list again rather than reading the old query's copy as fresh; the old copy still
+stands in if that download fails.
 Two downloaded lists with different urls that would share a cache file are
 refused at load; give one a different `name:`. Characters other than letters,
 digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share one.

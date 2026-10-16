@@ -1,6 +1,7 @@
 package server
 
 import "core:fmt"
+import "core:hash"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
@@ -354,7 +355,47 @@ save_cached_copy :: proc(cfg: ^config.Config, list: config.Block_List, text: str
 	}
 	if werr := write_cache_file(cache_path, transmute([]byte)text); werr != nil {
 		warn_cache_unwritable(cfg, cache_path, werr)
+		return
 	}
+	if src, has := source_of(list); has {
+		if werr := write_cache_file(source_path(cache_path), transmute([]byte)src); werr != nil {
+			warn_cache_unwritable(cfg, cache_path, werr)
+		}
+	}
+}
+
+/*
+A list whose url has a query is cached under a name without it, so the copy of
+`?category=ads` would read as fresh for `?category=malware`, or for a rotated
+key. A fingerprint of the url as sent goes in a file beside the copy, and only a
+copy whose fingerprint matches is fresh; any other is downloaded again, and
+still stands in when the download fails. The fingerprint is never logged, and
+the file name the log does show holds no part of the query. A url with no query
+is the list its name says, and has none.
+*/
+@(private)
+source_of :: proc(list: config.Block_List) -> (src: string, has: bool) {
+	sent := config.url_sent(list.url)
+	if sent == config.url_name(list.url) {
+		return "", false
+	}
+	return fmt.tprintf("%08x\n", hash.fnv32a(transmute([]byte)sent)), true
+}
+
+@(private)
+source_path :: proc(cache_path: string) -> string {
+	return fmt.tprintf("%s.src", cache_path)
+}
+
+// Whether the cached copy at `cache_path` was downloaded from the url `list` names now.
+@(private)
+copy_is_of :: proc(list: config.Block_List, cache_path: string) -> bool {
+	src, has := source_of(list)
+	if !has {
+		return true
+	}
+	data, err := os.read_entire_file(source_path(cache_path), context.temp_allocator)
+	return err == nil && string(data) == src
 }
 
 @(private)
@@ -367,9 +408,10 @@ Fetch :: enum u8 {
 @(private)
 fetch_list :: proc(cfg: ^config.Config, list: config.Block_List, ignore_fresh := false) -> (text: string, fetch: Fetch) {
 	// Skip the download when the cached copy is still within the refresh window.
-	if info, err := os.stat(list_cache_path(cfg, list), context.temp_allocator); err == nil && !ignore_fresh {
+	path := list_cache_path(cfg, list)
+	if info, err := os.stat(path, context.temp_allocator); err == nil && !ignore_fresh {
 		age := time.diff(info.modification_time, time.now())
-		if age < cfg.blocking.refresh {
+		if age < cfg.blocking.refresh && copy_is_of(list, path) {
 			return "", .Cache_Is_Fresh
 		}
 	}
@@ -413,7 +455,8 @@ router or SD-card board `small-device.yaml` is for - leaves a partial list the
 next start without a network would load as the whole of it. So the new copy goes
 to a temporary file beside the old, reaches the disk, and is renamed over it;
 rename(2) replaces the name atomically. The temporary name ends in
-`.tmp`, which no `config.list_cache_file` result does, so it cannot be another list's.
+`.tmp`, which no `config.list_cache_file` result or fingerprint file does, so it
+cannot be another list's.
 */
 @(private)
 write_cache_file :: proc(path: string, body: []byte) -> (err: os.Error) {

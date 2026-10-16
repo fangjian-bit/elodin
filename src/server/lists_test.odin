@@ -351,29 +351,52 @@ test_a_cache_named_by_a_query_moves :: proc(t: ^testing.T) {
 }
 
 /*
-A list named by its url cut at the query is cached under the url as sent too, so
-a query changed in the file is downloaded afresh rather than read from the old
-query's copy, still fresh; the fragment, never sent, changes nothing. A name the
-file gives keys the copy alone, and none of them puts the query in the file name.
+A list whose url has a query is cached under a name without it, and a copy of
+one query is not fresh for another: the list is downloaded again rather than
+read from the old query's copy for the rest of the refresh window. The fragment,
+never sent, changes nothing, and a url with no query needs no fingerprint. No
+file name, and no fingerprint, holds the query (#487).
 */
 @(test)
-test_a_changed_query_is_another_cache :: proc(t: ^testing.T) {
+test_a_changed_query_is_not_fresh :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
+	dir := fmt.tprintf("/tmp/elodin-server-lists-test-query-%d", os.get_pid())
+	testing.expect(t, os.make_directory(dir) == nil)
+	defer os.remove(dir)
 	cfg := config.default_config()
-	cfg.blocking.cache_dir = "/var/cache/elodin"
-	a := config.Block_List{name = "http://192.0.2.1/l", url = "http://192.0.2.1/l?key=SECRET1"}
-	b := config.Block_List{name = "http://192.0.2.1/l", url = "http://192.0.2.1/l?key=SECRET2"}
-	c := config.Block_List{name = "http://192.0.2.1/l", url = "http://192.0.2.1/l?key=SECRET1#x"}
-	plain := config.Block_List{name = "http://192.0.2.1/l", url = "http://192.0.2.1/l"}
-	named := config.Block_List{name = "mine", url = "http://192.0.2.1/l?key=SECRET1"}
-	testing.expect(t, list_cache_path(&cfg, a) != list_cache_path(&cfg, b), "a changed query reads the old copy")
-	testing.expect_value(t, list_cache_path(&cfg, c), list_cache_path(&cfg, a))
-	testing.expect_value(t, list_cache_path(&cfg, plain), "/var/cache/elodin/http___192.0.2.1_l.list")
-	testing.expect_value(t, list_cache_path(&cfg, named), "/var/cache/elodin/mine.list")
-	for l in ([]config.Block_List{a, b, c}) {
-		testing.expect(t, !strings.contains(list_cache_path(&cfg, l), "SECRET"), "the query is in the file name")
-		testing.expect(t, strings.has_prefix(list_cache_path(&cfg, l), "/var/cache/elodin/http___192.0.2.1_l-"))
+	cfg.blocking.cache_dir = dir
+	// Port 1 on loopback refuses at once, so a download that is tried fails fast.
+	a := config.Block_List{name = "http://127.0.0.1:1/l", url = "http://127.0.0.1:1/l?key=SECRET1", format = .Hosts, enabled = true}
+	b := config.Block_List{name = a.name, url = "http://127.0.0.1:1/l?key=SECRET2", format = .Hosts, enabled = true}
+	c := config.Block_List{name = a.name, url = "http://127.0.0.1:1/l?key=SECRET1#x", format = .Hosts, enabled = true}
+	plain := config.Block_List{name = "http://127.0.0.1:1/p", url = "http://127.0.0.1:1/p", format = .Hosts, enabled = true}
+	path := list_cache_path(&cfg, a)
+	defer {
+		os.remove(path)
+		os.remove(source_path(path))
+		os.remove(list_cache_path(&cfg, plain))
 	}
+	save_cached_copy(&cfg, a, "0.0.0.0 a.example\n")
+	save_cached_copy(&cfg, plain, "0.0.0.0 p.example\n")
+
+	_, fresh := fetch_list(&cfg, a)
+	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
+	_, fresh = fetch_list(&cfg, c)
+	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
+	_, fresh = fetch_list(&cfg, b)
+	testing.expect_value(t, fresh, Fetch.Failed)
+	_, fresh = fetch_list(&cfg, plain)
+	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
+	testing.expect(t, !os.exists(source_path(list_cache_path(&cfg, plain))), "a url with no query has a fingerprint")
+	// And the old copy still stands in when the download fails.
+	text, load := cached_copy(&cfg, b, .Stale)
+	testing.expect_value(t, load, List_Load.Stale)
+	testing.expect_value(t, text, "0.0.0.0 a.example\n")
+	delete(text)
+
+	testing.expect(t, !strings.contains(path, "SECRET"), "the query is in the file name")
+	src, _ := os.read_entire_file(source_path(path), context.temp_allocator)
+	testing.expect(t, len(src) > 0 && !strings.contains(string(src), "SECRET"), "the fingerprint is %q", string(src))
 }
 
 @(private = "file")
