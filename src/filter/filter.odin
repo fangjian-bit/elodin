@@ -4,6 +4,7 @@ import "core:mem"
 import "core:mem/virtual"
 import "core:strings"
 import "core:sync"
+import "core:unicode"
 
 /*
 Domain matching for sink lists.
@@ -316,7 +317,10 @@ engine_stats :: proc(e: ^Engine) -> Stats {
 
 // A query spells a control or non-ASCII byte as \DDD, so a rule holding one raw
 // can never match; and a slash marks a line the parser mis-split. `not_ascii`
-// says a byte past ASCII is all that refused it, so its punycode form would match.
+// says a byte past ASCII is all that refused it, so its punycode form would match:
+// every such character is a letter, digit or mark, which a label can hold. A
+// no-break or zero-width space, a BOM, a symbol, or a byte that is not UTF-8
+// (decoded as U+FFFD) has no punycode form a stub sends.
 @(private)
 rule_key :: proc(domain: string, buf: []u8) -> (key: string, ok: bool, not_ascii: bool) {
 	key, ok = normalise(domain, buf)
@@ -326,10 +330,15 @@ rule_key :: proc(domain: string, buf: []u8) -> (key: string, ok: bool, not_ascii
 		}
 		not_ascii ||= c >= 0x80
 	}
-	if not_ascii {
-		return "", false, true
+	if !not_ascii {
+		return
 	}
-	return
+	for r in key {
+		if r >= 0x80 && !unicode.is_letter(r) && !unicode.is_number(r) && !unicode.is_nonspacing_mark(r) && !unicode.is_spacing_mark(r) {
+			return "", false, false
+		}
+	}
+	return "", false, true
 }
 
 @(private)

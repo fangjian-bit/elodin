@@ -634,8 +634,13 @@ test_a_rule_whose_name_is_not_ascii_is_counted :: proc(t: ^testing.T) {
 		set_destroy(allow)
 	}
 	// A name refused for a `/` or a control byte is not counted even when it
-	// holds a byte past ASCII too: punycode would not make it match.
-	block, allow := parsed("0.0.0.0 a\x01b.example example.com/path example.de/über bü\x01cher.example\n", .Hosts)
+	// holds a byte past ASCII too: punycode would not make it match. Nor is one
+	// whose bytes past ASCII are no letter: a no-break or zero-width space, a
+	// BOM, or a byte that is not UTF-8, as a Latin-1 file holds.
+	block, allow := parsed(
+		"0.0.0.0 a\x01b.example example.com/path example.de/über ads.example\u00a0x.example \u200bads.example \ufeffads.example b\xfccher.example bü\x01cher.example\n",
+		.Hosts,
+	)
 	defer set_destroy(block)
 	defer set_destroy(allow)
 	testing.expect_value(t, block.not_ascii, 0)
@@ -643,12 +648,13 @@ test_a_rule_whose_name_is_not_ascii_is_counted :: proc(t: ^testing.T) {
 
 @(test)
 test_a_byte_order_mark_is_not_part_of_the_first_rule :: proc(t: ^testing.T) {
-	// A list saved by a Windows editor opens with a UTF-8 BOM. Read as part of
-	// the first name, it would drop that rule and count it as not ASCII.
+	// A list saved by a Windows editor opens with a UTF-8 BOM, and one built by
+	// joining such files holds one at the start of each. Read as part of a
+	// name, it would drop that rule.
 	cases := []struct {
 		text:   string,
 		format: Format,
-	}{{"\xef\xbb\xbf0.0.0.0 ads.example\n", .Hosts}, {"\xef\xbb\xbfads.example\n", .Domains}, {"\xef\xbb\xbf||ads.example^\n", .Adblock}, {"\xef\xbb\xbf||ads.example^\n", .Auto}}
+	}{{"\xef\xbb\xbf0.0.0.0 ads.example\n", .Hosts}, {"\xef\xbb\xbfads.example\n", .Domains}, {"\xef\xbb\xbf||ads.example^\n", .Adblock}, {"\xef\xbb\xbf||ads.example^\n", .Auto}, {"# a.txt\n\xef\xbb\xbfads.example\n", .Domains}}
 	for c in cases {
 		block, allow := parsed(c.text, c.format)
 		testing.expectf(t, block.count == 1, "%v: count = %d", c.format, block.count)

@@ -99,8 +99,11 @@ digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share o
 - A name holding a byte outside ASCII, such as an international name written
   in UTF-8 (`bücher.example`), is skipped: a client asks for the punycode
   form (`xn--bcher-kva.example`), so write it that way. The list's load says
-  how many it skipped (`list NAME: N names skipped as not ASCII; an
-  international name matches only when written in punycode (xn--...)`).
+  how many of those it skipped (`list NAME: N names skipped as not ASCII; an
+  international name matches only when written in punycode (xn--...)`),
+  leaving out a name refused for something punycode cannot carry: a no-break
+  or zero-width space, a symbol, or a byte that is not UTF-8. A UTF-8 byte
+  order mark at the start of a line is ignored.
 - `address=/…/` (dnsmasq syntax) is accepted. A `server=/…/` line that names a
   server is skipped, since dnsmasq forwards it rather than blocking.
 - `$important` is dropped and the rest of the rule kept, so an `@@` exception

@@ -282,15 +282,18 @@ rules, or of regexes past the budget, as empty: never cached, never current.
 */
 @(private)
 parse_list_text :: proc(block, allow: ^filter.Set, text: string, format: config.List_Format) -> (added: int, held_rules: bool, not_ascii: int) {
-	cancels := block.cancels + allow.cancels
 	// An allowlist parses into the allow set as both targets: count it once.
-	skipped := block.not_ascii + (0 if allow == block else allow.not_ascii)
+	skipped :: proc(block, allow: ^filter.Set) -> int {
+		return block.not_ascii + (0 if allow == block else allow.not_ascii)
+	}
+	cancels := block.cancels + allow.cancels
+	before := skipped(block, allow)
 	refused := block.regex_refused + allow.regex_refused
 	// config.List_Format and filter.Format are declared in the same order so a
 	// list's configured format maps straight across.
 	added = filter.parse_list(block, allow, text, filter.Format(format))
 	held_rules = added > 0 || block.cancels + allow.cancels > cancels || block.regex_refused + allow.regex_refused > refused
-	not_ascii = block.not_ascii + (0 if allow == block else allow.not_ascii) - skipped
+	not_ascii = skipped(block, allow) - before
 	return
 }
 
