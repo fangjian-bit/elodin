@@ -208,8 +208,8 @@ test_format_detection_reads_past_a_comment_prologue :: proc(t: ^testing.T) {
 test_format_detection_reads_no_rule_inside_a_comment :: proc(t: ^testing.T) {
 	/*
 	A hosts or domain list's `#` comment is prose, and may mention adblock
-	syntax. Read as a probe, a `||` there had a hosts list parsed as adblock,
-	where none of its lines is a rule and the list blocked nothing (#322).
+	syntax. Read as a probe, a `||` there would have a hosts list parsed as
+	adblock, where none of its lines is a rule, so the list blocks nothing (#322).
 	*/
 	commented := "# note: adblock ||domain^ syntax is not used here\n0.0.0.0 ads.example\n0.0.0.0 track.example\n"
 	testing.expect_value(t, detect_format(commented), Format.Hosts)

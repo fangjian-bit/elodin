@@ -13,7 +13,7 @@ Every other case runs with --no-fetch, which skips this path entirely. It is
 also where a crash lived: the cache directory was derived with `filepath.dir`,
 which returns a slice of its argument rather than a new string, and freeing it
 corrupted the heap. The symptom appeared on the *second* list, so these cases
-use two.
+use more than one.
 */
 
 run_list_download_cases :: proc(r: ^Runner) {
