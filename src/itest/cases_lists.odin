@@ -26,7 +26,7 @@ run_list_download_cases :: proc(r: ^Runner) {
 	)
 	http_mock_serve(http, "/abp.txt", "[Adblock Plus 2.0]\n||fetched.test^\n@@||ok.fetched.test^\n")
 	// No format given, and a comment that mentions adblock syntax (#322).
-	http_mock_serve(http, "/auto.txt", "# not adblock: no ||rule^ here\n0.0.0.0 sniffed.test\n0.0.0.0 second.sniffed.test\n")
+	http_mock_serve(http, "/auto.txt", "# not adblock: no ||rule^ here\n0.0.0.0 sniffed.test # nor ||here^\n0.0.0.0 second.sniffed.test ! nor ||here^\n")
 	if !http_mock_start(http) {
 		skip_case(r, "lists: download", "cannot start the HTTP mock")
 		return

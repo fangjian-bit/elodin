@@ -223,6 +223,11 @@ test_format_detection_reads_no_rule_inside_a_comment :: proc(t: ^testing.T) {
 	testing.expect_value(t, detect_format(domains), Format.Domains)
 	testing.expect_value(t, matches(domains, .Auto, "track.example."), Decision.Blocked)
 
+	// A `!` opens a trailing comment in both parsers too (`strip_line_comment`).
+	bang := "0.0.0.0 ads.example ! not ||ads.example^\n0.0.0.0 track.example\n"
+	testing.expect_value(t, detect_format(bang), Format.Hosts)
+	testing.expect_value(t, matches(bang, .Auto, "track.example."), Decision.Blocked)
+
 	// A rule is still a rule when a `#` follows it.
 	testing.expect_value(t, detect_format("||ads.example^$csp=a#b\n"), Format.Adblock)
 }
