@@ -13,7 +13,7 @@ Every other case runs with --no-fetch, which skips this path entirely. It is
 also where a crash lived: the cache directory was derived with `filepath.dir`,
 which returns a slice of its argument rather than a new string, and freeing it
 corrupted the heap. The symptom appeared on the *second* list, so these cases
-use two.
+use more than one.
 */
 
 run_list_download_cases :: proc(r: ^Runner) {
@@ -25,6 +25,8 @@ run_list_download_cases :: proc(r: ^Runner) {
 		"# a hosts list\n127.0.0.1 localhost\n0.0.0.0 downloaded.test\n0.0.0.0 second.downloaded.test\n",
 	)
 	http_mock_serve(http, "/abp.txt", "[Adblock Plus 2.0]\n||fetched.test^\n@@||ok.fetched.test^\n")
+	// No format given, and a comment that mentions adblock syntax (#322).
+	http_mock_serve(http, "/auto.txt", "# not adblock: no ||rule^ here\n0.0.0.0 sniffed.test # nor ||here^\n0.0.0.0 second.sniffed.test ! nor ||here^\n")
 	if !http_mock_start(http) {
 		skip_case(r, "lists: download", "cannot start the HTTP mock")
 		return
@@ -61,10 +63,12 @@ blocking:
   lists:
     - {{ name: hosts-list, url: "http://127.0.0.1:%d/hosts.txt", format: hosts }}
     - {{ name: abp-list, url: "http://127.0.0.1:%d/abp.txt", format: adblock }}
+    - {{ name: auto-list, url: "http://127.0.0.1:%d/auto.txt" }}
 `,
 		udp_port,
 		upstream_port,
 		cache_dir,
+		http_port,
 		http_port,
 		http_port,
 	)
@@ -97,6 +101,17 @@ blocking:
 			h := parse_header(r, allowed.wire)
 			check(r, h.rcode == int(dns.Rcode.No_Error), "the allow rule from the download was lost")
 		}
+	}
+	end_case(r)
+
+	start_case(r, "lists: a comment that mentions adblock syntax leaves a hosts list a hosts list")
+	{
+		res := query_udp(udp_port, build_query("sniffed.test.", u16(dns.Type.A)))
+		if check(r, res.ok, "no response for a name from the auto-detected list") {
+			h := parse_header(r, res.wire)
+			check(r, h.rcode == int(dns.Rcode.NX_Domain), "the hosts list was read as adblock and blocked nothing")
+		}
+		check(r, log_contains(&srv, "list auto-list: 2 rules"), "the auto-detected list did not count its two entries")
 	}
 	end_case(r)
 
