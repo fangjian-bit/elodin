@@ -73,8 +73,11 @@ digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share o
   not retried.
 - A rule costs about 35 bytes resident: its name, a flags byte and an 8-byte
   slot in a table kept at most 80% full. A load or refresh builds the new rule
-  sets beside the ones in use and frees the old ones once they are swapped
-  out, so for its length the lists cost twice that.
+  sets beside the ones in use and frees the old ones once they are swapped out,
+  so for its length the lists cost about twice that. A table grows by doubling
+  while it is built and is trimmed to 80% as it is swapped in, briefly holding
+  its slots twice over each time; the four lists in `examples/lan.yaml` peaked
+  6% over their final size.
 
 ## Rule syntax
 

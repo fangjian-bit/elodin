@@ -8,8 +8,8 @@
 # What is expensive on such a box, in the order it will hurt:
 #
 #   1. Blocklists, at ~35 bytes a rule. Measured, AdGuard's filter_1 is
-#      184,878 rules and about 5 MB resident, twice that while a refresh
-#      builds the new copy beside the old.
+#      185,090 rules and about 5 MB resident, about twice that while a
+#      refresh builds the new copy beside the old.
 #   2. The answer cache, at ~463 bytes an entry.
 #   3. Worker threads, at ~0.26 MB each of scratch arena, held from a
 #      worker's first query onward rather than only under load.
@@ -198,7 +198,7 @@ blocking:
   # below is 98,293 - so at ~35 bytes a rule, one list here is about 3 MB
   # and the four in examples/lan.yaml are 350,929 unique rules and 12 MB
   # resident, measured, with the cache still empty. A refresh builds the new
-  # rules beside the old ones, so budget twice that.
+  # rules beside the old ones, so budget about twice that.
   #
   # Check yours rather than trusting these: the "list <name>: N rules" and
   # "filter: N block rules" lines at startup are what you are paying for,

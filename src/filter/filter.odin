@@ -46,7 +46,7 @@ Set :: struct {
 	// How many `$badfilter` rules were taken, so one that adds nothing can be
 	// told from one that was skipped.
 	cancels:   int,
-	// `/re/` rules, matched after the hash maps; `engine_match` says when, and
+	// `/re/` rules, matched after the name tables; `engine_match` says when, and
 	// regex.odin what bounds them.
 	regexes:       [dynamic]Regex_Rule,
 	// The patterns `regexes` holds, so a line is checked against them in one
@@ -226,7 +226,9 @@ engine_destroy :: proc(e: ^Engine) {
 }
 
 // Swap in freshly built rule sets, returning the old ones for the caller to
-// destroy once no in-flight query can still be reading them.
+// destroy once no in-flight query can still be reading them. Neither may be a
+// set already swapped in: each is trimmed before the lock, which would move
+// slots under a query reading them.
 engine_swap :: proc(e: ^Engine, block, allow: ^Set) -> (old_block, old_allow: ^Set) {
 	// Before the lock: a set is done growing once it is swapped in, and this
 	// copies its slots, which no query should wait on.
@@ -289,10 +291,10 @@ Decide what to do with a query name.
 form; both normalise to the same key. Allow rules take precedence, matching how
 Pi-hole and AdGuard treat their allowlists.
 
-The regex rules come after the hash maps, which settle most names in a few
-probes. An allow regex still has to be asked about a name the block map lists,
+The regex rules come after the name tables, which settle most names in a few
+probes. An allow regex still has to be asked about a name the block table lists,
 and about one nothing blocks, since `Allowed` exempts an answer from the CNAME
-walk; a block regex only about a name no map has decided.
+walk; a block regex only about a name no table has decided.
 */
 engine_match :: proc(e: ^Engine, name: string) -> Decision {
 	buf: [MAX_NORMALISED]u8

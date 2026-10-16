@@ -1,5 +1,6 @@
 package filter
 
+import "base:runtime"
 import "core:fmt"
 import "core:testing"
 
@@ -32,7 +33,7 @@ test_table_holds_every_name_through_growth_and_trim :: proc(t: ^testing.T) {
 	}
 
 	// What a rule costs once loaded (#494): the name, its flags byte and NUL, and
-	// a slot at 80%. These names are 21 to 25 bytes.
+	// a slot at 80%. These names are 20 to 24 bytes.
 	bytes := len(block.names.slots) * size_of(Slot) + cap(block.names.blob)
 	testing.expectf(t, bytes / N <= 38, "%d bytes a rule", bytes / N)
 }
@@ -86,4 +87,16 @@ test_table_offsets_stay_in_a_u32 :: proc(t: ^testing.T) {
 	testing.expect(t, blob_fits(limit - 10, 8))
 	testing.expect(t, !blob_fits(limit - 10, 9))
 	testing.expect(t, blob_fits(0, 1021))
+
+	// And an insert asks it before writing anything: a blob that says it is
+	// full turns a name away, which no real list can be made big enough to show.
+	s := set_make()
+	defer set_destroy(s)
+	raw := (^runtime.Raw_Dynamic_Array)(&s.names.blob)
+	held := raw.len
+	raw.len = limit
+	testing.expect(t, !set_add(s, "ads.example", {.Apex}))
+	testing.expect_value(t, s.count, 0)
+	testing.expect_value(t, s.names.used, 0)
+	raw.len = held
 }
