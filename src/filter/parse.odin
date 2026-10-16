@@ -61,20 +61,29 @@ detect_format :: proc(text: string) -> Format {
 		}
 		trimmed := strings.trim_space(line)
 
-		if strings.has_prefix(trimmed, "[Adblock") || strings.has_prefix(trimmed, "!") {
-			return .Adblock
-		}
-		if strings.contains(trimmed, "||") || strings.has_prefix(trimmed, "@@") {
-			return .Adblock
-		}
-		if strings.has_prefix(trimmed, "address=/") || strings.has_prefix(trimmed, "server=/") {
-			return .Adblock
-		}
+		// A `#` comment is skipped before any probe, and a `||` is looked for
+		// only ahead of a trailing one: a hosts or domain list's comment may
+		// mention adblock syntax, and read as a rule it would have the list
+		// parsed as adblock, where none of its lines is one (#322). A `||`
+		// rule keeps its anchor ahead of any `#` it carries.
 		if trimmed == "" || trimmed[0] == '#' {
 			if idx < 0 {
 				break
 			}
 			continue
+		}
+		if strings.has_prefix(trimmed, "[Adblock") || strings.has_prefix(trimmed, "!") {
+			return .Adblock
+		}
+		uncommented := trimmed
+		if hash := strings.index_byte(trimmed, '#'); hash >= 0 {
+			uncommented = trimmed[:hash]
+		}
+		if strings.contains(uncommented, "||") || strings.has_prefix(trimmed, "@@") {
+			return .Adblock
+		}
+		if strings.has_prefix(trimmed, "address=/") || strings.has_prefix(trimmed, "server=/") {
+			return .Adblock
 		}
 
 		inspected += 1

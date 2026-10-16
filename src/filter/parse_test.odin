@@ -205,6 +205,29 @@ test_format_detection_reads_past_a_comment_prologue :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_format_detection_reads_no_rule_inside_a_comment :: proc(t: ^testing.T) {
+	/*
+	A hosts or domain list's `#` comment is prose, and may mention adblock
+	syntax. Read as a probe, a `||` there had a hosts list parsed as adblock,
+	where none of its lines is a rule and the list blocked nothing (#322).
+	*/
+	commented := "# note: adblock ||domain^ syntax is not used here\n0.0.0.0 ads.example\n0.0.0.0 track.example\n"
+	testing.expect_value(t, detect_format(commented), Format.Hosts)
+	testing.expect_value(t, matches(commented, .Auto, "ads.example."), Decision.Blocked)
+
+	trailing := "0.0.0.0 ads.example # not ||ads.example^\n0.0.0.0 track.example\n"
+	testing.expect_value(t, detect_format(trailing), Format.Hosts)
+	testing.expect_value(t, matches(trailing, .Auto, "track.example."), Decision.Blocked)
+
+	domains := "ads.example # was ||ads.example^\ntrack.example\n"
+	testing.expect_value(t, detect_format(domains), Format.Domains)
+	testing.expect_value(t, matches(domains, .Auto, "track.example."), Decision.Blocked)
+
+	// A rule is still a rule when a `#` follows it.
+	testing.expect_value(t, detect_format("||ads.example^$csp=a#b\n"), Format.Adblock)
+}
+
+@(test)
 test_format_detection_takes_the_majority_of_the_lines_it_reads :: proc(t: ^testing.T) {
 	/*
 	Real hosts lists carry the odd bare name, and real domain lists carry the

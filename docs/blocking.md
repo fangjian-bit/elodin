@@ -87,6 +87,12 @@ digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share o
 | `/^ads[0-9]+\.foo\.com$/`  | names the regex matches          |
 
 - Allow rules always win.
+- `format: auto`, the default, reads the list's first 50 lines that are
+  neither blank nor a `#` comment. A `[Adblock` header, a `!` comment, a `@@`,
+  `address=/` or `server=/` prefix, or a `||` ahead of any `#` makes the list
+  adblock; otherwise it is hosts when most of those lines start with an IP
+  address, and domains when not. Text inside a `#` comment never changes the
+  format.
 - Hosts entries are exact, since hosts lists spell out every subdomain; bare
   domains and `||` rules cover subtrees, as in AdGuard Home. A hosts line
   whose first field is not an IPv4 or IPv6 address adds nothing.
