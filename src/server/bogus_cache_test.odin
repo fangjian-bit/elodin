@@ -534,3 +534,23 @@ test_a_verdict_is_remembered_without_taking_the_answer_kept_for_an_outage :: pro
 
 	free_all(context.temp_allocator)
 }
+
+/*
+A Bogus verdict is gated per zone, so a zone that stays broken and busy cannot
+take the window from one that breaks later and is asked for rarely.
+
+Every name under one zone shares a gate, whatever its case and whether or not
+the walk named the zone; another zone has its own. The two zones here are ones
+whose slots differ, which is what the case is about rather than the hash.
+*/
+@(test)
+test_a_bogus_zone_has_a_gate_of_its_own :: proc(t: ^testing.T) {
+	broken := dnssec.Result{status = .Bogus, reason = "broken chain of trust", detail = "busy.example: the DNSKEY reply held no keys"}
+	forged := dnssec.Result{status = .Bogus, reason = "no valid signature"}
+
+	busy := bogus_gate(dns.Question{name = "a1.busy.example.", type = .A}, forged)
+	testing.expect(t, busy == bogus_gate(dns.Question{name = "ZZ9.Busy.Example.", type = .A}, forged), "two names under one zone took two gates")
+	testing.expect(t, busy == bogus_gate(dns.Question{name = "deep.under.busy.example.", type = .A}, broken), "the zone the walk named was not the key")
+	testing.expect(t, busy != bogus_gate(dns.Question{name = "www.quiet.example.", type = .A}, forged), "another zone shared the busy one's gate")
+	free_all(context.temp_allocator)
+}

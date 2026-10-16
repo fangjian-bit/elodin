@@ -1861,7 +1861,7 @@ validate_answer :: proc(
 	worst := Status.Secure
 	reason: string
 	// The step behind `reason`, when that is `BROKEN_CHAIN`. Read as the RRset's
-	// walk ends, since the next RRset's walk clears it.
+	// walk ends, since any later walk clears it.
 	detail: string
 	expansions := make([dynamic]Wildcard_Expansion, 0, 1, allocator)
 	checked := 0
@@ -1895,6 +1895,9 @@ validate_answer :: proc(
 			now,
 			allocator,
 		)
+		// The step this RRset's walk broke at, read now: the DNAME check below
+		// walks too, and clears it.
+		broken := budget.broken
 		/*
 		A CNAME carrying no signature at all may be one a DNAME produced rather
 		than one a zone forgot to sign. RFC 6672 section 3.4.1 has the server
@@ -1985,7 +1988,7 @@ validate_answer :: proc(
 			// client's extended error, for a refusal that was anything but.
 			if worse(worst, status) != worst {
 				reason = why
-				detail = budget.broken if why == BROKEN_CHAIN else ""
+				detail = broken if why == BROKEN_CHAIN else ""
 			}
 			worst = worse(worst, status)
 			continue

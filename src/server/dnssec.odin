@@ -1,6 +1,8 @@
 package server
 
+import "core:hash"
 import "core:mem"
+import "core:strings"
 import "core:time"
 import "elodin:dns"
 import "elodin:dnssec"
@@ -670,10 +672,6 @@ both. Without the upstream there is nothing in the log to tell them apart and th
 next step is a packet capture; with it, the counts per server say which one to
 stop asking.
 
-`client` is kept beside it. The pair is the point: one says whose query went
-unanswered, the other says who is to blame for that, and an operator reading
-either alone has half the story.
-
 Through a `logx.Gate` rather than a line per refusal. Which question is asked is
 the client's to choose, so a line per refusal is a line per query for anyone who
 cares to ask for a name whose zone is broken - and at the rate `ratelimit` allows
@@ -690,9 +688,29 @@ it would keep a record of who asked whether or not `log.queries` is on, and the
 query line carries it when it is. The memory this server keeps of the verdict
 (`cache.BOGUS_TTL`) bounds the upstream traffic behind them; this bounds what
 they write down.
+
+One gate per zone rather than one for every zone, or a zone that stays broken
+and busy takes every window and one that breaks later, asked for once a minute,
+is never heard: the case the window is here for. A fixed table, so the bound is
+`BOGUS_GATES` lines a window whatever names are asked, keyed on the zone the
+detail names, or on the name's parent where there is no detail - which is the
+zone for most names, and the same slot for every name a flood invents under one.
 */
 @(private)
-bogus_reported: logx.Gate
+BOGUS_GATES :: 16
+
+@(private)
+bogus_reported: [BOGUS_GATES]logx.Gate
+
+@(private)
+bogus_gate :: proc(q: dns.Question, result: dnssec.Result) -> ^logx.Gate {
+	zone := dns.name_parent(q.name)
+	if i := strings.index(result.detail, ": "); i >= 0 {
+		zone = result.detail[:i]
+	}
+	key := strings.to_lower(dns.name_trim_root(zone), context.temp_allocator)
+	return &bogus_reported[hash.fnv32a(transmute([]u8)key) % BOGUS_GATES]
+}
 
 /*
 A gate of its own for the verdict that is not one.
@@ -714,7 +732,7 @@ report_bogus :: proc(q: dns.Question, client: string, result: dnssec.Result, fro
 		report_shed_walk(q, client)
 		return
 	}
-	gate := &bogus_reported if result.status == .Bogus else &indeterminate_reported
+	gate := bogus_gate(q, result) if result.status == .Bogus else &indeterminate_reported
 	// The detail as arguments rather than formatted in here, so a refusal the
 	// gate sends to a disabled `debug` formats nothing.
 	logx.gated_warnf(

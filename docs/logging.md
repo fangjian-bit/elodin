@@ -45,3 +45,13 @@ Refusals that repeat — an unauthorised source, a truncation, a connection past
 the limit, a rebinding refusal — are logged once at `warn`, naming the setting,
 then at `debug`, so a client does not decide how much these refusals write. The stats counters count the
 rest.
+
+## Repeated failures
+
+Failures that repeat — an upstream error, a query that got no answer, a
+DNSSEC refusal, a chain lookup that could not be made — are logged at `warn`
+the first time and then at most once a minute per kind (per zone for a Bogus
+verdict), with `held=<n>` counting the ones not logged since the line before
+it; the rest are at `debug`. These lines name the query name, so with
+`log.queries` off a name that fails still reaches the log about once a minute.
+They do not name the client.

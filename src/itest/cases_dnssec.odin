@@ -143,26 +143,22 @@ run_dnssec_cases :: proc(r: ^Runner) {
 
 		Different names from the first refusal's, and the cache is off in this
 		configuration, so each really is a trip through the branch rather than a
-		question that never reached it. Two of them back to back: the earlier
-		cases may have taken long enough for the first refusal's window to pass,
-		which lets the first of these warn, but the second follows it within
-		the window either way.
+		question that never reached it. Two of them back to back, well inside
+		one window: the earlier cases may have taken long enough for the first
+		refusal's window to close before either, or between them, so one of the
+		two may warn - but not both.
 		*/
 		before := log_count(&srv, "did not validate")
 		if check(r, before == 1, "expected one refusal warning before this case, found %d", before) {
-			mid := before
-			for name, i in ([]string{"second.test.", "third.test."}) {
+			for name in ([]string{"second.test.", "third.test."}) {
 				res := query_udp(udp_port, build_query(name, u16(dns.Type.A)))
 				if check(r, res.ok, "no response for %s", name) {
 					h := parse_header(r, res.wire)
 					check_eq_int(r, h.rcode, int(dns.Rcode.Serv_Fail), "rcode for a later refusal")
 				}
-				if i == 0 {
-					mid = log_count(&srv, "did not validate")
-				}
 			}
 			after := log_count(&srv, "did not validate")
-			check(r, after == mid, "a refusal inside the window wrote another warning (%d lines, %d before it)", after, mid)
+			check(r, after - before <= 1, "two refusals inside a window wrote %d warnings", after - before)
 		}
 	}
 	end_case(r)

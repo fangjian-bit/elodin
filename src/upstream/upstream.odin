@@ -350,7 +350,9 @@ quiet: that line carries the reason, and a second one saying only the kind is
 the same event twice. Only that kind: a handshake that timed out says nothing
 about a `TLS_Failed`. Counted in the kind's own `held` all the same, since the
 handshake line counts only handshakes and a failure of the kind on a live
-connection would otherwise be in neither number.
+connection would otherwise be in neither number. So a kind's `held=` is every
+failure of that kind its own line did not say, whether or not a handshake line
+said it, and the two lines' counts overlap by the handshakes.
 */
 @(private)
 note_failure_kind :: proc(u: ^Upstream, err: Error) -> (loud: bool, held: u64) {

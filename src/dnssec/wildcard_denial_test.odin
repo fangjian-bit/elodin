@@ -856,3 +856,42 @@ test_a_root_that_matches_no_anchor_says_so :: proc(t: ^testing.T) {
 	)
 	free_all(context.temp_allocator)
 }
+
+/*
+The detail is the RRset's own, read before anything else walks.
+
+An unsigned CNAME is given a second chance through a DNAME that could have
+synthesized it, and checking that DNAME is a walk of its own - one that clears
+the step the CNAME's walk recorded. The CNAME here sits below the broken cut at
+`evil.wdtest.`, and the DNAME at `wdtest.` matches it and is unsigned, so the
+second chance fails and the verdict is still the CNAME's broken chain.
+*/
+@(test)
+test_a_dname_check_does_not_take_the_cnames_detail :: proc(t: ^testing.T) {
+	msg, derr := dns.decode_message(wc_reply("wd_evil_answer"), context.temp_allocator)
+	testing.expect_value(t, derr, dns.Decode_Error.None)
+	msg.question[0].name = "x.evil.wdtest."
+	msg.answer = []dns.Record {
+		{name = "x.evil.wdtest.", type = .CNAME, class = .IN, ttl = 3600, data = dns.Rdata_Name{name = "x.evil.other.example."}},
+		{name = "wdtest.", type = .DNAME, class = .IN, ttl = 3600, data = dns.Rdata_Name{name = "other.example."}},
+	}
+	wire, _, encerr := dns.encode_message(msg, context.temp_allocator, compress = false)
+	testing.expect_value(t, encerr, dns.Encode_Error.None)
+
+	anchor, parsed := parse_trust_anchor(WC_ANCHOR, context.temp_allocator)
+	testing.expect(t, parsed, "the anchor did not parse")
+	anchors := []Trust_Anchor{anchor}
+	v := make_validator(wc_query, nil, Options{anchors = anchors})
+	defer destroy_validator(v)
+	result := validate(v, "x.evil.wdtest.", .A, wire, time.unix(FIXTURE_TIME, 0))
+
+	testing.expect_value(t, result.status, Status.Bogus)
+	testing.expect_value(t, result.reason, BROKEN_CHAIN)
+	testing.expectf(
+		t,
+		strings.contains(result.detail, "evil.wdtest"),
+		"the detail does not name the zone whose step broke: %q",
+		result.detail,
+	)
+	free_all(context.temp_allocator)
+}
