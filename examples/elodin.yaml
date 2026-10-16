@@ -266,8 +266,9 @@ upstream:
       hostname: dns.quad9.net
 
     # A DoH upstream is given a url instead of an address; the host in it is
-    # resolved through `bootstrap`, and the path defaults to /dns-query. HTTP/2
-    # or HTTP/1.1 is chosen by ALPN, preferring h2.
+    # resolved through `bootstrap`, and a url with no path is sent to /. HTTP/2
+    # or HTTP/1.1 is chosen by ALPN, preferring h2. Without a `name`, it goes by
+    # the url up to its query in the log and on /metrics.
     # - name: google-doh
     #   type: https
     #   url: https://dns.google/dns-query
@@ -411,7 +412,8 @@ blocking:
     #   enabled: true
     #
     # A bare string is shorthand for either: anything starting http:// or
-    # https:// is a url, anything else is a file, and the string is its name.
+    # https:// is a url, anything else is a file, and the string, up to a url's
+    # query, is its name.
     # - https://lists.cyberhost.uk/malware.txt
     # - /etc/elodin/blocklist.txt
 

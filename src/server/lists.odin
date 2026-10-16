@@ -1,6 +1,7 @@
 package server
 
 import "core:fmt"
+import "core:hash"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
@@ -68,6 +69,7 @@ one fared.
 build_filter_sets :: proc(cfg: ^config.Config, allow_network: bool, loads: []List_Load = nil) -> (block, allow: ^filter.Set) {
 	block = filter.set_make()
 	allow = filter.set_make()
+	move_query_named_caches(cfg)
 
 	for list, i in cfg.blocking.lists {
 		load := load_one_list(cfg, list, block, allow, allow_network, false)
@@ -104,6 +106,56 @@ build_filter_sets :: proc(cfg: ^config.Config, allow_network: bool, loads: []Lis
 	}
 
 	return
+}
+
+/*
+A list the file names only by a url with a query was cached, before #487, under
+the whole url, so the file name held whatever key the query carried. Each such
+copy moves to the name the list goes by now, or is removed when that url's copy
+is there already: the key leaves `cache_dir`, and a box that boots offline still has the
+list. A file that is some list's own cache under its current name is left alone,
+and so is a disabled list's copy: nothing loads that list, and its name may be
+another list's, which would then load its rules.
+*/
+@(private)
+move_query_named_caches :: proc(cfg: ^config.Config) {
+	lists := [][]config.Block_List{cfg.blocking.lists, cfg.blocking.allow_lists}
+	current := make(map[string]bool, context.temp_allocator)
+	for set in lists {
+		for list in set {
+			current[config.list_cache_file(list)] = true
+		}
+	}
+	for set in lists {
+		for list in set {
+			if list.url == "" || list.file != "" || !list.enabled || list.named {
+				continue
+			}
+			old := config.list_cache_name(list.url)
+			if current[old] {
+				continue
+			}
+			old_path, _ := filepath.join({cfg.blocking.cache_dir, old}, context.temp_allocator)
+			if !os.exists(old_path) {
+				continue
+			}
+			// A copy under the current name that is of another url - one with no
+			// query an earlier build cached there - is moved over, not kept.
+			path := list_cache_path(cfg, list)
+			if os.exists(path) && copy_is_of(list, path) {
+				if err := os.remove(old_path); err != nil {
+					logx.warnf("list %s: cannot remove the cached copy named by its url's query (%v)", list.name, err)
+				}
+				continue
+			}
+			if err := os.rename(old_path, path); err != nil {
+				logx.warnf("list %s: cannot move the cached copy to %s (%v)", list.name, path, err)
+				continue
+			}
+			// Named by this very url, so it is this url's copy.
+			mark_copy_source(cfg, list, path)
+		}
+	}
 }
 
 // What a pair of sets holds. Said of the sets being swapped in, so that a
@@ -279,6 +331,14 @@ list_contents :: proc(
 @(private)
 cached_copy :: proc(cfg: ^config.Config, list: config.Block_List, load: List_Load) -> (string, List_Load) {
 	cache_path := list_cache_path(cfg, list)
+	// A copy of another query is another list: `?category=ads` does not stand
+	// in for `?category=malware`.
+	if !copy_is_of(list, cache_path) {
+		if os.exists(cache_path) {
+			logx.infof("list %s: the cached copy at %s is of another url", list.name, cache_path)
+		}
+		return "", .Unavailable
+	}
 	data, err := os.read_entire_file(cache_path, context.allocator)
 	if err != nil {
 		return "", .Unavailable
@@ -308,9 +368,73 @@ save_cached_copy :: proc(cfg: ^config.Config, list: config.Block_List, text: str
 	if dir := filepath.dir(cache_path); dir != "" {
 		make_directories(dir)
 	}
+	// The copy goes first: a write that fails leaves the old copy beside its own
+	// fingerprint, which removed first would make it read as a url with no query.
+	// A stop between the two leaves the new copy beside the old url's, or none.
 	if werr := write_cache_file(cache_path, transmute([]byte)text); werr != nil {
 		warn_cache_unwritable(cfg, cache_path, werr)
+		return
 	}
+	mark_copy_source(cfg, list, cache_path)
+}
+
+// The fingerprint of `list`'s url beside its copy at `cache_path`, or none for a
+// url with no query.
+@(private)
+mark_copy_source :: proc(cfg: ^config.Config, list: config.Block_List, cache_path: string) {
+	if sp := source_path(cache_path); os.exists(sp) {
+		// Left in place, it marks the copy as another url's for good.
+		if rerr := os.remove(sp); rerr != nil {
+			logx.warnf("list %s: cannot remove the old fingerprint at %s (%v)", list.name, sp, rerr)
+		}
+	}
+	if src, has := source_of(list); has {
+		if werr := write_cache_file(source_path(cache_path), transmute([]byte)src); werr != nil {
+			warn_cache_unwritable(cfg, cache_path, werr)
+		}
+	}
+}
+
+/*
+A list whose url has a query is cached under a name without it, so the copy of
+`?category=ads` would read as fresh for `?category=malware`, or for a rotated
+key. A fingerprint of the url as sent goes in a file beside the copy, and only a
+copy whose fingerprint matches is fresh, or stands in when a download fails;
+any other is another list's, and is downloaded over. The fingerprint is never logged, and
+the file name the log does show holds no part of the query. A url with no query
+is the list its name says, and has none; a copy beside a fingerprint is of a url
+with a query, so it is not fresh for one without.
+*/
+@(private)
+source_of :: proc(list: config.Block_List) -> (src: string, has: bool) {
+	sent := config.url_sent(list.url)
+	if sent == config.url_name(list.url) {
+		return "", false
+	}
+	return fmt.tprintf("%016x\n", hash.fnv64a(transmute([]byte)sent)), true
+}
+
+@(private)
+source_path :: proc(cache_path: string) -> string {
+	return fmt.tprintf("%s.src", cache_path)
+}
+
+/*
+Whether the cached copy at `cache_path` was downloaded from the url `list` names
+now. A copy with no fingerprint is of a url with no query, or of a list the file
+names: a build before #487 cached that under its name and wrote none.
+*/
+@(private)
+copy_is_of :: proc(list: config.Block_List, cache_path: string) -> bool {
+	src, has := source_of(list)
+	if !os.exists(source_path(cache_path)) {
+		return !has || list.named
+	}
+	if !has {
+		return false
+	}
+	data, err := os.read_entire_file(source_path(cache_path), context.temp_allocator)
+	return err == nil && string(data) == src
 }
 
 @(private)
@@ -323,14 +447,15 @@ Fetch :: enum u8 {
 @(private)
 fetch_list :: proc(cfg: ^config.Config, list: config.Block_List, ignore_fresh := false) -> (text: string, fetch: Fetch) {
 	// Skip the download when the cached copy is still within the refresh window.
-	if info, err := os.stat(list_cache_path(cfg, list), context.temp_allocator); err == nil && !ignore_fresh {
+	path := list_cache_path(cfg, list)
+	if info, err := os.stat(path, context.temp_allocator); err == nil && !ignore_fresh {
 		age := time.diff(info.modification_time, time.now())
-		if age < cfg.blocking.refresh {
+		if age < cfg.blocking.refresh && copy_is_of(list, path) {
 			return "", .Cache_Is_Fresh
 		}
 	}
 
-	logx.infof("list %s: downloading %s", list.name, list.url)
+	logx.infof("list %s: downloading %s", list.name, config.url_name(list.url))
 	body, ferr := upstream.fetch_url(list.url, cfg.upstream.bootstrap, FETCH_TIMEOUT, FETCH_DEADLINE, context.allocator)
 	if ferr != .None {
 		logx.warnf("list %s: download failed (%v)", list.name, ferr)
@@ -369,7 +494,8 @@ router or SD-card board `small-device.yaml` is for - leaves a partial list the
 next start without a network would load as the whole of it. So the new copy goes
 to a temporary file beside the old, reaches the disk, and is renamed over it;
 rename(2) replaces the name atomically. The temporary name ends in
-`.tmp`, which no `sanitise_name` result does, so it cannot be another list's.
+`.tmp`, which no `config.list_cache_file` result or fingerprint file does, so it
+cannot be another list's.
 */
 @(private)
 write_cache_file :: proc(path: string, body: []byte) -> (err: os.Error) {
@@ -393,25 +519,8 @@ write_cache_file :: proc(path: string, body: []byte) -> (err: os.Error) {
 
 @(private)
 list_cache_path :: proc(cfg: ^config.Config, list: config.Block_List) -> string {
-	joined, _ := filepath.join({cfg.blocking.cache_dir, sanitise_name(list.name)}, context.temp_allocator)
+	joined, _ := filepath.join({cfg.blocking.cache_dir, config.list_cache_file(list)}, context.temp_allocator)
 	return joined
-}
-
-// Turn a list name into something safe to use as a file name.
-@(private)
-sanitise_name :: proc(name: string) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	for i in 0 ..< len(name) {
-		c := name[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_', c == '.':
-			strings.write_byte(&b, c)
-		case:
-			strings.write_byte(&b, '_')
-		}
-	}
-	strings.write_string(&b, ".list")
-	return strings.to_string(b)
 }
 
 /*

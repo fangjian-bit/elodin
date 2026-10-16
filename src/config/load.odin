@@ -1268,6 +1268,7 @@ load_upstream_spec :: proc(
 	}
 
 	opt_string(l, n, "name", &spec.name, path)
+	spec.named = spec.name != ""
 	opt_string(l, n, "address", &spec.address, path)
 	opt_string(l, n, "hostname", &spec.hostname, path)
 	opt_string(l, n, "url", &spec.url, path)
@@ -1438,7 +1439,7 @@ parse_upstream_shorthand :: proc(
 		spec.hostname = host_only
 		spec.port = url_port if url_port != 0 else 443
 		spec.path = netx.origin_form(url_path, l.allocator)
-		spec.name = s
+		spec.name = describe_upstream(spec, l.allocator)
 		return spec, true
 	}
 
@@ -1483,7 +1484,7 @@ parse_upstream_shorthand :: proc(
 
 describe_upstream :: proc(spec: Upstream_Spec, allocator := context.allocator) -> string {
 	if spec.kind == .HTTPS {
-		return strings.clone(spec.url, allocator)
+		return strings.clone(url_name(spec.url), allocator)
 	}
 	scheme := "udp"
 	switch spec.kind {
@@ -1607,10 +1608,11 @@ load_block_lists :: proc(l: ^Loader, n: ^yaml.Node, path: string) -> []Block_Lis
 					continue
 				}
 				bl.url = s
+				bl.name = url_name(s)
 			} else {
 				bl.file = s
+				bl.name = s
 			}
-			bl.name = s
 			append(&out, bl)
 			continue
 		}
@@ -1619,6 +1621,7 @@ load_block_lists :: proc(l: ^Loader, n: ^yaml.Node, path: string) -> []Block_Lis
 			continue
 		}
 		opt_string(l, e, "name", &bl.name, item_path)
+		bl.named = bl.name != ""
 		opt_string(l, e, "url", &bl.url, item_path)
 		opt_string(l, e, "file", &bl.file, item_path)
 		opt_bool(l, e, "enabled", &bl.enabled, item_path)
@@ -1646,7 +1649,7 @@ load_block_lists :: proc(l: ^Loader, n: ^yaml.Node, path: string) -> []Block_Lis
 			continue
 		}
 		if bl.name == "" {
-			bl.name = bl.url if bl.url != "" else bl.file
+			bl.name = url_name(bl.url) if bl.url != "" else bl.file
 		}
 		append(&out, bl)
 	}
@@ -2619,6 +2622,8 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 		}
 	}
 	check_bootstrap(l, cfg.upstream.servers)
+	check_default_upstream_names(l, cfg)
+	check_list_cache_names(l, cfg)
 
 	/*
 	Each route held to what the default group is held to: servers it can

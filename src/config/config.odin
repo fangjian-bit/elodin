@@ -119,6 +119,8 @@ Upstream_Spec :: struct {
 	// Addresses used to resolve `hostname` when it is not an IP literal.
 	bootstrap: []string,
 	verify:    bool,
+	// The file gave `name:`; otherwise it is what `describe_upstream` built.
+	named:     bool,
 }
 
 Strategy :: enum u8 {
@@ -311,6 +313,8 @@ Block_List :: struct {
 	file:    string,
 	format:  List_Format,
 	enabled: bool,
+	// The file gave `name:`; otherwise it is the url up to its query, or the file.
+	named:   bool,
 }
 
 Blocking_Config :: struct {

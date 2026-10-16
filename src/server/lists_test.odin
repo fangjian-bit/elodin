@@ -296,6 +296,207 @@ test_a_cached_page_is_not_a_list :: proc(t: ^testing.T) {
 	testing.expect_value(t, text, "")
 }
 
+/*
+A copy an earlier build cached under a list's whole url, query and key included,
+moves to the name the list goes by now, so an offline start still loads it and
+the key leaves the cache directory; with a copy already there it is removed. A
+file that is another list's cache under its own name is not touched (#487).
+*/
+@(test)
+test_a_cache_named_by_a_query_moves :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	dir := fmt.tprintf("/tmp/elodin-server-lists-test-move-%d", os.get_pid())
+	testing.expect(t, os.make_directory(dir) == nil)
+	defer os.remove(dir)
+	cfg := config.default_config()
+	cfg.blocking.cache_dir = dir
+	moved := config.Block_List{name = "http://192.0.2.1/a", url = "http://192.0.2.1/a?key=SECRET", format = .Hosts, enabled = true}
+	stale := config.Block_List{name = "http://192.0.2.1/b", url = "http://192.0.2.1/b?key=SECRET", format = .Hosts, enabled = true}
+	kept := config.Block_List{name = "http://192.0.2.1/c?key=SECRET", url = "http://192.0.2.1/c?key=SECRET", format = .Hosts, enabled = true, named = true}
+	other := config.Block_List{name = "http://192.0.2.1/c", url = "http://192.0.2.1/c?key=SECRET", format = .Hosts, enabled = true}
+	// A disabled list is not loaded, and its old copy is not moved: its name is
+	// another list's here, which would load the disabled one's rules.
+	off := config.Block_List{name = "http://192.0.2.1/d", url = "http://192.0.2.1/d?key=SECRET", format = .Hosts}
+	on := config.Block_List{name = "http://192.0.2.1/d", url = "http://192.0.2.9/d", format = .Hosts, enabled = true}
+	// The copy under its current name is of the url with no query, which an
+	// earlier build cached there: the old copy is this url's, and moves over it.
+	over := config.Block_List{name = "http://192.0.2.1/e", url = "http://192.0.2.1/e?key=SECRET", format = .Hosts, enabled = true}
+	cfg.blocking.lists = []config.Block_List{moved, stale, kept, other, off, on, over}
+
+	path_of :: proc(dir, name: string) -> string {
+		return strings.concatenate({dir, "/", config.list_cache_name(name)}, context.temp_allocator)
+	}
+	files := []string{path_of(dir, moved.url), path_of(dir, stale.url), list_cache_path(&cfg, stale), path_of(dir, kept.name), path_of(dir, off.url), path_of(dir, over.url), list_cache_path(&cfg, over)}
+	bodies := []string{"0.0.0.0 moved.example\n", "0.0.0.0 stale.example\n", "0.0.0.0 current.example\n", "0.0.0.0 kept.example\n", "0.0.0.0 off.example\n", "0.0.0.0 over.example\n", "0.0.0.0 bare.example\n"}
+	for f, i in files {
+		testing.expect(t, os.write_entire_file(f, bodies[i]) == nil)
+	}
+	// The current copy is the stale list's own, by its fingerprint.
+	src, _ := source_of(stale)
+	testing.expect(t, os.write_entire_file(source_path(files[2]), src) == nil)
+	defer {
+		for f in ([]string{list_cache_path(&cfg, moved), list_cache_path(&cfg, other), list_cache_path(&cfg, on)}) {
+			os.remove(f)
+		}
+		for f in files {
+			os.remove(f)
+			os.remove(source_path(f))
+		}
+		os.remove(source_path(list_cache_path(&cfg, moved)))
+	}
+
+	block, allow := build_filter_sets(&cfg, false)
+	defer filter.set_destroy(block)
+	defer filter.set_destroy(allow)
+	testing.expect(t, filter.set_lookup(block, "moved.example"), "the old copy did not stand in offline")
+	testing.expect(t, filter.set_lookup(block, "current.example"), "the current copy was replaced")
+	testing.expect(t, !os.exists(files[0]), "the old copy is still under its url")
+	testing.expect(t, os.exists(list_cache_path(&cfg, moved)), "the old copy did not move to the list's name")
+	testing.expect(t, !os.exists(files[1]), "the old copy beside a current one was kept")
+	testing.expect(t, os.exists(files[3]), "another list's own cache was touched")
+	testing.expect(t, !filter.set_lookup(block, "off.example"), "a disabled list's old copy loaded as another list")
+	testing.expect(t, os.exists(files[4]), "a disabled list's old copy moved")
+	testing.expect(t, filter.set_lookup(block, "over.example"), "the old copy was removed for another url's")
+	testing.expect(t, !filter.set_lookup(block, "bare.example"), "the url with no query's copy loaded as the list")
+	testing.expect(t, !os.exists(files[5]), "the old copy is still under its url")
+}
+
+/*
+A list whose url has a query is cached under a name without it, and a copy of
+one query is not fresh for another: the list is downloaded again rather than
+read from the old query's copy for the rest of the refresh window. The fragment,
+never sent, changes nothing, and a url with no query needs no fingerprint. No
+file name, and no fingerprint, holds the query (#487).
+*/
+@(test)
+test_a_changed_query_is_not_fresh :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	dir := fmt.tprintf("/tmp/elodin-server-lists-test-query-%d", os.get_pid())
+	testing.expect(t, os.make_directory(dir) == nil)
+	defer os.remove(dir)
+	cfg := config.default_config()
+	cfg.blocking.cache_dir = dir
+	// Port 1 on loopback refuses at once, so a download that is tried fails fast.
+	a := config.Block_List{name = "http://127.0.0.1:1/l", url = "http://127.0.0.1:1/l?key=SECRET1", format = .Hosts, enabled = true}
+	b := config.Block_List{name = a.name, url = "http://127.0.0.1:1/l?key=SECRET2", format = .Hosts, enabled = true}
+	c := config.Block_List{name = a.name, url = "http://127.0.0.1:1/l?key=SECRET1#x", format = .Hosts, enabled = true}
+	plain := config.Block_List{name = "http://127.0.0.1:1/p", url = "http://127.0.0.1:1/p", format = .Hosts, enabled = true}
+	path := list_cache_path(&cfg, a)
+	defer {
+		os.remove(path)
+		os.remove(source_path(path))
+		os.remove(list_cache_path(&cfg, plain))
+	}
+	save_cached_copy(&cfg, a, "0.0.0.0 a.example\n")
+	save_cached_copy(&cfg, plain, "0.0.0.0 p.example\n")
+
+	_, fresh := fetch_list(&cfg, a)
+	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
+	_, fresh = fetch_list(&cfg, c)
+	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
+	_, fresh = fetch_list(&cfg, b)
+	testing.expect_value(t, fresh, Fetch.Failed)
+	_, fresh = fetch_list(&cfg, plain)
+	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
+	testing.expect(t, !os.exists(source_path(list_cache_path(&cfg, plain))), "a url with no query has a fingerprint")
+	// Nor does it stand in when that download fails: it is another list. Its
+	// own url's copy does.
+	text, load := cached_copy(&cfg, b, .Stale)
+	testing.expect_value(t, load, List_Load.Unavailable)
+	testing.expect_value(t, text, "")
+	text, load = cached_copy(&cfg, a, .Stale)
+	testing.expect_value(t, load, List_Load.Stale)
+	testing.expect_value(t, text, "0.0.0.0 a.example\n")
+	delete(text)
+
+	testing.expect(t, !strings.contains(path, "SECRET"), "the query is in the file name")
+	src, _ := os.read_entire_file(source_path(path), context.temp_allocator)
+	testing.expect(t, len(src) > 0 && !strings.contains(string(src), "SECRET"), "the fingerprint is %q", string(src))
+
+	// The query dropped from the url: the copy of the query is not fresh for it,
+	// and its own copy, once saved, leaves no fingerprint behind to say otherwise.
+	bare := config.Block_List{name = a.name, url = "http://127.0.0.1:1/l", format = .Hosts, enabled = true}
+	_, fresh = fetch_list(&cfg, bare)
+	testing.expect_value(t, fresh, Fetch.Failed)
+	save_cached_copy(&cfg, bare, "0.0.0.0 bare.example\n")
+	testing.expect(t, !os.exists(source_path(path)), "the query's fingerprint outlived its copy")
+	_, fresh = fetch_list(&cfg, bare)
+	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
+	_, fresh = fetch_list(&cfg, a)
+	testing.expect_value(t, fresh, Fetch.Failed)
+}
+
+/*
+A list the file names was cached under that name before #487, with no
+fingerprint: that copy is still the list's, fresh and standing in offline. And a
+copy that cannot be written leaves the old one beside its own fingerprint, not
+one that reads as a url with no query's.
+*/
+@(test)
+test_a_named_lists_copy_survives_the_fingerprint :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	dir := fmt.tprintf("/tmp/elodin-server-lists-test-named-%d", os.get_pid())
+	testing.expect(t, os.make_directory(dir) == nil)
+	defer os.remove(dir)
+	cfg := config.default_config()
+	cfg.blocking.cache_dir = dir
+	named := config.Block_List{name = "oisd", url = "http://127.0.0.1:1/l?key=SECRET", format = .Hosts, enabled = true, named = true}
+	path := list_cache_path(&cfg, named)
+	defer {
+		os.remove(path)
+		os.remove(source_path(path))
+		os.remove(fmt.tprintf("%s.tmp", path))
+	}
+	testing.expect(t, os.write_entire_file(path, "0.0.0.0 named.example\n") == nil)
+	_, fresh := fetch_list(&cfg, named)
+	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
+	text, load := cached_copy(&cfg, named, .Stale)
+	testing.expect_value(t, load, List_Load.Stale)
+	delete(text)
+
+	// A query copy, then a write of the same name for the url with none fails.
+	save_cached_copy(&cfg, named, "0.0.0.0 named.example\n")
+	testing.expect(t, os.exists(source_path(path)))
+	testing.expect(t, os.make_directory(fmt.tprintf("%s.tmp", path)) == nil)
+	bare := config.Block_List{name = "oisd", url = "http://127.0.0.1:1/l", format = .Hosts, enabled = true, named = true}
+	save_cached_copy(&cfg, bare, "0.0.0.0 bare.example\n")
+	testing.expect(t, os.exists(source_path(path)), "a failed write dropped the old copy's fingerprint")
+}
+
+/*
+A name the file gives is the file's, though it spells the url up to its query:
+the copy an earlier build cached under it, with no fingerprint, is still the
+list's, fresh and standing in offline (#487).
+*/
+@(test)
+test_a_given_name_like_a_default_keeps_its_copy :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	dir := fmt.tprintf("/tmp/elodin-server-lists-test-given-%d", os.get_pid())
+	testing.expect(t, os.make_directory(dir) == nil)
+	defer os.remove(dir)
+	cfg, err := config.load_string(
+		"upstream:\n  servers: [1.1.1.1]\nblocking:\n  lists: [{name: \"http://127.0.0.1:1/g\", url: \"http://127.0.0.1:1/g?key=SECRET\"}]\n",
+		context.temp_allocator,
+	)
+	if e, has := err.?; has {
+		testing.expectf(t, false, "%v", e.messages)
+		return
+	}
+	cfg.blocking.cache_dir = dir
+	list := cfg.blocking.lists[0]
+	path := list_cache_path(&cfg, list)
+	defer {
+		os.remove(path)
+		os.remove(source_path(path))
+	}
+	testing.expect(t, os.write_entire_file(path, "0.0.0.0 given.example\n") == nil)
+	_, fresh := fetch_list(&cfg, list)
+	testing.expect_value(t, fresh, Fetch.Cache_Is_Fresh)
+	text, load := cached_copy(&cfg, list, .Stale)
+	testing.expect_value(t, load, List_Load.Stale)
+	delete(text)
+}
+
 @(private = "file")
 One_List :: struct {
 	listener: net.TCP_Socket,

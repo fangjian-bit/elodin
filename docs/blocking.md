@@ -26,6 +26,16 @@ Downloaded lists are cached under `cache_dir`, every `refresh`. A download
 that fails falls back to the cached copy if there is one, so a network outage
 does not turn blocking off once a list has been fetched.
 
+A list is logged under its `name`, and cached under it; without one the name is
+the `url` up to its query, or the `file` when there is no url, so a key in the
+query is not logged. A list whose url has a query keeps a fingerprint of the url
+beside its copy (`<file>.src`), so changing the query in the file downloads the
+list again rather than reading the old query's copy as fresh, and the old copy
+does not stand in if that download fails: it is another list.
+Two downloaded lists with different urls that would share a cache file are
+refused at load; give one a different `name:`. Characters other than letters,
+digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share one.
+
 - A download follows up to 4 redirects (301, 302, 303, 307, 308), resolving a
   relative `Location` against the url that answered it (RFC 3986 5.2). An
   `https` list is never followed to `http`, and a list on a public address is
