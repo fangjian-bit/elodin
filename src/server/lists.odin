@@ -330,7 +330,7 @@ fetch_list :: proc(cfg: ^config.Config, list: config.Block_List, ignore_fresh :=
 		}
 	}
 
-	logx.infof("list %s: downloading %s", list.name, list.url)
+	logx.infof("list %s: downloading %s", list.name, config.url_name(list.url))
 	body, ferr := upstream.fetch_url(list.url, cfg.upstream.bootstrap, FETCH_TIMEOUT, FETCH_DEADLINE, context.allocator)
 	if ferr != .None {
 		logx.warnf("list %s: download failed (%v)", list.name, ferr)
@@ -369,7 +369,7 @@ router or SD-card board `small-device.yaml` is for - leaves a partial list the
 next start without a network would load as the whole of it. So the new copy goes
 to a temporary file beside the old, reaches the disk, and is renamed over it;
 rename(2) replaces the name atomically. The temporary name ends in
-`.tmp`, which no `sanitise_name` result does, so it cannot be another list's.
+`.tmp`, which no `config.list_cache_name` result does, so it cannot be another list's.
 */
 @(private)
 write_cache_file :: proc(path: string, body: []byte) -> (err: os.Error) {
@@ -393,25 +393,8 @@ write_cache_file :: proc(path: string, body: []byte) -> (err: os.Error) {
 
 @(private)
 list_cache_path :: proc(cfg: ^config.Config, list: config.Block_List) -> string {
-	joined, _ := filepath.join({cfg.blocking.cache_dir, sanitise_name(list.name)}, context.temp_allocator)
+	joined, _ := filepath.join({cfg.blocking.cache_dir, config.list_cache_name(list.name)}, context.temp_allocator)
 	return joined
-}
-
-// Turn a list name into something safe to use as a file name.
-@(private)
-sanitise_name :: proc(name: string) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	for i in 0 ..< len(name) {
-		c := name[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_', c == '.':
-			strings.write_byte(&b, c)
-		case:
-			strings.write_byte(&b, '_')
-		}
-	}
-	strings.write_string(&b, ".list")
-	return strings.to_string(b)
 }
 
 /*

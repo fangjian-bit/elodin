@@ -55,7 +55,7 @@ scrape_configs:
 | `elodin_cache_prefetches_total` | counter | entries refreshed in the background because a query reached them near expiry (`cache.prefetch`). Not counted as queries or answers |
 | `elodin_cache_prefetch_failures_total` | counter | prefetches that left the entry unrenewed: no answer, nothing storable, or an answer ending no later than the old entry (a caching upstream's counted-down TTL) |
 | `elodin_filter_rules{list}` | gauge | rules loaded, `block` and `allow`, regex rules included |
-| `elodin_upstream_queries_total{upstream}` | counter | queries sent to each upstream, by its configured name |
+| `elodin_upstream_queries_total{upstream}` | counter | queries sent to each upstream, by its [name](upstreams.md) |
 | `elodin_upstream_failures_total{upstream}` | counter | exchanges that produced no usable answer |
 | `elodin_upstream_failure_kind_total{upstream,error}` | counter | the same, by cause: `timeout`, `io_error`, `peer_closed`, `bad_response`, `tls_failed`, `verify_failed`, `dial_failed`, `dial_reset`, `http_error`, `too_large`, `not_resolved`. Only kinds that occurred appear. The log names each kind once, so this is the only running record of why an upstream fails. A lone `peer_closed` does not count towards the cooldown; a sustained run does |
 | `elodin_upstream_latency_seconds_total{upstream}` | counter | cumulative round-trip time; divide by the query counter under `rate()` for the mean |

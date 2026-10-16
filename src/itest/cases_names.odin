@@ -1,0 +1,103 @@
+package itest
+
+import "core:fmt"
+import "core:os"
+import "core:path/filepath"
+import "core:strings"
+import "elodin:dns"
+
+/*
+A DoH upstream and a list that the file names only by a url with a key in the
+query (#487). The query is still sent - the list mock serves only the path with
+it - but the name the log and /metrics show stops before it, and so does the
+name of the list's cache file. A dead upstream ahead of the live one puts a
+warn-level failure line under the name.
+*/
+run_name_cases :: proc(r: ^Runner) {
+	fix := fixture("a")
+	payload := from_hex(fix.response, context.allocator)
+	defer delete(payload)
+
+	http_port := next_port(r)
+	http := http_mock_make(http_port)
+	http_mock_serve(http, "/hosts.txt?key=SECRET3", "0.0.0.0 named.test\n")
+	if !http_mock_start(http) {
+		skip_case(r, "names: a default name holds no query", "cannot start the HTTP mock")
+		return
+	}
+	defer http_mock_stop(http)
+
+	upstream_port := next_port(r)
+	mock := doh2_mock_make(upstream_port, "/dns-query", payload)
+	if !doh2_mock_start(mock, r.cert_file, r.key_file) {
+		skip_case(r, "names: a default name holds no query", "cannot start the mock")
+		return
+	}
+	defer doh2_mock_stop(mock)
+
+	cache_dir := filepath.join({r.work_dir, "namecache"}, context.allocator) or_else ""
+	defer delete(cache_dir)
+	dead_port := next_port(r)
+	udp_port := next_port(r)
+	metrics_port := next_port(r)
+	config := fmt.tprintf(
+		`log: {{ level: debug }}
+listeners:
+  udp: {{ enabled: true, address: "127.0.0.1", port: %d }}
+  tcp: {{ enabled: false }}
+upstream:
+  timeout: 3s
+  strategy: failover
+  servers:
+    - {{ url: "https://127.0.0.1:%d/dns-query?token=SECRET1", verify: false }}
+    - {{ url: "https://127.0.0.1:%d/dns-query?token=SECRET2#frag", verify: false }}
+cache: {{ enabled: false }}
+metrics: {{ enabled: true, address: "127.0.0.1", port: %d }}
+blocking:
+  enabled: true
+  response: nxdomain
+  cache_dir: %s
+  lists: ["http://127.0.0.1:%d/hosts.txt?key=SECRET3"]
+`,
+		udp_port,
+		dead_port,
+		upstream_port,
+		metrics_port,
+		cache_dir,
+		http_port,
+	)
+	srv, ok := start_server(r, Server_Options{config = config, udp_port = udp_port, allow_fetch = true})
+	if !ok {
+		skip_case(r, "names: a default name holds no query", "server did not start")
+		return
+	}
+	defer stop_server(&srv)
+
+	start_case(r, "names: a default name holds no query, in the log, on /metrics or in the list cache")
+	{
+		check_eq_int(r, http_mock_hits(http, "/hosts.txt?key=SECRET3"), 1, "fetches of the list with its query")
+		blocked := query_udp(udp_port, build_query("named.test.", u16(dns.Type.A)))
+		if check(r, blocked.ok, "no response for a listed name") {
+			check(r, parse_header(r, blocked.wire).rcode == int(dns.Rcode.NX_Domain), "the list was not applied")
+		}
+		res := query_udp(udp_port, build_query(fix.qname, fix.qtype))
+		if check(r, res.ok, "no response") {
+			check_eq_int(r, parse_header(r, res.wire).ancount, fix.ancount, "answer count")
+		}
+
+		live := fmt.tprintf("https://127.0.0.1:%d/dns-query", upstream_port)
+		dead := fmt.tprintf("https://127.0.0.1:%d/dns-query", dead_port)
+		if check(r, wait_http(metrics_port, "/metrics"), "the metrics endpoint never answered") {
+			page := string(http_request(metrics_port, "GET", "/metrics", context.temp_allocator).body)
+			check(r, strings.contains(page, fmt.tprintf("elodin_upstream_queries_total{{upstream=\"%s\"}}", live)), "no series for %s:\n%s", live, page)
+			check(r, strings.contains(page, fmt.tprintf("elodin_upstream_failures_total{{upstream=\"%s\"}}", dead)), "no failures for %s:\n%s", dead, page)
+			check(r, !strings.contains(page, "SECRET"), "the scrape shows a query:\n%s", page)
+		}
+		log := read_log(&srv)
+		check(r, strings.contains(log, fmt.tprintf("upstream %s", dead)), "the dead upstream's failure is not logged under its name:\n%s", log)
+		check(r, !strings.contains(log, "SECRET"), "the log shows a query:\n%s", log)
+		cached := filepath.join({cache_dir, fmt.tprintf("http___127.0.0.1_%d_hosts.txt.list", http_port)}, context.temp_allocator) or_else ""
+		check(r, os.exists(cached), "the list is not cached as %s", cached)
+	}
+	end_case(r)
+}

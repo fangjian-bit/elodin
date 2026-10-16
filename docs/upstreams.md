@@ -37,6 +37,14 @@ An `https` upstream is sent its url from the path on, query included
 (`https://dns.example/dns-query?profile=ab12`), as the target of each POST. A
 url with no path is sent to `/`.
 
+A server's `name` is what the log and the `upstream` label on
+[`/metrics`](metrics.md) call it. Without one it is `udp://`, `tcp://` or
+`tls://` with the address and port, or for `https` the url up to its query, so
+`https://dns.example/dns-query?token=…` goes by `https://dns.example/dns-query`:
+a key in the query reaches neither. Two different servers that would go by the
+same default name are refused at load; give one a `name:`, which the map form of
+a server takes. A name set on several servers counts them as one.
+
 ## Time budget
 
 A query waits at most about two `timeout`s on its upstreams, however many servers

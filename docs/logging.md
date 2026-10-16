@@ -36,6 +36,8 @@ Every five minutes, `msg=stats` carries, in order: `queries`, `blocked`,
   filter on `client` alone.
 - The query name is escaped like any other value, so a name holding a quote or
   newline cannot forge a field.
+- A forwarded answer's `detail` is the [name](upstreams.md) of the upstream
+  that gave it, the name warnings about that upstream are logged under too.
 
 ## Repeated refusals
 
