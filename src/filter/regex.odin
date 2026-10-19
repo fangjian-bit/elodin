@@ -281,9 +281,10 @@ regex_cost :: proc(re: regex.Regular_Expression) -> int {
 What pattern matches `normalised` for `qtype`: none, only ones with a
 `$dnstype`, or one for every type, which is looked for past the others so a
 block can say which it was. With `some_type`, only patterns with a `$dnstype`
-are asked, whatever types they name.
+are asked, whatever types they name. With `first`, or `some_type`, the first
+match answers, for a caller asking only whether any pattern matches.
 */
-regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type, some_type := false) -> (best: Coverage) {
+regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type, some_type := false, first := false) -> (best: Coverage) {
 	if s == nil || len(s.regexes) == 0 {
 		return .None
 	}
@@ -314,6 +315,9 @@ regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type, some_type := 
 		if matched {
 			if any_type {
 				return .Any
+			}
+			if first || some_type {
+				return .Typed
 			}
 			best = .Typed
 		}

@@ -40,8 +40,11 @@ says a record in it could not be read. All three withhold the answer, and an
 operator whose site broke needs to know which - being sent to look for a
 seventeen-name chain that does not exist is worse than being told nothing.
 
+`Listed_Typed` is `Listed` by `$dnstype` rules alone, kept apart because it is
+answered NODATA where `Listed` is NXDOMAIN (`build_block_response`).
+
 Stored in the cache as the byte behind them, so a remembered refusal still says
-which of the three it was.
+which it was and is answered as it was the first time.
 */
 @(private)
 Cloak_Verdict :: enum u8 {

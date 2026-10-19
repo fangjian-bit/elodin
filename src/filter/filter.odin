@@ -448,13 +448,13 @@ engine_match :: proc(e: ^Engine, name: string, qtype: dns.Type, typed_only: ^boo
 		return .Allowed
 	}
 	listed := set_cover(e.block, key, qtype)
-	if regex_lookup(e.allow, key, qtype) != .None {
+	if regex_lookup(e.allow, key, qtype, first = true) != .None {
 		return .Allowed
 	}
 	// Past a block for some types, the regexes are asked only for whether it
 	// was one for every type, which only `typed_only` wants to know.
 	if listed == .None || (listed == .Typed && typed_only != nil) {
-		listed = max(listed, regex_lookup(e.block, key, qtype))
+		listed = max(listed, regex_lookup(e.block, key, qtype, first = typed_only == nil))
 	}
 	if listed == .None {
 		return .None
