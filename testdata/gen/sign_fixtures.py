@@ -1361,28 +1361,36 @@ def wildcard_nodata():
     emit("wn_delegation_ds", "foo.wntest.", "DS", message("foo.wntest.", DS, [], authority))
 
 
-@scenario
-def cname_denial():
-    """Cover a CNAME chain that ends in a NODATA or NXDOMAIN at another zone."""
-    # Issue #186. The CNAME is signed by `cdsrc.`; what says its target has
-    # nothing is the denial in the authority section, signed by the target's
-    # zone, which is the zone a validator has to establish to read it (RFC 6840
-    # section 5.8 puts relevant negative responses under AD as well). `cdtgt.`
-    # answers with NSEC, `cdn3.` with NSEC3, and `cdun.` is an unsigned
-    # delegation. The rest are the shapes that must not pass: a SOA with no
-    # proof, a proof that does not deny the type asked for, and a genuine proof
-    # lifted from the source zone. The walk's DS question for each target gets
-    # the same denial the zone sends for any type there.
-    root = Key(".", "cdenial-root")
-    src = Key("cdsrc.", "cdenial-source")
-    tgt = Key("cdtgt.", "cdenial-target")
-    n3 = Key("cdn3.", "cdenial-nsec3")
-    oo = Key("cdoo.", "cdenial-opt-out")
+def cd_cname(src, owner, target):
+    """A CNAME signed by the source zone, as the `cname_denial` answers carry it."""
+    rrset = [RR(owner, CNAME, wire_name(target))]
+    return rrset + [sign(rrset, src)]
 
+
+def cd_soa(key):
+    """The zone's apex SOA and its signature."""
+    soa = [soa_rr(key.zone)]
+    return soa + [sign(soa, key)]
+
+
+def cd_nsec(key, owner, next_name, types):
+    """One NSEC and its signature."""
+    rrset = [RR(owner, NSEC, nsec_rdata(next_name, types))]
+    return rrset + [sign(rrset, key)]
+
+
+def cd_answer(key, qname, qtype, records, authority, rcode=0):
+    """Emit one `cname_denial` reply to an A or AAAA question."""
+    emit(key, qname, {A: "A", AAAA: "AAAA"}[qtype],
+         message(qname, qtype, records, authority, rcode=rcode), rcode)
+
+
+def cd_chain(root, zones):
+    """Emit the trust anchor, each signed zone, and the unsigned `cdun.`."""
     root_keys = [RR(".", DNSKEY, root.rdata)]
     print("// anchor: %s" % root.ds_text())
     emit("cd_root_dnskey", ".", "DNSKEY", message(".", DNSKEY, root_keys + [sign(root_keys, root)]))
-    for key in (src, tgt, n3, oo):
+    for key in zones:
         ds_set = [RR(key.zone, DS, key.ds())]
         emit("cd_ds_" + key.zone[:-1], key.zone, "DS", message(key.zone, DS, ds_set + [sign(ds_set, root)]))
         keys = [RR(key.zone, DNSKEY, key.rdata)]
@@ -1391,33 +1399,20 @@ def cname_denial():
     unsigned = [RR("cdun.", NSEC, nsec_rdata("cdzz.", [NS, RRSIG, NSEC]))]
     emit("cd_ds_cdun", "cdun.", "DS", message("cdun.", DS, [], unsigned + [sign(unsigned, root)]))
 
-    def cname(owner, target):
-        rrset = [RR(owner, CNAME, wire_name(target))]
-        return rrset + [sign(rrset, src)]
 
-    def signed_soa(key):
-        soa = [soa_rr(key.zone)]
-        return soa + [sign(soa, key)]
-
-    def nsec(key, owner, next_name, types):
-        rrset = [RR(owner, NSEC, nsec_rdata(next_name, types))]
-        return rrset + [sign(rrset, key)]
-
-    def answer(key, qname, qtype, records, authority, rcode=0):
-        emit(key, qname, {A: "A", AAAA: "AAAA"}[qtype],
-             message(qname, qtype, records, authority, rcode=rcode), rcode)
-
+def cd_proven(src, tgt, n3):
+    """Emit the denials that hold up, and return the NSEC NODATA proof."""
     # `cdtgt.` holds its apex and `host.cdtgt.`, which has an A record and no
     # AAAA. The apex NSEC covers `*.cdtgt.`, the host's wraps past every name
     # after it, so the two between them are a whole name error.
-    apex = nsec(tgt, "cdtgt.", "host.cdtgt.", [NS, SOA, RRSIG, NSEC, DNSKEY])
-    host = nsec(tgt, "host.cdtgt.", "cdtgt.", [A, RRSIG, NSEC])
-    nodata = signed_soa(tgt) + host
-    nxdomain = signed_soa(tgt) + apex + host
-    answer("cd_nodata", "www.cdsrc.", AAAA, cname("www.cdsrc.", "host.cdtgt."), nodata)
-    answer("cd_nxdomain", "gone.cdsrc.", A, cname("gone.cdsrc.", "missing.cdtgt."), nxdomain, rcode=3)
-    answer("cd_two_hops", "two.cdsrc.", AAAA,
-           cname("two.cdsrc.", "mid.cdsrc.") + cname("mid.cdsrc.", "host.cdtgt."), nodata)
+    apex = cd_nsec(tgt, "cdtgt.", "host.cdtgt.", [NS, SOA, RRSIG, NSEC, DNSKEY])
+    host = cd_nsec(tgt, "host.cdtgt.", "cdtgt.", [A, RRSIG, NSEC])
+    nodata = cd_soa(tgt) + host
+    nxdomain = cd_soa(tgt) + apex + host
+    cd_answer("cd_nodata", "www.cdsrc.", AAAA, cd_cname(src, "www.cdsrc.", "host.cdtgt."), nodata)
+    cd_answer("cd_nxdomain", "gone.cdsrc.", A, cd_cname(src, "gone.cdsrc.", "missing.cdtgt."), nxdomain, rcode=3)
+    cd_answer("cd_two_hops", "two.cdsrc.", AAAA,
+              cd_cname(src, "two.cdsrc.", "mid.cdsrc.") + cd_cname(src, "mid.cdsrc.", "host.cdtgt."), nodata)
     emit("cd_host_ds", "host.cdtgt.", "DS", message("host.cdtgt.", DS, [], nodata))
     emit("cd_missing_ds", "missing.cdtgt.", "DS", message("missing.cdtgt.", DS, [], nxdomain, rcode=3), 3)
 
@@ -1428,33 +1423,40 @@ def cname_denial():
         b"",
         0,
     )
-    proof = signed_soa(n3) + [chain["host.cdn3."], sign([chain["host.cdn3."]], n3)]
-    answer("cd_nsec3_nodata", "n3.cdsrc.", AAAA, cname("n3.cdsrc.", "host.cdn3."), proof)
+    proof = cd_soa(n3) + [chain["host.cdn3."], sign([chain["host.cdn3."]], n3)]
+    cd_answer("cd_nsec3_nodata", "n3.cdsrc.", AAAA, cd_cname(src, "n3.cdsrc.", "host.cdn3."), proof)
     emit("cd_n3_host_ds", "host.cdn3.", "DS", message("host.cdn3.", DS, [], proof))
+    return nodata
 
+
+def cd_unproven(src, tgt, nodata):
+    """Emit the unsigned shapes and the denials that must not pass."""
     # An unsigned target zone: nothing there can be proven, and nothing is
     # forged either.
     soa = [soa_rr("cdun.")]
-    answer("cd_unsigned_target", "un.cdsrc.", AAAA, cname("un.cdsrc.", "host.cdun."), soa)
+    cd_answer("cd_unsigned_target", "un.cdsrc.", AAAA, cd_cname(src, "un.cdsrc.", "host.cdun."), soa)
     # The other way round: an unsigned CNAME into the signed target. The denial
     # is still in a signed zone, and is still proven or refused there.
     hop = [RR("un.cdun.", CNAME, wire_name("host.cdtgt."))]
-    answer("cd_unsigned_hop", "un.cdun.", AAAA, hop, signed_soa(tgt))
-    answer("cd_unsigned_hop_proven", "un.cdun.", AAAA, hop, nodata)
+    cd_answer("cd_unsigned_hop", "un.cdun.", AAAA, hop, cd_soa(tgt))
+    cd_answer("cd_unsigned_hop_proven", "un.cdun.", AAAA, hop, nodata)
 
     # A denial claimed and not proven: the SOA alone.
-    answer("cd_no_proof", "bare.cdsrc.", AAAA, cname("bare.cdsrc.", "host.cdtgt."), signed_soa(tgt))
+    cd_answer("cd_no_proof", "bare.cdsrc.", AAAA, cd_cname(src, "bare.cdsrc.", "host.cdtgt."), cd_soa(tgt))
     # A genuine NSEC that says the type asked for is there.
-    answer("cd_type_present", "has.cdsrc.", A, cname("has.cdsrc.", "host.cdtgt."), nodata)
+    cd_answer("cd_type_present", "has.cdsrc.", A, cd_cname(src, "has.cdsrc.", "host.cdtgt."), nodata)
     # A genuine proof, signed by the source zone rather than the target's.
-    lifted = signed_soa(src) + nsec(src, "swap.cdsrc.", "two.cdsrc.", [CNAME, RRSIG, NSEC])
-    answer("cd_wrong_zone", "swap.cdsrc.", AAAA, cname("swap.cdsrc.", "host.cdtgt."), lifted)
+    lifted = cd_soa(src) + cd_nsec(src, "swap.cdsrc.", "two.cdsrc.", [CNAME, RRSIG, NSEC])
+    cd_answer("cd_wrong_zone", "swap.cdsrc.", AAAA, cd_cname(src, "swap.cdsrc.", "host.cdtgt."), lifted)
 
+
+def cd_wildcards(src, tgt, oo, nodata):
+    """Emit a replayed wildcard, and a wildcard CNAME in an opt-out zone."""
     # A genuine wildcard record, `*.cdsrc. A`, replayed for `www.cdsrc.`, which
     # has a CNAME of its own: no proof can show `www.cdsrc.` absent.
     wild = [a_rr("www.cdsrc.", "192.0.2.66")]
-    answer("cd_wildcard_replay", "www.cdsrc.", A, wild + [sign(wild, src, labels=1)], [])
-    www = signed_soa(src) + nsec(src, "www.cdsrc.", "x.cdsrc.", [CNAME, RRSIG, NSEC])
+    cd_answer("cd_wildcard_replay", "www.cdsrc.", A, wild + [sign(wild, src, labels=1)], [])
+    www = cd_soa(src) + cd_nsec(src, "www.cdsrc.", "x.cdsrc.", [CNAME, RRSIG, NSEC])
     emit("cd_www_ds", "www.cdsrc.", "DS", message("www.cdsrc.", DS, [], www))
 
     # A wildcard CNAME in `cdoo.`, an NSEC3 opt-out zone: the expanded name
@@ -1474,10 +1476,32 @@ def cname_denial():
         covers += [record, sign([record], oo)]
     expanded = [RR("x.cdoo.", CNAME, wire_name("host.cdtgt."))]
     expanded += [sign(expanded, oo, labels=1)]
-    answer("cd_opt_out_wildcard", "x.cdoo.", AAAA, expanded, covers + signed_soa(tgt))
-    answer("cd_opt_out_wildcard_proven", "x.cdoo.", AAAA, expanded, covers + nodata)
-    emit("cd_x_cdoo_ds", "x.cdoo.", "DS", message("x.cdoo.", DS, [], signed_soa(oo) + covers))
+    cd_answer("cd_opt_out_wildcard", "x.cdoo.", AAAA, expanded, covers + cd_soa(tgt))
+    cd_answer("cd_opt_out_wildcard_proven", "x.cdoo.", AAAA, expanded, covers + nodata)
+    emit("cd_x_cdoo_ds", "x.cdoo.", "DS", message("x.cdoo.", DS, [], cd_soa(oo) + covers))
 
+
+@scenario
+def cname_denial():
+    """Cover a CNAME chain that ends in a NODATA or NXDOMAIN at another zone."""
+    # Issue #186. The CNAME is signed by `cdsrc.`; what says its target has
+    # nothing is the denial in the authority section, signed by the target's
+    # zone, which is the zone a validator has to establish to read it (RFC 6840
+    # section 5.8 puts relevant negative responses under AD as well). `cdtgt.`
+    # answers with NSEC, `cdn3.` with NSEC3, and `cdun.` is an unsigned
+    # delegation. The rest are the shapes that must not pass: a SOA with no
+    # proof, a proof that does not deny the type asked for, and a genuine proof
+    # lifted from the source zone. The walk's DS question for each target gets
+    # the same denial the zone sends for any type there.
+    root = Key(".", "cdenial-root")
+    src = Key("cdsrc.", "cdenial-source")
+    tgt = Key("cdtgt.", "cdenial-target")
+    n3 = Key("cdn3.", "cdenial-nsec3")
+    oo = Key("cdoo.", "cdenial-opt-out")
+    cd_chain(root, (src, tgt, n3, oo))
+    nodata = cd_proven(src, tgt, n3)
+    cd_unproven(src, tgt, nodata)
+    cd_wildcards(src, tgt, oo, nodata)
 
 if __name__ == "__main__":
     wanted = sys.argv[1:] or list(SCENARIOS)
