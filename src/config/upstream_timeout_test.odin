@@ -36,6 +36,7 @@ test_an_upstream_timeout_outside_1ms_to_24h_is_refused :: proc(t: ^testing.T) {
 	refused(t, "upstream:\n  timeout: 0.5ms\n  servers: [1.1.1.1]\n", "upstream.timeout")
 	refused(t, "upstream:\n  timeout: 600h\n  servers: [1.1.1.1]\n", "upstream.timeout")
 	refused(t, "upstream:\n  timeout: 99999999999999999999h\n  servers: [1.1.1.1]\n", "upstream.timeout")
+	refused(t, "upstream:\n  timeout: 99999999999999999999h99999999999999999999h5s\n  servers: [1.1.1.1]\n", "upstream.timeout")
 	refused(
 		t,
 		"upstream:\n  servers: [1.1.1.1]\n  zones:\n    - domains: [home.arpa]\n      timeout: 0\n      servers: [192.168.1.1]\n",

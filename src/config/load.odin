@@ -234,7 +234,12 @@ opt_upstream_timeout :: proc(l: ^Loader, n: ^yaml.Node, dst: ^time.Duration, pat
 	// has the top level's, which was checked there, and one that does not parse
 	// has been reported already.
 	if opt_duration(l, n, "timeout", dst, path) && (dst^ < time.Millisecond || dst^ > MAX_UPSTREAM_TIMEOUT) {
-		errorf(l, "%s.timeout must be from 1ms to 24h; a query is given two of it", path)
+		errorf(
+			l,
+			"%s.timeout must be from 1ms to %v: it is how long one exchange waits, a query gets two of it, and no wait outside that range is one the server can keep",
+			path,
+			MAX_UPSTREAM_TIMEOUT,
+		)
 	}
 }
 
