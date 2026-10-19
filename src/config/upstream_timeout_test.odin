@@ -25,7 +25,7 @@ test_an_upstream_timeout_outside_1ms_to_24h_is_refused :: proc(t: ^testing.T) {
 			// The bound's refusal and nothing else: a parse error names the key too.
 			testing.expectf(
 				t,
-				len(e.messages) == 1 && strings.contains(e.messages[0], key) && strings.contains(e.messages[0], "1ms to 24h"),
+				len(e.messages) == 1 && strings.contains(e.messages[0], key) && strings.contains(e.messages[0], "1ms to 24h:"),
 				"the refusal is not one line naming %s and the bounds: %v",
 				key,
 				e.messages,

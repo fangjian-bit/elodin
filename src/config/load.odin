@@ -236,9 +236,9 @@ opt_upstream_timeout :: proc(l: ^Loader, n: ^yaml.Node, dst: ^time.Duration, pat
 	if opt_duration(l, n, "timeout", dst, path) && (dst^ < time.Millisecond || dst^ > MAX_UPSTREAM_TIMEOUT) {
 		errorf(
 			l,
-			"%s.timeout must be from 1ms to %v: it is how long one exchange waits, a query gets two of it, and no wait outside that range is one the server can keep",
+			"%s.timeout must be from 1ms to %dh: it is how long one exchange waits, a query gets two of it, and no wait outside that range is one the server can keep",
 			path,
-			MAX_UPSTREAM_TIMEOUT,
+			int(MAX_UPSTREAM_TIMEOUT / time.Hour),
 		)
 	}
 }

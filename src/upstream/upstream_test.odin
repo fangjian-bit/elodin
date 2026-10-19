@@ -3674,9 +3674,10 @@ test_fetch_url_refuses_a_bad_url_before_dialling :: proc(t: ^testing.T) {
 }
 
 /*
-A zero timeout is no timeout, as it always was: the floor that keeps a sliver
-of a deadline from rounding to zero must not turn a configured `timeout: 0`
-into a millisecond, which would time every UDP query out.
+A zero timeout is no timeout: the floor that keeps a sliver of a deadline from
+rounding to zero applies to a non-zero figure only, and does not turn zero into
+a millisecond. No configuration reaches zero - the loader refuses an
+`upstream.timeout` under a millisecond (#499).
 */
 @(test)
 test_a_zero_socket_timeout_is_still_no_timeout :: proc(t: ^testing.T) {
