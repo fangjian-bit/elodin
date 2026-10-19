@@ -145,6 +145,10 @@ Hit :: struct {
 	// The entry is near its expiry and this caller is the one to refresh it.
 	// See `claim_prefetch`.
 	prefetch: bool,
+	// The entry's `signed_until`. A caller that holds a stale copy while it
+	// waits on an upstream reads it again before handing the copy out, since
+	// the wait can outlast the signature.
+	signed_until: time.Time,
 }
 
 Stats :: struct {
@@ -443,6 +447,7 @@ get :: proc(
 	hit.recheck = e.redirects && e.checked != checked_against
 	hit.refused = e.refused
 	hit.ede = e.ede
+	hit.signed_until = e.signed_until
 
 	elapsed := u32(max(0, time.duration_seconds(time.diff(e.inserted, now))))
 	out := make([]u8, len(e.wire), allocator)
@@ -1036,9 +1041,20 @@ the same shape stopped one layer further out, on the paths no validator
 	they hand out. The mirror of `min_ttl`, which reaches the client as well -
 `patch_ttls` takes it as a floor - so the pair says the same kind of
 thing in both directions.
+
+	And no longer than its signatures. RFC 4034 section 3.1.5: an RRSIG "MUST
+	NOT be used for authentication after the expiration date", and a DO client
+	handed one past it - with the AD bit it was stored with - finds this server
+	the broken hop. An answer nothing here validated - the client set CD, or
+	validation is off - would otherwise go out telling it to hold the signatures
+	for the upstream's figure. `signed_left` is no bound at all for a message
+	that carries none.
 	*/
+	now := time.now()
+	now_unix := time.time_to_unix(now)
+	signed_left, signed := dns.signatures_lapse(wire, u32(now_unix))
 	for &t in ttls {
-		t = min(t, c.max_ttl)
+		t = min(t, c.max_ttl, signed_left)
 	}
 
 	effective: u32
@@ -1076,29 +1092,12 @@ thing in both directions.
 		}
 		effective = clamp(effective, c.min_ttl, c.max_ttl)
 	}
-	/*
-	And no longer than its signatures. RFC 4034 section 3.1.5: an RRSIG "MUST
-	NOT be used for authentication after the expiration date", and a DO client
-	handed one past it - with the AD bit it was stored with - finds this server
-	the broken hop. A ceiling past `min_ttl`, which is a floor on what records
-	claim and not on what their signatures allow; and a message whose signature
-	has already lapsed is not stored at all.
-	*/
-	now := time.now()
-	now_unix := time.time_to_unix(now)
-	signed_left, signed := dns.signatures_lapse(wire, u32(now_unix))
-	if signed {
-		// The lifetime itself is capped below, at the expiration second.
-		if signed_left == 0 {
-			effective = 0
-		}
-		// What every copy tells the client too, as `max_ttl` is above: an
-		// answer nothing here validated - the client set CD, or validation is
-		// off - would otherwise go out telling it to hold the signatures for
-		// the upstream's figure.
-		for &t in ttls {
-			t = min(t, signed_left)
-		}
+	// A message whose signature has already lapsed is not stored at all, past
+	// `min_ttl`, which is a floor on what records claim and not on what their
+	// signatures allow. A live one caps the lifetime below, at the expiration
+	// second.
+	if signed && signed_left == 0 {
+		effective = 0
 	}
 	if effective == 0 {
 		delete(offsets, c.allocator)
@@ -1255,10 +1254,21 @@ stats :: proc(c: ^Cache) -> Stats {
 	return c.stats
 }
 
+// Whole seconds before the entry's first RRSIG expires, or no bound for an
+// entry that carries none.
+@(private)
+signature_left :: proc(e: ^Entry, now: time.Time) -> u32 {
+	if e.signed_until == {} {
+		return max(u32)
+	}
+	return u32(max(0, time.duration_seconds(time.diff(now, e.signed_until))))
+}
+
 /*
 When an entry stops being of any use.
 
-Its expiry, or `MAX_STALE` past it while stale serving is on - the point past
+Its expiry, or `MAX_STALE` past it while stale serving is on, and never past its
+first RRSIG's expiration - the point past
 which the entry is neither a valid answer nor a fallback worth keeping. `get`
 and `sweep` both read it from here, because an entry one of them keeps and the
 other refuses is either memory held for a day for nothing or an answer served
@@ -1274,16 +1284,6 @@ behind.
 
 The caller holds the lock.
 */
-// Whole seconds before the entry's first RRSIG expires, or no bound for an
-// entry that carries none.
-@(private)
-signature_left :: proc(e: ^Entry, now: time.Time) -> u32 {
-	if e.signed_until == {} {
-		return max(u32)
-	}
-	return u32(max(0, time.duration_seconds(time.diff(now, e.signed_until))))
-}
-
 @(private)
 deadline :: proc(c: ^Cache, e: ^Entry) -> time.Time {
 	if !c.serve_stale || e.bogus {

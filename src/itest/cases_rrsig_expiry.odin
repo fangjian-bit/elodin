@@ -68,16 +68,7 @@ blocking: {{ enabled: false }}
 }
 
 run_rrsig_expiry_cases :: proc(r: ^Runner) {
-	expiration := u32(time.time_to_unix(time.now())) + 2
 	upstream_port := next_port(r)
-	mock := mock_make("rrsig-expiry", upstream_port)
-	mock_reply(mock, RX_QNAME, u16(dns.Type.A), rx_answer(expiration))
-	if !mock_start(mock) {
-		skip_case(r, "cache: rrsig expiry", "cannot start the mock upstream")
-		return
-	}
-	defer mock_stop(mock)
-
 	udp_port := next_port(r)
 	config := rx_config(udp_port, upstream_port)
 	srv, ok := start_server(r, Server_Options{config = config, udp_port = udp_port})
@@ -87,12 +78,24 @@ run_rrsig_expiry_cases :: proc(r: ^Runner) {
 	}
 	defer stop_server(&srv)
 
+	// The clock is read once the server is up, so a slow start cannot spend the
+	// signature before the first query and leave both cases nothing to test.
+	expiration := u32(time.time_to_unix(time.now())) + 2
+	mock := mock_make("rrsig-expiry", upstream_port)
+	mock_reply(mock, RX_QNAME, u16(dns.Type.A), rx_answer(expiration))
+	if !mock_start(mock) {
+		skip_case(r, "cache: rrsig expiry", "cannot start the mock upstream")
+		return
+	}
+	defer mock_stop(mock)
+
 	start_case(r, "cache: a signed answer is told no more ttl than its rrsig has left")
 	{
 		res := query_udp(udp_port, build_query(RX_QNAME, u16(dns.Type.A), id = 1, edns_size = 1232, dnssec_ok = true))
 		if check(r, res.ok, "no response to the query that filled the cache") {
 			ttl, has := min_answer_ttl(r, res.wire)
-			check(r, has && ttl <= 2, "the answer went out with ttl %d; its rrsig has 2 s left", ttl)
+			// At least one: the signature was live, so the answer was cached.
+			check(r, has && ttl >= 1 && ttl <= 2, "the answer went out with ttl %d; its rrsig has 2 s left", ttl)
 		}
 	}
 	end_case(r)

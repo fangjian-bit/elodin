@@ -1555,8 +1555,24 @@ resolve_query :: proc(
 				}
 				return out, refreshed, true
 			}
+			/*
+			A held copy whose signatures lapsed while the timer ran is no
+			fallback (RFC 4034 section 3.1.5), and RFC 8767 section 5 serves
+			stale data only where it "would satisfy the request" - so the
+			answer is not settled yet, and the client waits the refresh out
+			rather than being failed at the timer.
+			*/
+			if !stale_usable(stale_hit) {
+				wait := question_span(s, q.name, q.type) - s.cfg.cache.stale_timeout
+				if out, refreshed, code, taken := refresh_take(r, max(wait, 0), allocator); taken {
+					if ede != nil {
+						ede^ = code
+					}
+					return out, refreshed, true
+				}
+			}
 		}
-		return serve_from_cache(
+		return upstream_failed(
 			s,
 			stale_hit,
 			query,
@@ -2968,6 +2984,7 @@ stored_answer :: proc(
 		serial   = hit.serial,
 		checked  = generation,
 		prefetch = hit.prefetch,
+		signed_until = hit.signed_until,
 	}
 	return stored, true
 }
@@ -2993,8 +3010,22 @@ stored_verdict :: proc(
 	return Cached_Answer{wire = wire, key = verdict_key, serial = hit.serial}, true
 }
 
-// No answer from the upstream at all: the expired entry if one is held, SERVFAIL
-// if not. Shared by the exchange that failed and the followers of one.
+// Whether a held copy's signatures, if it carries any, still verify now.
+@(private)
+stale_usable :: proc(hit: Cached_Answer) -> bool {
+	return hit.signed_until == {} || time.diff(time.now(), hit.signed_until) > 0
+}
+
+/*
+No answer from the upstream at all: the expired entry if one is held, SERVFAIL
+if not. Shared by the exchange that failed, the followers of one and the client
+whose `stale_timeout` ran out.
+
+The expired entry was read before the wait, which can outlast its first RRSIG:
+`cache.get` holds a stale copy inside its signatures only at the moment it hands
+it over. So it is read against them again here, and goes out told no more than
+they have left, or not at all once they have lapsed (RFC 4034 section 3.1.5).
+*/
 @(private)
 upstream_failed :: proc(
 	s: ^Server,
@@ -3017,7 +3048,10 @@ upstream_failed :: proc(
 	Outcome,
 	bool,
 ) {
-	if stale_hit.wire != nil {
+	if stale_hit.wire != nil && stale_usable(stale_hit) {
+		if stale_hit.signed_until != {} {
+			dns.cap_ttls(stale_hit.wire, u32(time.duration_seconds(time.diff(time.now(), stale_hit.signed_until))))
+		}
 		return serve_from_cache(s, stale_hit, query, msg, q, proto, client, limit, validating, started, spent, allocator, ede)
 	}
 	count_answer(&s.stats.failed)
@@ -3347,6 +3381,9 @@ Cached_Answer :: struct {
 	coalesced: bool,
 	// This lookup is the one to refresh the entry before it expires.
 	prefetch:  bool,
+	// When the entry's first RRSIG expires, zero for one that carries none; see
+	// `upstream_failed`.
+	signed_until: time.Time,
 }
 
 /*

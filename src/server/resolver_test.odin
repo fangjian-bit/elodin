@@ -356,6 +356,143 @@ live_reply :: proc() -> []u8 {
 }
 
 /*
+A stale copy whose RRSIG lapses while the upstream is waited on is not served
+(issue #165, RFC 4034 section 3.1.5).
+
+`cache.get` hands the copy over inside its signature, and the upstream then
+takes its timeout to fail. The signature lapses in between, so what the client
+gets is SERVFAIL rather than an answer it cannot validate. The upstream is a
+bound socket nothing reads, so the wait is the timeout and nothing else.
+*/
+@(test)
+test_a_stale_copy_is_not_served_past_its_rrsig_after_the_wait :: proc(t: ^testing.T) {
+	socket, serr := net.make_bound_udp_socket(net.IP4_Loopback, 0)
+	if !testing.expectf(t, serr == nil, "cannot bind the silent upstream: %v", serr) {
+		return
+	}
+	defer net.close(socket)
+	bound, berr := net.bound_endpoint(socket)
+	if !testing.expectf(t, berr == nil, "cannot read the upstream's port: %v", berr) {
+		return
+	}
+
+	answers := cache.make_cache(cache.Options{max_entries = 8, max_ttl = 3600, serve_stale = true})
+	defer cache.destroy(answers)
+	cfg: config.Config
+	s := stale_server(&cfg, answers, nil)
+	cfg.upstream.strategy = .Failover
+	cfg.upstream.attempts = 1
+	cfg.upstream.timeout = 200 * time.Millisecond
+	servers := make([]config.Upstream_Spec, 1, context.temp_allocator)
+	servers[0] = config.Upstream_Spec {
+		name    = "silent",
+		kind    = .UDP,
+		address = "127.0.0.1",
+		port    = bound.port,
+	}
+	cfg.upstream.servers = servers
+	group, gerr := upstream.make_group(cfg.upstream, nil, context.allocator, false)
+	if !testing.expectf(t, gerr == .None, "cannot build the upstream group: %v", gerr) {
+		return
+	}
+	defer upstream.destroy_group(group)
+	s.group = group
+
+	if !testing.expect(t, cache_an_answer(answers, expired = true), "the answer was not cached") {
+		return
+	}
+	// Live when `get` reads it, lapsed long before the upstream times out.
+	kb: [cache.KEY_MAX]u8
+	key := cache.make_key(kb[:], STALE_NAME, .A, .IN, false, false)
+	if e, found := answers.entries[key]; found {
+		e.signed_until = time.time_add(time.now(), 50 * time.Millisecond)
+	}
+
+	out, _, ok := handle_query(&s, stale_query(true), .UDP, "127.0.0.1:5555", context.temp_allocator)
+	if testing.expect(t, ok, "nothing came back at all") {
+		served, derr := dns.decode_message(out, context.temp_allocator)
+		testing.expect_value(t, derr, dns.Decode_Error.None)
+		testing.expect_value(t, dns.rcode_of(served), dns.Rcode.Serv_Fail)
+	}
+	free_all(context.temp_allocator)
+}
+
+/*
+And where the timer fires on a copy whose RRSIG has lapsed in the meantime, the
+client is not failed there: that copy does not satisfy the request (RFC 8767
+section 5), so it waits the refresh out and is given what the upstream sends.
+
+The signature lapses 50 ms in, the timer fires at 100 ms and the upstream answers
+at 400 ms. A runner slow enough to hand the copy over after the 50 ms has no
+stale copy at all and waits for the upstream on the ordinary path, which ends
+the same way; nothing here can pass a SERVFAIL.
+*/
+@(test)
+test_a_lapsed_stale_copy_waits_for_the_refresh :: proc(t: ^testing.T) {
+	socket, serr := net.make_bound_udp_socket(net.IP4_Loopback, 0)
+	if !testing.expectf(t, serr == nil, "cannot bind the mock upstream: %v", serr) {
+		return
+	}
+	defer net.close(socket)
+	_ = net.set_option(socket, .Receive_Timeout, MOCK_RECV_TIMEOUT)
+	bound, berr := net.bound_endpoint(socket)
+	if !testing.expectf(t, berr == nil, "cannot read the mock's port: %v", berr) {
+		return
+	}
+
+	answers := cache.make_cache(cache.Options{max_entries = 8, max_ttl = 3600, serve_stale = true})
+	defer cache.destroy(answers)
+	cfg: config.Config
+	s := stale_server(&cfg, answers, nil)
+	cfg.upstream.strategy = .Failover
+	cfg.upstream.attempts = 1
+	cfg.upstream.timeout = 5 * time.Second
+	cfg.cache.stale_timeout = 100 * time.Millisecond
+	cfg.upstream.servers = blackhole_servers(bound.port)
+	group, gerr := upstream.make_group(cfg.upstream, nil, context.allocator, false)
+	if !testing.expectf(t, gerr == .None, "cannot build the upstream group: %v", gerr) {
+		return
+	}
+	defer upstream.destroy_group(group)
+	s.group = group
+	workers := pool.make_pool(2)
+	defer pool.destroy(workers)
+	s.handler_pool = workers
+
+	if !testing.expect(t, cache_an_answer(answers, expired = true), "the answer was not cached") {
+		return
+	}
+	kb: [cache.KEY_MAX]u8
+	key := cache.make_key(kb[:], STALE_NAME, .A, .IN, false, false)
+	if e, found := answers.entries[key]; found {
+		e.signed_until = time.time_add(time.now(), 50 * time.Millisecond)
+	}
+
+	x := Stale_Exchange {
+		socket = socket,
+		reply  = live_reply(),
+		delay  = 400 * time.Millisecond,
+	}
+	mock := thread.create_and_start_with_poly_data(&x, serve_one_stale)
+	defer {
+		thread.join(mock)
+		thread.destroy(mock)
+	}
+
+	out, _, ok := handle_query(&s, stale_query(true), .UDP, "127.0.0.1:5555", context.temp_allocator)
+	if testing.expect(t, ok, "nothing came back at all") {
+		served, derr := dns.decode_message(out, context.temp_allocator)
+		testing.expect_value(t, derr, dns.Decode_Error.None)
+		testing.expect_value(t, dns.rcode_of(served), dns.Rcode.No_Error)
+		if testing.expect(t, len(served.answer) == 1, "the answer carried no record") {
+			a, is_a := served.answer[0].data.(dns.Rdata_A)
+			testing.expectf(t, is_a && a.addr == LIVE_ADDR, "served %v rather than the refresh's answer", served.answer[0].data)
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+/*
 An upstream that is up is asked, and its answer is the one the client gets.
 
 This is the half of RFC 8767 section 5 that a counter cannot show: not that a
