@@ -152,11 +152,12 @@ test_check_signature_reads_the_validity_window_itself :: proc(t: ^testing.T) {
 	result, _ := check_signature(lapsed, "www.example.com.", .IN, records, keys, CS_EXPIRATION + 1, context.temp_allocator)
 	testing.expect_value(t, result, Verify_Result.Bad)
 
-	early, _ := check_signature(lapsed, "www.example.com.", .IN, records, keys, CS_INCEPTION - 1, context.temp_allocator)
+	early, _ := check_signature(lapsed, "www.example.com.", .IN, records, keys, CS_INCEPTION - SIG_INCEPTION_SKEW - 1, context.temp_allocator)
 	testing.expect_value(t, early, Verify_Result.Bad)
 
-	// And the boundaries themselves are inside the window.
-	on_inception, _ := check_signature(lapsed, "www.example.com.", .IN, records, keys, CS_INCEPTION, context.temp_allocator)
+	// And the boundaries themselves are inside the window, the inception's
+	// with its skew.
+	on_inception, _ := check_signature(lapsed, "www.example.com.", .IN, records, keys, CS_INCEPTION - SIG_INCEPTION_SKEW, context.temp_allocator)
 	testing.expect_value(t, on_inception, Verify_Result.Ok)
 	on_expiration, _ := check_signature(lapsed, "www.example.com.", .IN, records, keys, CS_EXPIRATION, context.temp_allocator)
 	testing.expect_value(t, on_expiration, Verify_Result.Ok)

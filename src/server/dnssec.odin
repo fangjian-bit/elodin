@@ -523,6 +523,15 @@ present_response :: proc(
 				name,
 			)
 			secure = false
+			/*
+			Still held to the signatures, though: the records verified, so RFC
+			4035 section 5.3.3 binds their TTLs whether or not AD goes out, and
+			this copy is the one the cache keeps. Capped as one message, at the
+			least any of the sets allows, since the sets cannot be told apart
+			without the rebuild that just failed. In place, as `set_ad_bit`
+			below already writes these bytes.
+			*/
+			dns.cap_ttls(out, dnssec.ttl_ceiling(result))
 		}
 	}
 	if !dns.edns_do(query) {

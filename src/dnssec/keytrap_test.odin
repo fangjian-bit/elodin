@@ -533,7 +533,7 @@ test_an_exhausted_key_check_is_not_a_downgrade :: proc(t: ^testing.T) {
 	defer destroy_validator(v)
 
 	budget := query_budget(v)
-	_, status := fetch_keys(
+	_, status, _, _ := fetch_keys(
 		v,
 		&budget,
 		"cloudflare.com.",

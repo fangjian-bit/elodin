@@ -3,6 +3,7 @@ package itest
 import "core:encoding/hex"
 import "core:fmt"
 import "core:mem"
+import "core:time"
 
 /*
 Hold elodin's answer against the upstream's and say where they differ.
@@ -627,7 +628,7 @@ pc_section :: proc(
 			continue
 		}
 		taken[matched] = true
-		pc_ttl(c, kind, name, u, el_recs[matched], policy)
+		pc_ttl(c, kind, name, u, el_recs[matched], up_recs, el_recs, el.ad, policy)
 	}
 
 	// Second pass: the same record with a name spelled in a different case.
@@ -670,7 +671,7 @@ pc_section :: proc(
 			pw_rr_key(el_recs[matched], c.allocator),
 			reason,
 		)
-		pc_ttl(c, kind, name, u.rec, el_recs[matched], policy)
+		pc_ttl(c, kind, name, u.rec, el_recs[matched], up_recs, el_recs, el.ad, policy)
 	}
 
 	for e, i in el_recs {
@@ -1248,17 +1249,24 @@ pc_ttl :: proc(
 	kind: Parity_Kind,
 	name: string,
 	u, e: Pw_RR,
+	up_recs, el_recs: []Pw_RR,
+	ad: bool,
 	policy: Parity_Policy,
 ) {
 	if u.ttl == e.ttl {
 		return
 	}
 	reason := ""
-	if policy.cache {
-		reason = pc_cached_ttl(u, e, policy)
-	} else if !policy.ttl_exact {
-		// See `Parity_Policy.ttl_exact`.
-		reason = "the reference and this answer are two separate fetches, so their ttls have been counting down since two different moments"
+	if policy.dnssec_validation && ad {
+		reason = pc_signed_ttl(u, e, up_recs, el_recs, policy)
+	}
+	if reason == "" {
+		if policy.cache {
+			reason = pc_cached_ttl(u, e, policy)
+		} else if !policy.ttl_exact {
+			// See `Parity_Policy.ttl_exact`.
+			reason = "the reference and this answer are two separate fetches, so their ttls have been counting down since two different moments"
+		}
 	}
 	pc_add(
 		c,
@@ -1294,6 +1302,68 @@ pc_cached_ttl :: proc(u, e: Pw_RR, policy: Parity_Policy) -> string {
 		return "cache.max_ttl caps how long a client is told to hold a record"
 	}
 	return "served from the cache, which counts a ttl down by the time the entry has been held"
+}
+
+/*
+Why a validated RRset may come back with less ttl than the upstream gave it, or
+empty where it may not.
+
+RFC 4035 section 5.3.3: a validator serves an authenticated RRset, and its
+RRSIG, with no more than the RRSIG's Original TTL or the seconds left before it
+expires (`authenticated_only` in src/dnssec/validate.odin). The TTL field is the
+one part no signature covers, so an upstream's number above that is one elodin
+is required to lower. Bounded like the cache's allowance: the ceiling is the
+upstream's ttl under the signature's and `cache.max_ttl`, and the answer may sit
+below it by no more than the cache has held it, plus a second either side for
+the clock the expiration is read against.
+
+Which signature verified is elodin's to know, not the answer's: a set
+mid-rollover carries one per algorithm, each with its own ceiling. So the answer
+may sit as high as the most generous of them and as low as the least. And the
+whole set goes out as one TTL, the least the upstream gave any of its records or
+signatures, so the floor reaches down to that too.
+*/
+@(private = "file")
+pc_signed_ttl :: proc(u, e: Pw_RR, up_recs, el_recs: []Pw_RR, policy: Parity_Policy) -> string {
+	covered := e.type
+	if e.type == 46 && len(e.rdata) >= 2 {
+		covered = pw_u16(e.rdata, 0)
+	}
+	now := u32(time.time_to_unix(time.now()))
+	lo, hi := max(u32), u32(0)
+	for r in el_recs {
+		if r.type != 46 || r.class != e.class || len(r.rdata) < 12 || !pc_name_equal_fold(r.name, e.name) {
+			continue
+		}
+		if pw_u16(r.rdata, 0) != covered {
+			continue
+		}
+		expiration := pw_u32(r.rdata, 8)
+		signed := min(pw_u32(r.rdata, 4), expiration - now if i32(expiration - now) > 0 else 0)
+		lo, hi = min(lo, signed), max(hi, signed)
+	}
+	// Nothing in elodin's answer signs it, so nothing here explains it.
+	if hi == 0 && lo == max(u32) {
+		return ""
+	}
+	received := u.ttl
+	for r in up_recs {
+		if r.class != e.class || !pc_name_equal_fold(r.name, e.name) {
+			continue
+		}
+		if r.type == covered || (r.type == 46 && len(r.rdata) >= 2 && pw_u16(r.rdata, 0) == covered) {
+			received = min(received, r.ttl)
+		}
+	}
+	lo = min(lo, received)
+	if lo >= u.ttl {
+		return ""
+	}
+	limit := min(u.ttl, PARITY_CACHE_MAX_TTL) if policy.cache else u.ttl
+	if e.ttl > min(limit, hi) + 1 || e.ttl + policy.cache_age + 1 < min(limit, lo) {
+		return ""
+	}
+	return "a validated rrset and its rrsig go out with one ttl, no more than any received, the rrsig's original ttl or the time left before it expires (RFC 4035 section 5.3.3)"
 }
 
 // --- edns ------------------------------------------------------------------

@@ -986,6 +986,24 @@ Authenticated_Set :: struct {
 	the caller's arena keeps alive for as long as the prune needs it.
 	*/
 	rrsig: Rrsig,
+	/*
+	The most this set may be served with: `rrsig`'s Original TTL, or the time
+	left before it expires when it verified, whichever is less. For a CNAME a
+	DNAME synthesized, which has no `rrsig`, the DNAME's signature's. The prune
+	holds the set and its signatures to it (RFC 4035 section 5.3.3).
+	*/
+	ttl:   u32,
+}
+
+// The least TTL any set this verdict rests on may be served with.
+ttl_ceiling :: proc(result: Result) -> u32 {
+	ceiling := max(u32)
+	for sets in ([][]Authenticated_Set{result.answer, result.authority, result.additional}) {
+		for s in sets {
+			ceiling = min(ceiling, s.ttl)
+		}
+	}
+	return ceiling
 }
 
 // Whether two RRSIGs are the same record, field for field.
@@ -1499,6 +1517,19 @@ authenticated_only :: proc(
 	// and whether that one has been kept already.
 	sigs_kept := make([]int, len(kept), allocator)
 	verified_kept := make([]bool, len(kept), allocator)
+	/*
+	RFC 4035 section 5.3.3: the set and its RRSIGs go out with one TTL, no more
+	than the least of the set's received TTLs, the verified RRSIG's received
+	TTL, and the ceiling that RRSIG puts on it (`Authenticated_Set.ttl`). The
+	TTL field is the one part of a record no signature covers, so leaving it as
+	received would let an on-path sender keep a signed answer cached long after
+	its signer meant. `owner` is the set each kept record belongs to.
+	*/
+	set_ttl := make([]u32, len(kept), allocator)
+	for k, i in kept {
+		set_ttl[i] = k.ttl
+	}
+	owner := make([dynamic]int, 0, len(section), allocator)
 	out := make([dynamic]dns.Record, 0, len(section), allocator)
 	for rec in section {
 		covered := rec.type
@@ -1572,6 +1603,7 @@ authenticated_only :: proc(
 			exempt := !verified_kept[idx] && rrsig_equal(parsed, kept[idx].rrsig)
 			if exempt {
 				verified_kept[idx] = true
+				set_ttl[idx] = min(set_ttl[idx], rec.ttl)
 			} else {
 				if sigs_kept[idx] >= MAX_SIGNATURES_PER_RRSET {
 					continue
@@ -1579,7 +1611,14 @@ authenticated_only :: proc(
 				sigs_kept[idx] += 1
 			}
 		}
+		if rec.type != .RRSIG {
+			set_ttl[idx] = min(set_ttl[idx], rec.ttl)
+		}
 		append(&out, rec)
+		append(&owner, idx)
+	}
+	for &rec, i in out {
+		rec.ttl = set_ttl[owner[i]]
 	}
 	return out[:]
 }
@@ -1840,6 +1879,7 @@ validated_hints :: proc(
 				class = class,
 				signer = signer,
 				rrsig = carried,
+				ttl = signed_ttl_ceiling(carried, unix),
 			},
 		)
 	}
@@ -1918,13 +1958,18 @@ validate_answer :: proc(
 		synthesizes exactly one, so a set with a second is not a set a DNAME
 		produced; the loop stops at the first record no DNAME accounts for.
 		*/
+		ceiling := signed_ttl_ceiling(carried, unix)
 		if status != .Secure && rec.type == .CNAME && len(sigs) == 0 {
 			covered := len(records) > 0
+			// No signature of its own, so the DNAME's sets its ceiling.
+			ceiling = max(u32)
 			for r in records {
-				if !dname_covered(v, budget, msg, r, class, unix, now, allocator) {
+				ok, by := dname_covered(v, budget, msg, r, class, unix, now, allocator)
+				if !ok {
 					covered = false
 					break
 				}
+				ceiling = min(ceiling, signed_ttl_ceiling(by, unix))
 			}
 			if covered {
 				status = .Secure
@@ -2001,6 +2046,7 @@ validate_answer :: proc(
 				class = class,
 				signer = signer,
 				rrsig = carried,
+				ttl = ceiling,
 			},
 		)
 	}
@@ -2415,6 +2461,7 @@ proved_denial :: proc(
 				class = class,
 				signer = signer,
 				rrsig = carried,
+				ttl = signed_ttl_ceiling(carried, unix),
 			},
 		)
 	}
@@ -3105,6 +3152,7 @@ validated_denial_records :: proc(
 				class = class,
 				signer = signer,
 				rrsig = carried,
+				ttl = signed_ttl_ceiling(carried, unix),
 			},
 		)
 
@@ -3624,6 +3672,7 @@ zone_step :: proc(
 		sigs := sigs_covering(msg.answer, child, .DS, class, allocator)
 		verified := false
 		exhausted := false
+		ds_sig: Rrsig
 		for sig in sigs {
 			if !dns.name_equal_fold(sig.signer, parent) {
 				continue
@@ -3647,6 +3696,7 @@ zone_step :: proc(
 			result, encloser := check_signature(sig, child, class, ds_records, parent_keys, unix, allocator)
 			if result == .Ok && encloser == "" {
 				verified = true
+				ds_sig = sig
 				break
 			}
 		}
@@ -3699,14 +3749,14 @@ zone_step :: proc(
 			// Every DS names an algorithm or a digest we cannot check, which
 			// RFC 6840 section 5.2 makes an insecure delegation rather than a
 			// broken one.
-			cache_put(v, child, .Insecure, nil, rrset_ttl(ds_records), now)
+			cache_put(v, child, .Insecure, nil, min(rrset_ttl(ds_records), ds_sig.original_ttl), now, sig_lapses(ds_sig, unix))
 			return .Insecure, nil
 		}
 
-		child_keys, kstatus := fetch_keys(v, budget, child, set[:], unix, allocator)
+		child_keys, kstatus, keys_sig, keys_ttl := fetch_keys(v, budget, child, set[:], unix, allocator)
 		if kstatus != .Secure {
 			if kstatus == .Insecure {
-				cache_put(v, child, .Insecure, nil, rrset_ttl(ds_records), now)
+				cache_put(v, child, .Insecure, nil, min(rrset_ttl(ds_records), ds_sig.original_ttl), now, sig_lapses(ds_sig, unix))
 				return .Insecure, nil
 			}
 			if kstatus == .Bogus {
@@ -3733,7 +3783,10 @@ zone_step :: proc(
 			}
 			return .Indeterminate, nil
 		}
-		cache_put(v, child, .Secure, child_keys, rrset_ttl(ds_records), now)
+		// Held to both RRsets the keys rest on and the signatures over them:
+		// the parent's over the DS and the zone's own over its DNSKEY set.
+		ttl := min(rrset_ttl(ds_records), ds_sig.original_ttl, keys_ttl, keys_sig.original_ttl)
+		cache_put(v, child, .Secure, child_keys, ttl, now, min(sig_lapses(ds_sig, unix), sig_lapses(keys_sig, unix)))
 		return .Secure, child_keys
 	}
 
@@ -3741,7 +3794,7 @@ zone_step :: proc(
 	// a form the parent signed.
 	// Nothing here reaches a client - this is our own DS lookup - so which
 	// RRsets verified is of no interest beyond the proof they carry.
-	nsecs, nsec3s, _, ds_spent := validated_denial_records(v, budget, msg.authority, parent, class, parent_keys, unix, now, allocator)
+	nsecs, nsec3s, proved, ds_spent := validated_denial_records(v, budget, msg.authority, parent, class, parent_keys, unix, now, allocator)
 	// A chain step this server ran out of allowance on is one it did not read,
 	// which is `Indeterminate` territory rather than a broken delegation.
 	if ds_spent {
@@ -3809,10 +3862,11 @@ zone_step :: proc(
 	}
 	switch step {
 	case .Insecure:
-		cache_put(v, child, .Insecure, nil, negative_ttl(msg), now)
+		cache_put(v, child, .Insecure, nil, min(negative_ttl(msg), sets_original_ttl(proved)), now, sets_lapse(proved, unix))
 	case .No_Cut:
 		/*
-		Remembered for the denial's own negative TTL, the way an insecure
+		Remembered for the denial's own negative TTL, held to the Original TTL
+		and expiration of the signatures that proved it, the way an insecure
 		delegation is, and for the same reason: this cost the network a round
 		trip and the answer holds until the records it came from expire.
 
@@ -3833,7 +3887,7 @@ zone_step :: proc(
 		is nothing to win: the answer cache holds the NXDOMAIN, so the same
 		question does not come back here anyway.
 		*/
-		non_cut_remember(v, child, negative_ttl(msg), now)
+		non_cut_remember(v, child, min(negative_ttl(msg), sets_original_ttl(proved)), now, sets_lapse(proved, unix))
 	case .Secure, .Absent, .Bogus, .Indeterminate:
 	}
 	return step, nil
@@ -3964,21 +4018,26 @@ fetch_keys :: proc(
 ) -> (
 	keys: []Dnskey,
 	status: Status,
+	// On `Secure`, the signature that vouched for the set and the set's own
+	// TTL as received, which with the signature's Original TTL and expiration
+	// bound how long the keys are kept (RFC 4035 section 5.3.3).
+	vouched: Rrsig,
+	set_ttl: u32,
 ) {
 	if deadline_passed(budget) {
 		budget.walk_stopped = DEADLINE_PASSED
-		return nil, .Indeterminate
+		return nil, .Indeterminate, {}, 0
 	}
 	if !may_look_up(v, budget) {
 		budget.walk_stopped = WALKS_IN_FLIGHT
-		return nil, .Indeterminate
+		return nil, .Indeterminate, {}, 0
 	}
 	if !spend_lookup(budget) {
-		return nil, .Indeterminate
+		return nil, .Indeterminate, {}, 0
 	}
 	wire, ok := v.query(v.query_ctx, zone, .DNSKEY, allocator, budget.deadline)
 	if !ok {
-		return nil, .Indeterminate
+		return nil, .Indeterminate, {}, 0
 	}
 	msg, derr := dns.decode_message(wire, allocator, budget.spent)
 	if derr != .None {
@@ -3986,15 +4045,15 @@ fetch_keys :: proc(
 		// this zone's keys unread rather than forged.
 		if derr == .Request_Budget {
 			budget.walk_stopped = READING_OVER_BUDGET
-			return nil, .Indeterminate
+			return nil, .Indeterminate, {}, 0
 		}
 		broke_at(budget, zone, "the DNSKEY reply could not be decoded", allocator)
-		return nil, .Bogus
+		return nil, .Bogus, {}, 0
 	}
 	// As in `zone_step`: an upstream error leaves the zone's keys unknown, which
 	// is not the same as the zone failing to produce them.
 	if !answerable_rcode(msg) {
-		return nil, .Indeterminate
+		return nil, .Indeterminate, {}, 0
 	}
 	class := dns.Class.IN
 
@@ -4002,7 +4061,7 @@ fetch_keys :: proc(
 	if len(records) == 0 || len(records) > MAX_KEYS_PER_ZONE {
 		why := "the DNSKEY reply held no keys" if len(records) == 0 else "the DNSKEY reply held more keys than this server reads"
 		broke_at(budget, zone, why, allocator)
-		return nil, .Bogus
+		return nil, .Bogus, {}, 0
 	}
 	parsed := make([dynamic]Dnskey, 0, len(records), allocator)
 	for r in records {
@@ -4094,7 +4153,7 @@ fetch_keys :: proc(
 				result, _ := check_signature(sig, zone, class, records, attested[:], unix, allocator)
 				switch result {
 				case .Ok:
-					return parsed[:], .Secure
+					return parsed[:], .Secure, sig, rrset_ttl(records)
 				case .Unsupported, .Refused:
 					/*
 					The DS named an algorithm the table reports as checkable and
@@ -4119,7 +4178,7 @@ fetch_keys :: proc(
 	Running out is a statement about this server, so it says so.
 	*/
 	if exhausted {
-		return nil, .Indeterminate
+		return nil, .Indeterminate, {}, 0
 	}
 	if checkable {
 		why := "no DNSKEY both matches a DS the parent published and signs the DNSKEY set"
@@ -4127,9 +4186,9 @@ fetch_keys :: proc(
 			why = "no DNSKEY both matches a trust anchor and signs the DNSKEY set"
 		}
 		broke_at(budget, zone, why, allocator)
-		return nil, .Bogus
+		return nil, .Bogus, {}, 0
 	}
-	return nil, .Insecure
+	return nil, .Insecure, {}, 0
 }
 
 // Does this DNSKEY hash to this DS? The digest runs over the owner name in
@@ -4191,11 +4250,11 @@ zone_keys :: proc(
 	}
 
 	unix := u32(time.to_unix_seconds(now))
-	fetched, fstatus := fetch_keys(v, budget, zone, anchors[:], unix, allocator)
+	fetched, fstatus, vouched, keys_ttl := fetch_keys(v, budget, zone, anchors[:], unix, allocator)
 	if fstatus != .Secure {
 		return fstatus, nil
 	}
-	cache_put(v, zone, .Secure, fetched, MAX_ZONE_TTL, now)
+	cache_put(v, zone, .Secure, fetched, min(keys_ttl, vouched.original_ttl), now, sig_lapses(vouched, unix))
 	return .Secure, fetched
 }
 
@@ -4363,13 +4422,13 @@ non_cut_drop :: proc(v: ^Validator, key: string) {
 // a year is not believed for one. The name in the slot gives way, which is the
 // whole of the replacement policy; see `Validator.non_cuts`.
 @(private)
-non_cut_remember :: proc(v: ^Validator, name: string, ttl: u32, now: time.Time) {
+non_cut_remember :: proc(v: ^Validator, name: string, ttl: u32, now: time.Time, lapses := max(u32)) {
 	fold_buf: [dns.MAX_NAME_PRESENTATION]u8
 	key, key_ok := fold_into(name, fold_buf[:])
 	if !key_ok {
 		return
 	}
-	lifetime := clamp(ttl, MIN_ZONE_TTL, MAX_NON_CUT_TTL)
+	lifetime := min(clamp(ttl, MIN_ZONE_TTL, MAX_NON_CUT_TTL), lapses)
 	expires := time.time_add(now, time.Duration(lifetime) * time.Second)
 
 	sync.mutex_lock(&v.mu)
@@ -4420,13 +4479,20 @@ clear_non_cuts :: proc(v: ^Validator) {
 // `now` is the same clock the lookups use rather than the wall clock, so an
 // entry cannot be written with an expiry the reader considers already past.
 @(private)
-cache_put :: proc(v: ^Validator, zone: string, status: Status, keys: []Dnskey, ttl: u32, now: time.Time) {
+cache_put :: proc(v: ^Validator, zone: string, status: Status, keys: []Dnskey, ttl: u32, now: time.Time, lapses := max(u32)) {
 	fold_buf: [dns.MAX_NAME_PRESENTATION]u8
 	key, key_ok := fold_into(zone, fold_buf[:])
 	if !key_ok {
 		return
 	}
-	lifetime := clamp(ttl, MIN_ZONE_TTL, MAX_ZONE_TTL)
+	/*
+	`ttl` already holds the records' TTLs to the Original TTL their signatures
+	carry (RFC 4035 section 5.3.3), and the floor applies over both - the way
+	Unbound's minimum and Knot Resolver's `ttl_min` do - since a zone's owner
+	choosing zero must not turn every question into a walk. `lapses` is when
+	the signatures stop verifying, and nothing outlives that.
+	*/
+	lifetime := min(clamp(ttl, MIN_ZONE_TTL, MAX_ZONE_TTL), lapses)
 
 	entry := new(Zone_Entry, v.allocator)
 	entry.status = status
@@ -4654,10 +4720,15 @@ dname_covered :: proc(
 	unix: u32,
 	now: time.Time,
 	allocator: mem.Allocator,
-) -> bool {
+) -> (
+	covered: bool,
+	// The DNAME's verified signature, which bounds the CNAME's TTL as it does
+	// the DNAME's own (RFC 4035 section 5.3.3).
+	vouched: Rrsig,
+) {
 	target, is_name := cname.data.(dns.Rdata_Name)
 	if !is_name {
-		return false
+		return false, {}
 	}
 
 	seen := make([dynamic]dns.Question, 0, 2, allocator)
@@ -4692,12 +4763,12 @@ dname_covered :: proc(
 		*/
 		records := records_of(msg.answer, rec.name, .DNAME, class, allocator)
 		sigs := sigs_covering(msg.answer, rec.name, .DNAME, class, allocator)
-		status, _, _, _, _ := validate_rrset(v, budget, rec.name, .DNAME, class, records, sigs, unix, now, allocator)
+		status, _, _, _, sig := validate_rrset(v, budget, rec.name, .DNAME, class, records, sigs, unix, now, allocator)
 		if status == .Secure {
-			return true
+			return true, sig
 		}
 	}
-	return false
+	return false, {}
 }
 
 /*
@@ -4845,6 +4916,26 @@ rrset_ttl :: proc(records: []dns.Record) -> u32 {
 		ttl = min(ttl, r.ttl)
 	}
 	return ttl if len(records) > 0 else 0
+}
+
+// The least Original TTL among the signatures behind these sets.
+@(private)
+sets_original_ttl :: proc(sets: []Authenticated_Set) -> u32 {
+	ttl := max(u32)
+	for s in sets {
+		ttl = min(ttl, s.rrsig.original_ttl)
+	}
+	return ttl
+}
+
+// The soonest any of the signatures behind these sets stops verifying.
+@(private)
+sets_lapse :: proc(sets: []Authenticated_Set, unix: u32) -> u32 {
+	left := max(u32)
+	for s in sets {
+		left = min(left, sig_lapses(s.rrsig, unix))
+	}
+	return left
 }
 
 @(private)
