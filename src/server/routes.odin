@@ -27,12 +27,14 @@ goes:
      every question but one. A `DS` at the route's own apex asks about the
      delegation rather than about anything inside the zone, and the proof lives
      in the parent; `route_group` sends that one to whoever answers the parent.
-  2. The chain walk is not, ever. A router authoritative for `home.arpa.`
-     answers `home.arpa. DS` out of its own zone - NODATA, unsigned, no NSEC -
-     rather than forwarding to `arpa.` where the proof that the delegation
-     carries no DS actually lives. Sending the validator's own lookups down the
-     route would rebuild exactly the broken chain that issue #194 was about, so
-     `validator_query` keeps using `s.group` and says so.
+  2. The chain walk is not, outside an anchored zone. A router authoritative
+     for `home.arpa.` answers `home.arpa. DS` out of its own zone - NODATA,
+     unsigned, no NSEC - rather than forwarding to `arpa.` where the proof that
+     the delegation carries no DS actually lives. Sending the validator's own
+     lookups down the route would rebuild exactly the broken chain that issue
+     #194 was about, so `validator_query` keeps using `s.group` there. Inside
+     a zone the operator anchored, the walk starts at the anchor and asks only
+     about the zone's own data, so it follows the route like the client does.
   3. A routed name is served insecure, unless the operator anchored the zone
      themselves. The zone holds local, unsigned data under a signed public
      parent, so walking the public hierarchy for a name inside it reaches a
@@ -41,10 +43,9 @@ goes:
      grants the RFC 6303 reverse zones, with the same escape hatch:
      `covered_by_local_anchor` stands it down for an operator who signed the
      zone and configured an anchor over it, that being a deliberate request to
-     validate exactly these names. Standing it down is all it does: the chain
-     walk starts at the root and descends by `DS`, so an anchor below the root
-     is not a starting point, and a zone signed purely internally still cannot
-     be reached. Anchoring such a zone trades an insecure answer for SERVFAIL.
+     validate exactly these names. The chain walk then starts at that anchor
+     (`zone_trust`), so a zone signed purely internally validates against the
+     operator's own key, whatever the public tree says about it.
 
 A fourth falls out in `rebind.odin`: a routed zone may answer with private
 addresses, because answering with private addresses is what a local authority
@@ -99,8 +100,9 @@ Zone_Route :: struct {
 /*
 How long one client question for `name` may spend waiting on upstreams, from its
 first exchange (issue #439): the longest `upstream.query_budget` of the groups
-it can ask - where it goes, the zone's own route for an apex `DS`, and the
-default group, which every chain lookup asks.
+it can ask - where it goes, the zone's own route for an apex `DS`, the default
+group, which every chain lookup outside an anchored zone asks, and every route
+a walk inside an anchored zone can ask (`route_meets_an_anchor`).
 
 The longest rather than that of whichever group a question asks first, because
 one question can ask several: a LAN route's 200 ms forward would otherwise leave
@@ -108,7 +110,10 @@ the chain walk behind it a few hundred milliseconds for the public tree instead
 of the ten seconds the default group was given. Only those groups, though: a
 slow route elsewhere in the table is no group this question can reach, and its
 budget would hand every public question a deadline long enough to wait on a
-degraded default group lookup after lookup, which is the wait #439 bounds.
+degraded default group lookup after lookup, which is the wait #439 bounds. A
+route an anchor meets is the exception, and costs exactly that wait for the
+configurations that have one: any answer can CNAME into the anchored zone, and
+its walk then asks that route.
 Where every group has the same `timeout` - the configuration nearly everybody
 runs - it is two of them, the figure #327 set for one group.
 */
@@ -118,7 +123,30 @@ question_span :: proc(s: ^Server, name: string, type: dns.Type) -> (span: time.D
 			span = max(span, upstream.query_budget(g))
 		}
 	}
+	for route in s.routes {
+		if route_meets_an_anchor(s, route) {
+			span = max(span, upstream.query_budget(route.group))
+		}
+	}
 	return
+}
+
+/*
+Whether a chain walk can ask this route: inside an anchored zone `validator_query`
+follows the route at each name, so a route over the anchor holds its keys and
+one below it holds a cut's. Every question, and not only one for a name inside
+the zone, because a CNAME or DNAME can take any answer there.
+*/
+@(private)
+route_meets_an_anchor :: proc(s: ^Server, route: Zone_Route) -> bool {
+	for domain in route.domains {
+		for zone in s.anchor_zones {
+			if name_at_or_below(domain, zone) || name_at_or_below(zone, domain) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 /*
@@ -652,13 +680,12 @@ The window is the whole of it wherever the route's answer can be served, and an
 anchor over the zone is where it cannot. A routed zone is served insecure - that
 is what `served_locally` does, and what this memory bets on when it lets the
 route's unsigned NODATA stand in for the parent's signed proof - unless the
-operator anchored the zone themselves, which is a request to hold exactly these
-names to the public chain. The route has no signatures to offer that chain, so
-its answer there is a Bogus verdict and a SERVFAIL rather than a stand-in, and a
-memory would spend a whole cooldown of them while the parent was healthy and
-holding what the client asked for. `routes.odin`'s summary of anchoring a routed
-zone - an insecure answer traded for SERVFAIL - is what that operator asked for,
-and this must not make the trade for them ten seconds at a time.
+operator anchored the zone themselves, which is a request to validate these
+names. The apex `DS` is still the parent's to answer and is read against the
+parent's chain, which the route has no signatures to offer, so its answer there
+is a Bogus verdict and a SERVFAIL rather than a stand-in, and a memory would
+spend a whole cooldown of them while the parent was healthy and holding what the
+client asked for.
 
 `covered_by_local_anchor` rather than `resolve_query`'s `validating`, which is
 the same fact for an ordinary query and not for every query. `validating` also

@@ -47,6 +47,9 @@ run_dnssec_cases :: proc(r: ^Runner) {
 	upstream_port := next_port(r)
 	mock := mock_make("dnssec", upstream_port)
 	mock_synth_all(mock, {203, 0, 113, 55})
+	for f in ANCHORED_REVERSE_FIXTURES {
+		mock_reply(mock, f.qname, f.qtype, from_hex(f.response, context.allocator))
+	}
 	if !mock_start(mock) {
 		skip_case(r, "dnssec", "cannot start the mock upstream")
 		return
@@ -231,18 +234,33 @@ run_dnssec_cases :: proc(r: ^Runner) {
 	}
 	end_case(r)
 
-	start_case(r, "dnssec: an operator anchor over a private zone re-enables validation")
+	start_case(r, "dnssec: an operator anchor over a private zone validates it")
 	{
-		// A site that signs its own reverse space and anchors it is asking for
-		// those names to be validated - the bypass must defer. With the root and
-		// a 168.192.in-addr.arpa anchor both configured, a name inside that zone
-		// is validated again (this mock cannot satisfy a validator, so it
-		// SERVFAILs), while 10.in-addr.arpa - anchored by no one - still bypasses
-		// and is served. That is the override working, and staying scoped to the
-		// zone the operator actually anchored.
-		anchored_port := next_port(r)
-		config := fmt.tprintf(
-			`listeners:
+		/*
+		A site that signs its own reverse space and anchors it is asking for
+		those names to be validated - the bypass must defer, and the walk must
+		start at the operator's anchor (issue #226). The mock serves
+		168.192.in-addr.arpa signed with a key nothing public vouches for, so
+		AD on the PTR is the proof the chain began at that anchor: a walk from
+		the root never reaches the zone, and SERVFAILs. 10.in-addr.arpa -
+		anchored by no one - still bypasses and is served.
+
+		A second server anchors the zone with a key it does not publish, and
+		that is SERVFAIL with DNSSEC Bogus (EDE 6) rather than No Reachable
+		Authority: the walk reached the zone and the anchor decided it.
+		*/
+		for c in ([]struct {
+				anchor:   string,
+				rcode:    dns.Rcode,
+				ad:       bool,
+				ede:      int,
+			}{
+				{ANCHORED_REVERSE_ANCHOR, .No_Error, true, -1},
+				{"168.192.in-addr.arpa. IN DS 18109 15 2 0000000000000000000000000000000000000000000000000000000000000000", .Serv_Fail, false, 6},
+			}) {
+			anchored_port := next_port(r)
+			config := fmt.tprintf(
+				`listeners:
   udp: {{enabled: true, address: 127.0.0.1, port: %d}}
   tcp: {{enabled: false}}
 upstream:
@@ -253,20 +271,28 @@ dnssec:
   enabled: true
   trust_anchors:
     - ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
-    - "168.192.in-addr.arpa. IN DS 12345 8 2 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+    - %q
 special_use: {{private_reverse: false}}
 `,
-			anchored_port,
-			upstream_port,
-		)
-		anchored, started := start_server(r, Server_Options{config = config, udp_port = anchored_port})
-		if started {
+				anchored_port,
+				upstream_port,
+				c.anchor,
+			)
+			anchored, started := start_server(r, Server_Options{config = config, udp_port = anchored_port})
+			if !started {
+				continue
+			}
 			defer stop_server(&anchored)
 
-			covered := query_udp(anchored_port, build_query("1.1.168.192.in-addr.arpa.", u16(dns.Type.PTR)))
+			covered := query_udp(
+				anchored_port,
+				build_query("1.1.168.192.in-addr.arpa.", u16(dns.Type.PTR), edns_size = 1232, dnssec_ok = true),
+			)
 			if check(r, covered.ok, "no response for the anchored name") {
 				h := parse_header(r, covered.wire)
-				check_eq_int(r, h.rcode, int(dns.Rcode.Serv_Fail), "rcode for an anchored private name")
+				check_eq_int(r, h.rcode, int(c.rcode), "rcode for an anchored private name")
+				check(r, (len(covered.wire) >= 4 && covered.wire[3] & 0x20 != 0) == c.ad, "AD for an anchored private name: want %v", c.ad)
+				check_eq_int(r, extended_error(r, covered.wire), c.ede, "extended DNS error for an anchored private name")
 			}
 
 			uncovered := query_udp(anchored_port, build_query("1.1.10.in-addr.arpa.", u16(dns.Type.PTR)))
@@ -430,6 +456,43 @@ run_dnssec_config_cases :: proc(r: ^Runner) {
 		)
 		check(r, code != 0, "a broken trust anchor exited 0")
 		check(r, strings.contains(output, "trust_anchors"), "the error does not name the setting: %q", output)
+	}
+	end_case(r)
+
+	start_case(r, "dnssec: an anchor below the root this build cannot follow refuses the start")
+	{
+		/*
+		Algorithm 200 is one no build runs. `--check` cannot say so - which
+		algorithms run is the host's to answer, asked at startup - and the zone
+		is a starting point for the walk (issue #226), so starting would serve
+		`corp.` insecure under an anchor that asked for it to be validated.
+		*/
+		port := next_port(r)
+		config := fmt.tprintf(
+			`listeners:
+  udp: {{enabled: true, address: 127.0.0.1, port: %d}}
+  tcp: {{enabled: false}}
+upstream:
+  servers: [udp://127.0.0.1:%d]
+dnssec:
+  enabled: true
+  trust_anchors:
+    - ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+    - "corp. IN DS 1 200 2 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+`,
+			port,
+			next_port(r),
+		)
+		srv, started := start_server_raw(r, config, port)
+		if check(r, started, "cannot start the binary") {
+			defer stop_server(&srv)
+			state, werr := os.process_wait(srv.process, 10 * time.Second)
+			if check(r, werr == nil && state.exited, "the server started on an anchor it cannot follow") {
+				srv.running = false
+				check(r, state.exit_code != 0, "the refusal exited 0")
+				check(r, log_contains(&srv, "no trust anchor for corp. names an algorithm"), "the refusal does not name the zone:\n%s", read_log(&srv))
+			}
+		}
 	}
 	end_case(r)
 

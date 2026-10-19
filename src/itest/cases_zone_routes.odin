@@ -262,6 +262,9 @@ run_zone_route_cases :: proc(r: ^Runner) {
 	internal_port := next_port(r)
 	internal := mock_make("internal", internal_port)
 	mock_synth_all(internal, INTERNAL)
+	for f in ANCHORED_CORP_FIXTURES {
+		mock_reply(internal, f.qname, f.qtype, from_hex(f.response, context.allocator))
+	}
 	if !mock_start(internal) {
 		skip_case(r, "upstream.zones", "cannot start the internal mock")
 		return
@@ -535,40 +538,33 @@ rebind: {{enabled: false}}
 	}
 	end_case(r)
 
-	start_case(r, "upstream.zones: an anchor over a routed zone stands the bypass down")
+	start_case(r, "upstream.zones: an anchor over a routed zone validates it")
 	{
 		/*
-		The escape hatch, and what it is and is not.
+		The escape hatch, and what it is.
 
 		A site that anchors `corp.example` has asked for those names to be
 		checked, and that request outranks a default meant for zones nobody
-		signs: the routed name SERVFAILs where it was served before. What that
-		proves is only the bypass standing down - the route itself is unchanged,
-		and the query still goes to the internal mock, which simply cannot
-		satisfy a validator.
-
-		It is deliberately not a claim that anchoring a zone makes it validate.
-		The chain walk starts at the root and descends by `DS` (`zone_trust`), so
-		an anchor below the root does not seed it; a zone signed purely
-		internally, with no `DS` in the public tree, cannot be reached whatever
-		is anchored over it. Anchoring such a zone therefore trades a working
-		insecure answer for SERVFAIL, which is what this case actually
-		demonstrates. Making a below-root anchor a starting point for the walk is
-		its own change, in `src/dnssec`, and it would apply to the RFC 6303
-		reverse zones before it applied here.
+		signs. The walk starts at that anchor (issue #226), and the zone's keys
+		are asked of the route's authority - the public tree has no `DS` for an
+		internal zone and no copy of its keys. So the signed name comes back
+		with AD, which a walk from the root or keys asked of the public mock
+		could not give, and the internal mock's unsigned names are SERVFAIL: the
+		bypass stood down and they failed the check, rather than being served.
 
 		The root anchor is re-listed alongside because `trust_anchors` replaces
-		the built-in keys rather than adding to them - without it there would be
-		no root anchor at all and every name would SERVFAIL, which would pass
-		this assertion while proving nothing about the routed zone.
+		the built-in keys rather than adding to them.
 		*/
 		anchored_port := next_port(r)
-		anchors := `dnssec:
+		anchors := fmt.tprintf(
+			`dnssec:
   enabled: true
   trust_anchors:
     - ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
-    - "corp.example. IN DS 12345 8 2 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
-`
+    - %q
+`,
+			ANCHORED_CORP_ANCHOR,
+		)
 		anchored, started := start_server(
 			r,
 			Server_Options {
@@ -578,10 +574,21 @@ rebind: {{enabled: false}}
 		)
 		if started {
 			defer stop_server(&anchored)
-			res := query_udp(anchored_port, build_query("nas.corp.example.", u16(dns.Type.A)))
-			if check(r, res.ok, "no response for the anchored routed name") {
+			res := query_udp(
+				anchored_port,
+				build_query("vault.corp.example.", u16(dns.Type.A), edns_size = 1232, dnssec_ok = true),
+			)
+			if check(r, res.ok, "no response for the signed routed name") {
 				h := parse_header(r, res.wire)
-				check_eq_int(r, h.rcode, int(dns.Rcode.Serv_Fail), "rcode for an anchored routed name")
+				check_eq_int(r, h.rcode, int(dns.Rcode.No_Error), "rcode for a signed routed name")
+				check(r, len(res.wire) >= 4 && res.wire[3] & 0x20 != 0, "the signed routed name does not carry AD")
+				addrs := answer_addresses(r, res.wire)
+				check(r, len(addrs) == 1 && addrs[0] == "10.0.0.5", "addresses for the signed routed name: %v", addrs)
+			}
+			unsigned := query_udp(anchored_port, build_query("nas.corp.example.", u16(dns.Type.A)))
+			if check(r, unsigned.ok, "no response for the unsigned routed name") {
+				h := parse_header(r, unsigned.wire)
+				check_eq_int(r, h.rcode, int(dns.Rcode.Serv_Fail), "rcode for an unsigned name in an anchored route")
 			}
 		} else {
 			skip_case(r, "upstream.zones: anchored route", "server did not start")

@@ -58,7 +58,10 @@ budget covers the whole question — the forward, the DNSSEC chain lookups, and
 both groups a routed apex `DS` asks — counted from its first exchange; a lookup
 that finds none left asks nobody. A rewrite alias's target is a lookup of its
 own, with a budget of its own. With routes of different `timeout`s, the budget
-is two of the longest among the question's route and the default group.
+is two of the longest among the question's route, the default group and every
+route at, above or below a [`trust_anchors`](dnssec.md#trust-anchors) zone. That
+last applies to every question, since any answer can CNAME into an anchored
+zone.
 
 Within it, a dead first server hands over to the second, which gets its full
 `timeout`; a third waits for the next query. A SERVFAIL, REFUSED or referral reply sends
@@ -245,10 +248,10 @@ from the two points below.
 - **The zone is not validated.** A local zone is unsigned under a public parent
   that does not delegate it, so validating it would call every answer bogus.
   Routed names are served without the AD bit. A
-  [`trust_anchors`](dnssec.md#dnssec) entry covering the zone turns the bypass
-  off — which validates the zone only if the public tree delegates to it. Note
-  that `trust_anchors` *replaces* the built-in root keys, so list the root DS as
-  well.
+  [`trust_anchors`](dnssec.md#trust-anchors) entry covering the zone turns the
+  bypass off and validates the zone against that anchor, with its keys fetched
+  from the route's servers. Note that `trust_anchors` *replaces* the built-in
+  root keys, so list the root DS as well.
 - **The zone may answer with private addresses.**
   [Rebind protection](rebinding.md#dns-rebinding-protection) exempts a routed
   zone without a `rebind.allow_domains` entry.
@@ -266,9 +269,11 @@ so a route is how a reverse zone reaches your router.
 
 ### DS at a route's apex
 
-The DNSSEC chain walk's own `DS` and `DNSKEY` lookups always go to
-`upstream.servers`, never down a route: a local server answers `DS` for its zone
-from its own data, which breaks the chain.
+The DNSSEC chain walk's own `DS` and `DNSKEY` lookups go to
+`upstream.servers`, not down a route: a local server answers `DS` for its zone
+from its own data, which breaks the chain. The exception is a zone covered by a
+[`trust_anchors`](dnssec.md#trust-anchors) entry, where the walk starts at the
+anchor and asks the route's servers for the zone's own keys.
 
 A client's `DS` query for a route's apex (say `home.arpa DS`) is the one question
 about a routed zone that goes to the parent's upstreams — `upstream.servers`, or
