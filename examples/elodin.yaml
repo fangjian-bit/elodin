@@ -320,12 +320,10 @@ upstream:
   # what a local authority is for.
   #
   # A dnssec.trust_anchors entry covering a routed zone stands the first of
-  # those down, so the names are validated like any other. That is not the same
-  # as the zone validating: the walk starts at the root and descends by DS, so
-  # it reaches a signed zone only where the public tree delegates to it, and
-  # standing the bypass down over a purely internal zone turns a working
-  # insecure answer into SERVFAIL. trust_anchors also replaces the built-in root
-  # keys rather than adding to them, so list the root DS alongside your own.
+  # those down: the zone is validated against that anchor, with its keys
+  # fetched from the route's servers, so a zone signed only internally
+  # validates. trust_anchors also replaces the built-in root keys rather than
+  # adding to them, so list the root DS alongside your own.
   #
   # What does not follow a route is the DNSSEC chain walk - DS and DNSKEY for
   # the zones above a name always go to the servers above, because a server
@@ -450,7 +448,9 @@ dnssec:
 
   # Where the chain of trust starts. Empty uses the root keys IANA publishes,
   # which are compiled in — both the 2017 and 2024 key-signing keys, so a
-  # rollover does not need a new build. Set this only to pin your own.
+  # rollover does not need a new build. Set this only to pin your own. An
+  # anchor for a zone below the root is where names in that zone are checked
+  # from (an internally signed zone, say); list the root alongside it.
   # trust_anchors:
   #   - ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
 

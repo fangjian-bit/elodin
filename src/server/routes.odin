@@ -27,12 +27,14 @@ goes:
      every question but one. A `DS` at the route's own apex asks about the
      delegation rather than about anything inside the zone, and the proof lives
      in the parent; `route_group` sends that one to whoever answers the parent.
-  2. The chain walk is not, ever. A router authoritative for `home.arpa.`
-     answers `home.arpa. DS` out of its own zone - NODATA, unsigned, no NSEC -
-     rather than forwarding to `arpa.` where the proof that the delegation
-     carries no DS actually lives. Sending the validator's own lookups down the
-     route would rebuild exactly the broken chain that issue #194 was about, so
-     `validator_query` keeps using `s.group` and says so.
+  2. The chain walk is not, outside an anchored zone. A router authoritative
+     for `home.arpa.` answers `home.arpa. DS` out of its own zone - NODATA,
+     unsigned, no NSEC - rather than forwarding to `arpa.` where the proof that
+     the delegation carries no DS actually lives. Sending the validator's own
+     lookups down the route would rebuild exactly the broken chain that issue
+     #194 was about, so `validator_query` keeps using `s.group` there. Inside
+     a zone the operator anchored, the walk starts at the anchor and asks only
+     about the zone's own data, so it follows the route like the client does.
   3. A routed name is served insecure, unless the operator anchored the zone
      themselves. The zone holds local, unsigned data under a signed public
      parent, so walking the public hierarchy for a name inside it reaches a
@@ -41,10 +43,9 @@ goes:
      grants the RFC 6303 reverse zones, with the same escape hatch:
      `covered_by_local_anchor` stands it down for an operator who signed the
      zone and configured an anchor over it, that being a deliberate request to
-     validate exactly these names. Standing it down is all it does: the chain
-     walk starts at the root and descends by `DS`, so an anchor below the root
-     is not a starting point, and a zone signed purely internally still cannot
-     be reached. Anchoring such a zone trades an insecure answer for SERVFAIL.
+     validate exactly these names. The chain walk then starts at that anchor
+     (`zone_trust`), so a zone signed purely internally validates against the
+     operator's own key, whatever the public tree says about it.
 
 A fourth falls out in `rebind.odin`: a routed zone may answer with private
 addresses, because answering with private addresses is what a local authority

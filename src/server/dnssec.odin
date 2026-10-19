@@ -85,9 +85,9 @@ start_validator :: proc(s: ^Server) -> bool {
 	anchor naming an algorithm the library will not run anchors nothing, so the
 	zone it covers is an insecure delegation the moment it is asked about.
 
-	The root is the zone that decides. Every chain starts there - `zone_trust`
-	asks for the root's keys and walks down through DS records - so a set that
-	cannot seed the root seeds nothing, whatever else is in it.
+	A chain starts at the closest anchor above the name (`zone_trust`), so each
+	anchored zone is asked this. The root is where every chain outside the
+	operator's own anchored zones starts, and gets its own two messages.
 
 	The two ways of failing that fail differently, which is why they are told
 	apart below. An anchor for the root whose algorithm the library will not run
@@ -95,7 +95,7 @@ start_validator :: proc(s: ^Server) -> bool {
 	every answer goes out unvalidated: no AD bit anywhere and no SERVFAIL
 	either, which is the failure a validating resolver exists to not have. No
 	root anchor at all leaves `zone_keys` with nothing to match, which is
-	`Indeterminate` and SERVFAILs every name instead. Neither is a server worth
+	`Indeterminate` and SERVFAILs every name outside the anchored zones instead. Neither is a server worth
 	starting; an operator who does want unvalidated answers has
 	`dnssec.enabled: false` to ask for them with.
 	*/
@@ -111,6 +111,12 @@ start_validator :: proc(s: ^Server) -> bool {
 		// The validator is still nil, and `destroy_validator` takes that; what
 		// this is here for is the anchors parsed above, which the refusal to
 		// start would otherwise leave behind.
+		stop_validator(s)
+		return false
+	}
+	if zone, found := dnssec.unfollowable_anchor_zone(in_use); found {
+		logx.errorf("dnssec: no trust anchor for %s names an algorithm and digest this build can check", zone)
+		logx.errorf("dnssec: %s would be served unvalidated; check the host crypto policy, or remove its anchors", zone)
 		stop_validator(s)
 		return false
 	}
@@ -310,31 +316,23 @@ validator_query :: proc(
 	Another in the group may know, and if none do the reply still comes back
 	for `zone_step` to read the rcode off and call the chain unavailable.
 
-	`s.group` rather than `route_group`, deliberately: no lookup this server makes
-	on its own account follows a route, whatever the name or the type. The
-	client's own question does follow one, with the single exception `route_group`
-	carves out for a `DS` at a route's apex - the same argument as this one
-	reached from the other side, and the reason the client's copy of that question
-	does not land somewhere this one calls wrong. The two are not the same
-	selector even so: `route_group` asks the group that answers the *parent*,
-	which for a route nested inside another route is that outer route's group
-	rather than `s.group`. A chain walk reaching an anchored zone that deep wants
-	the public tree, which is what this hands it. The route points at a local
-	authority for the zone, and a local authority answers questions about its own
-	zone out of its own data: a router authoritative for `home.arpa.` answers
-	`home.arpa. DS` with an unsigned NODATA rather than forwarding to `arpa.`,
-	where the signed proof that the delegation carries no DS is the only copy
-	there is. That answer breaks the chain instead of completing it - the failure
-	of issue #194, rebuilt by a different road. The default group is the one that
-	can reach the public parent, so the chain walk always goes there. See
-	`routes.odin`.
+	`s.group` for a name outside the operator's anchored zones, whatever the type:
+	there the walk is the public tree's, and a route points at a local authority
+	that answers questions about its own zone out of its own data. A router
+	authoritative for `home.arpa.` answers `home.arpa. DS` with an unsigned
+	NODATA rather than forwarding to `arpa.`, where the signed proof that the
+	delegation carries no DS is the only copy there is. That answer breaks the
+	chain instead of completing it - the failure of issue #194, rebuilt by a
+	different road. See `routes.odin`.
 
-	Nothing is lost by it: a routed zone is served insecure anyway, so the walk
-	is not run for its names at all unless the operator anchored the zone, and
-	an operator who anchored it wants it checked against their anchor rather
-	than against whatever their router says about the public tree.
+	`route_group` inside an anchored zone (issue #226). The walk starts at the
+	anchor there, so every lookup it makes is about that zone's own data - its
+	keys, and the DS of a cut below it - and the public tree has none of it for a
+	zone signed internally. The route's authority does, and `route_group` still
+	sends a `DS` at a nested route's apex to whoever answers its parent.
 	*/
-	response, _, uerr := upstream.resolve_answerable(s.group, asked, allocator, deadline)
+	group := route_group(s, name, type) if covered_by_local_anchor(s, name) else s.group
+	response, _, uerr := upstream.resolve_answerable(group, asked, allocator, deadline)
 	if uerr != .None {
 		report_chain_fetch_failed(type, name, uerr)
 		return nil, false

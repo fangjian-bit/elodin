@@ -86,7 +86,20 @@ bare DS fields or a full presentation-form record:
 dnssec:
   trust_anchors:
     - ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+    - "corp.example. IN DS 54707 15 2 FF085C4C1865D42641957E67182575E9DCB20BF2D9DD001D7BB9C5C4D2AC5384"
 ```
+
+An anchor for a zone below the root validates that zone against your own key.
+A name is checked from the closest anchor at or above it (RFC 6840 Appendix
+C.1), so the public tree is not asked about `corp.example` at all: a zone signed
+only internally validates, and a public DS for it is not used. An anchor left
+behind after the zone changes its key makes every name in the zone SERVFAIL.
+
+- The list must still name the root, or `--check` and startup refuse it.
+- The server refuses to start if every anchor for a zone names an algorithm
+  or digest this build cannot check.
+- For a zone routed under [`upstream.zones`](upstreams.md#per-domain-upstreams),
+  the zone's keys are fetched from the route's servers.
 
 ## max_nsec3_iterations
 
@@ -221,8 +234,9 @@ for the name still wins, to advertise this server's own endpoints.
   only with a refused algorithm is an insecure delegation (RFC 6840 section 5.2):
   served, no AD. A zone that also publishes a checkable algorithm is validated on
   that one, and an RRset carrying only the refused signature is bogus (RFC 6840
-  section 5.11). If no root trust anchor survives the probe, the server refuses to
-  start; the built-in anchors both use RSA/SHA-256.
+  section 5.11). If no root trust anchor survives the probe, or no anchor for a
+  zone below it does, the server refuses to start; the built-in anchors both use
+  RSA/SHA-256.
 - **A policy can also refuse a key size.** Fedora's and RHEL's DEFAULT policy
   requires RSA keys of at least 2048 bits. The probe uses a 2048-bit key, so RSA
   reports runnable, and a zone with a 1024-bit RSA zone-signing key then fails its

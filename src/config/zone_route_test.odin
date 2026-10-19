@@ -456,9 +456,9 @@ test_a_route_over_a_default_off_special_use_zone_is_kept :: proc(t: ^testing.T) 
 /*
 A trust anchor set that never names the root is refused by `--check`.
 
-Every chain of trust starts at the root and reaches every other zone through
-its parent's DS, so a validator handed only `corp.example.` has no way in and
-fails every name it is asked. `start_validator` refuses to come up on that, and
+A chain of trust starts at the closest anchor above the name, so a validator
+handed only `corp.example.` has no way in to any name outside that zone and
+fails every one of them. `start_validator` refuses to come up on that, and
 without this the refusal arrives after `--check` has called the file valid -
 the operator restarts a working resolver onto a configuration nothing warned
 them about, which is the shape `--check` exists to prevent.

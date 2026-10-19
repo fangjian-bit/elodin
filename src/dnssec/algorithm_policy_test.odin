@@ -747,10 +747,10 @@ test_an_anchor_the_library_cannot_follow_is_not_usable :: proc(t: ^testing.T) {
 	testing.expect(t, !usable_anchor(nil, "."), "and no anchors at all is no way in")
 
 	/*
-	The finding this test exists for. An anchor below the root is never
-	consulted - `zone_keys` is asked for `.` and nothing else - so a followable
-	one cannot stand in for a root anchor that is not, and a set of them is not
-	a validator that validates anything.
+	The finding this test exists for. An anchor below the root seeds only the
+	walks into its own zone (`closest_anchor`), so a followable one cannot stand
+	in for a root anchor that is not, and a set of them validates nothing
+	outside the zones they name.
 	*/
 	below := []Trust_Anchor {
 		{zone = ".", ds = {key_tag = 1, algorithm = ALG_RSASHA1, digest_type = DIGEST_SHA256}},
@@ -760,7 +760,7 @@ test_an_anchor_the_library_cannot_follow_is_not_usable :: proc(t: ^testing.T) {
 	testing.expect(t, anchors_the_root(below), "the root is anchored here, just not followably")
 
 	only_below := below[1:]
-	testing.expect(t, !usable_anchor(only_below, "."), "and a set with no root anchor seeds nothing at all")
+	testing.expect(t, !usable_anchor(only_below, "."), "and a set with no root anchor does not seed the root")
 	testing.expect(t, !anchors_the_root(only_below), "which is a different thing to tell an operator")
 
 	// A digest the build does not compute takes its anchor with it, algorithm

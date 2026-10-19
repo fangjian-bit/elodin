@@ -245,10 +245,10 @@ from the two points below.
 - **The zone is not validated.** A local zone is unsigned under a public parent
   that does not delegate it, so validating it would call every answer bogus.
   Routed names are served without the AD bit. A
-  [`trust_anchors`](dnssec.md#dnssec) entry covering the zone turns the bypass
-  off — which validates the zone only if the public tree delegates to it. Note
-  that `trust_anchors` *replaces* the built-in root keys, so list the root DS as
-  well.
+  [`trust_anchors`](dnssec.md#trust-anchors) entry covering the zone turns the
+  bypass off and validates the zone against that anchor, with its keys fetched
+  from the route's servers. Note that `trust_anchors` *replaces* the built-in
+  root keys, so list the root DS as well.
 - **The zone may answer with private addresses.**
   [Rebind protection](rebinding.md#dns-rebinding-protection) exempts a routed
   zone without a `rebind.allow_domains` entry.

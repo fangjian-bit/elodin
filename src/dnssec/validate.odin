@@ -3539,19 +3539,32 @@ zone_trust :: proc(
 		end_walk(v, budget)
 	}
 
-	root_status, root_keys := zone_keys(v, budget, ".", now, allocator)
-	if root_status != .Secure {
+	/*
+	The walk starts at the closest anchor at or above the name, not always at
+	the root (issue #226). RFC 4035 section 4.3 makes a chain Secure when it
+	runs "from a trusted security anchor", any of them, and RFC 6840 section
+	5.10 leaves the choice between nested anchors to the implementation. This
+	is its Appendix C.1, "Closest Encloser", which is what Unbound, BIND, Knot
+	Resolver and PowerDNS Recursor all do: an operator who anchors `corp.` has
+	pinned that zone's keys, so the public tree's opinion of `corp.` - a DS, or
+	a signed proof that there is none - is never asked, and cannot vouch for a
+	key the anchor does not name. The cost C.1 itself states: an anchor left
+	behind by a key rollover is Bogus for its zone, not rescued by the root.
+	*/
+	seed := closest_anchor(v.anchors, name)
+	seed_status, seed_keys := zone_keys(v, budget, seed, now, allocator)
+	if seed_status != .Secure {
 		// Only where nothing more precise was written: `fetch_keys` says when
 		// it was this server's own shedding that stopped it, and overwriting
 		// that would send the client a code about the authority instead.
-		if root_status == .Indeterminate && budget.walk_stopped == "" {
+		if seed_status == .Indeterminate && budget.walk_stopped == "" {
 			budget.walk_stopped = "chain of trust unavailable"
 		}
-		return root_status, nil, "."
+		return seed_status, nil, seed
 	}
 
-	zone := "."
-	keys = root_keys
+	zone := seed
+	keys = seed_keys
 	depth := label_count(name)
 	/*
 	Cuts found on the way down, against `MAX_CHAIN_DEPTH` - and not
@@ -3581,7 +3594,7 @@ zone_trust :: proc(
 	*/
 	cuts := 0
 
-	for i in 1 ..= depth {
+	for i in label_count(seed) + 1 ..= depth {
 		child := name_drop_labels(name, depth - i)
 		step, child_keys := zone_step(v, budget, zone, keys, child, now, allocator)
 		switch step {
@@ -4258,8 +4271,10 @@ fetch_keys :: proc(
 		return nil, .Indeterminate, {}, 0
 	}
 	if checkable {
+		// An anchored zone's DS set is its anchors: the walk starts there and
+		// never reaches it through its parent (see `closest_anchor`).
 		why := "no DNSKEY both matches a DS the parent published and signs the DNSKEY set"
-		if zone == "." {
+		if dns.name_equal_fold(closest_anchor(v.anchors, zone), zone) {
 			why = "no DNSKEY both matches a trust anchor and signs the DNSKEY set"
 		}
 		broke_at(budget, zone, why, allocator)
@@ -4298,8 +4313,9 @@ ds_matches :: proc(zone: string, key: Dnskey, ds: Ds) -> bool {
 /*
 The keys of a zone, from the cache or from the trust anchors.
 
-Only the root takes the anchor path; every other zone reaches this through
-`zone_step`, which has a parent to check against.
+Only the zone a walk starts at takes the anchor path, which is the closest
+anchor above the name (see `closest_anchor`); every other zone reaches this
+through `zone_step`, which has a parent to check against.
 */
 @(private)
 zone_keys :: proc(

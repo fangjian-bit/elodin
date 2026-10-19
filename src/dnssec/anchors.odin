@@ -50,13 +50,10 @@ it can check - so a zone whose every anchor names something `probe_algorithms`
 dropped has no anchor at all, and is an insecure delegation the moment it is
 asked about.
 
-Asked about `.` and only `.` by the one caller that matters. Every chain here
-starts at the root - `zone_trust` opens with `zone_keys(v, budget, ".")` and
-reaches every other zone through its parent's DS - so the root anchor is the
-one that decides whether anything is validated, and an anchor set that cannot
-seed the root seeds nothing whatever else is in it. A caller wanting to know
-about some other zone gets an honest answer about the anchors, but this
-validator will not consult them.
+A chain starts at the closest anchor above the name (`closest_anchor`), so
+every anchored zone is a starting point and each is asked about: an anchor
+below the root that cannot be followed leaves its zone insecure, and one for
+the root leaves every name outside the operator's own zones insecure.
 */
 usable_anchor :: proc(anchors: []Trust_Anchor, zone: string) -> bool {
 	for anchor in anchors {
@@ -68,6 +65,33 @@ usable_anchor :: proc(anchors: []Trust_Anchor, zone: string) -> bool {
 		}
 	}
 	return false
+}
+
+// The first anchored zone none of whose anchors this build can follow. An
+// operator anchors a zone to have it validated, and an anchor `fetch_keys`
+// cannot check serves the zone insecure instead.
+unfollowable_anchor_zone :: proc(anchors: []Trust_Anchor) -> (zone: string, found: bool) {
+	for anchor in anchors {
+		if !usable_anchor(anchors, anchor.zone) {
+			return anchor.zone, true
+		}
+	}
+	return "", false
+}
+
+/*
+The anchored zone a chain to `name` starts at: the deepest one at or above it,
+RFC 6840 Appendix C.1. The root when nothing closer is anchored, whether or not
+the root is - `zone_keys` then finds no anchor, which is `Indeterminate`.
+*/
+closest_anchor :: proc(anchors: []Trust_Anchor, name: string) -> string {
+	closest := "."
+	for anchor in anchors {
+		if name_in_zone(name, anchor.zone) && label_count(anchor.zone) > label_count(closest) {
+			closest = anchor.zone
+		}
+	}
+	return closest
 }
 
 // Is any of this set an anchor for the root at all, followable or not? What

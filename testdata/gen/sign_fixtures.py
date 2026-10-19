@@ -1503,6 +1503,54 @@ def cname_denial():
     cd_unproven(src, tgt, nodata)
     cd_wildcards(src, tgt, oo, nodata)
 
+
+@scenario
+def anchor_below_the_root():
+    """Cover an internally signed zone trusted through an anchor of its own."""
+    # Issue #226. `corp.` is signed with a key the parent never vouched for: the
+    # root's NSEC proves `corp.` a delegation with no DS, so the public chain
+    # reads it as insecure. The operator configures a trust anchor for `corp.`
+    # beside the root's, and the validator starts the chain at the closest
+    # anchor (RFC 6840 Appendix C.1) - so the answer is Secure.
+    root = Key(".", "ba-root")
+    corp = Key("corp.", "ba-corp")
+
+    root_keys = [RR(".", DNSKEY, root.rdata)]
+    print("// anchor: %s" % root.ds_text())
+    print("// anchor: %s" % corp.ds_text())
+    emit("ba_root_dnskey", ".", "DNSKEY", message(".", DNSKEY, root_keys + [sign(root_keys, root)]))
+
+    no_ds = [RR("corp.", NSEC, nsec_rdata("zz.", [NS, RRSIG, NSEC]))]
+    emit("ba_corp_ds", "corp.", "DS", message("corp.", DS, [], no_ds + [sign(no_ds, root)]))
+
+    corp_keys = [RR("corp.", DNSKEY, corp.rdata)]
+    emit("ba_corp_dnskey", "corp.", "DNSKEY",
+         message("corp.", DNSKEY, corp_keys + [sign(corp_keys, corp)]))
+
+    answer = [RR("www.corp.", A, bytes([192, 0, 2, 1]))]
+    emit("ba_answer", "www.corp.", "A", message("www.corp.", A, answer + [sign(answer, corp)]))
+
+
+@scenario
+def anchored_internal_zones():
+    """Cover the two internally signed zones the #226 integration tests anchor."""
+    # A private reverse zone and a routed forward zone, each signed with a key
+    # of its own that nothing public vouches for. `src/itest` serves these from
+    # its mocks and anchors each zone, so a validated answer carries AD.
+    for zone, tag, owner, rtype, rdata in (
+        ("168.192.in-addr.arpa.", "reverse", "1.1.168.192.in-addr.arpa.", PTR,
+         wire_name("printer.lan.")),
+        ("corp.example.", "corp", "vault.corp.example.", A, bytes([10, 0, 0, 5])),
+    ):
+        key = Key(zone, "ai-" + tag)
+        print("// anchor: %s" % key.ds_text())
+        keys = [RR(zone, DNSKEY, key.rdata)]
+        emit("ai_%s_dnskey" % tag, zone, "DNSKEY", message(zone, DNSKEY, keys + [sign(keys, key)]))
+        answer = [RR(owner, rtype, rdata)]
+        emit("ai_%s_answer" % tag, owner, "PTR" if rtype == PTR else "A",
+             message(owner, rtype, answer + [sign(answer, key)]))
+
+
 if __name__ == "__main__":
     wanted = sys.argv[1:] or list(SCENARIOS)
     for name in wanted:

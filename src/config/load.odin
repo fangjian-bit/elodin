@@ -3044,10 +3044,11 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 	}
 	/*
 	And the same reasoning one step further: a set that anchors everything
-	except the root anchors nothing. Every chain starts at the root and reaches
-	the rest through DS records, so a validator handed only `corp.example.` has
-	no way in and fails every name. `start_validator` refuses to come up on
-	that, and this is what keeps `--check` from calling it valid first.
+	except the root anchors nothing outside its own zones. A chain starts at the
+	closest anchor above the name, so a validator handed only `corp.example.`
+	validates that zone and has no way in to any other name, which fails.
+	`start_validator` refuses to come up on that, and this is what keeps
+	`--check` from calling it valid first.
 
 	Only the structural half is asked here. Whether the root anchor names an
 	algorithm the linked libcrypto will actually run is a question about the
@@ -3070,7 +3071,7 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 	   cfg.dnssec.enabled &&
 	   len(cfg.dnssec.trust_anchors) > 0 &&
 	   !dnssec.anchors_the_root(parsed_anchors[:]) {
-		errorf(l, "dnssec.trust_anchors covers no root anchor, so no name could be validated; anchor \".\" as well")
+		errorf(l, "dnssec.trust_anchors covers no root anchor, so no name outside its zones could be validated; anchor \".\" as well")
 	}
 
 	// Same reasoning: a secret that will not parse should fail `--check`, not
