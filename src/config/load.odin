@@ -208,6 +208,27 @@ opt_bytes :: proc(l: ^Loader, n: ^yaml.Node, key: string, dst: ^int, path: strin
 	dst^ = int(v)
 }
 
+/*
+An upstream `timeout`, which has to be a wait.
+
+It is what one exchange with one server is given and a query's budget is two of
+them, so zero is not "no limit": the query has run out before it starts and every
+one answers SERVFAIL (#499). A millisecond is the smallest wait the sockets and
+`poll` underneath can express. blocky resets a non-positive `upstreams.timeout` to
+its default and AdGuard Home a zero `upstream_timeout`; refused here instead, as
+every other figure this file cannot honour is, so the server says what it will
+not do rather than quietly doing something else.
+*/
+@(private)
+opt_upstream_timeout :: proc(l: ^Loader, n: ^yaml.Node, dst: ^time.Duration, path: string) {
+	opt_duration(l, n, "timeout", dst, path)
+	// Only a figure this node writes: a route that writes none has the top
+	// level's, which was checked there.
+	if !yaml.is_null(yaml.get(n, "timeout")) && dst^ < time.Millisecond {
+		errorf(l, "%s.timeout must be at least 1ms; a query is given two of it", path)
+	}
+}
+
 @(private)
 opt_duration :: proc(l: ^Loader, n: ^yaml.Node, key: string, dst: ^time.Duration, path: string) {
 	child := yaml.get(n, key)
@@ -762,7 +783,7 @@ load_upstream :: proc(l: ^Loader, cfg: ^Config) {
 		"zones",
 	)
 	load_strategy(l, n, &cfg.upstream.strategy, "upstream")
-	opt_duration(l, n, "timeout", &cfg.upstream.timeout, "upstream")
+	opt_upstream_timeout(l, n, &cfg.upstream.timeout, "upstream")
 	opt_int(l, n, "attempts", &cfg.upstream.attempts, "upstream")
 	opt_int(l, n, "max_idle", &cfg.upstream.max_idle, "upstream")
 	opt_duration(l, n, "idle_timeout", &cfg.upstream.idle_timeout, "upstream")
@@ -873,7 +894,7 @@ load_upstream_zones :: proc(l: ^Loader, cfg: ^Config, n: ^yaml.Node) {
 		route.upstream.zones = nil
 
 		load_strategy(l, entry, &route.upstream.strategy, path)
-		opt_duration(l, entry, "timeout", &route.upstream.timeout, path)
+		opt_upstream_timeout(l, entry, &route.upstream.timeout, path)
 		opt_int(l, entry, "attempts", &route.upstream.attempts, path)
 		opt_int(l, entry, "max_idle", &route.upstream.max_idle, path)
 		opt_duration(l, entry, "idle_timeout", &route.upstream.idle_timeout, path)

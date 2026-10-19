@@ -725,7 +725,8 @@ open_stream :: proc(
 	stream: Stream,
 	err: Error,
 ) {
-	// Zero is a configured `timeout: 0`, which is no deadline, and stays zero.
+	// Zero is no deadline, and stays zero. No configuration reaches it - the
+	// loader refuses an `upstream.timeout` under a millisecond (#499).
 	deadline := time.tick_add(time.tick_now(), timeout)
 	left :: proc(timeout: time.Duration, deadline: time.Tick) -> time.Duration {
 		return timeout if timeout <= 0 else time.tick_diff(time.tick_now(), deadline)

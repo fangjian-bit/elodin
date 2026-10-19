@@ -143,7 +143,8 @@ handshake_failure :: proc(terr: tlsx.Error) -> Error {
 // never under a millisecond - a sliver of a deadline rounds to a zero
 // `timeval`, and a negative one, a deadline already gone, reads back as zero,
 // both of which the socket and `tlsx` take as no timeout at all - while zero
-// stays zero, which is what a configured `timeout: 0` means.
+// stays zero, which is no timeout - a figure no configuration reaches, since the
+// loader refuses an `upstream.timeout` under a millisecond (#499).
 set_socket_timeouts :: proc(socket: net.Any_Socket, timeout: time.Duration) {
 	bounded := max(timeout, time.Millisecond) if timeout != 0 else 0
 	_ = net.set_option(socket, .Receive_Timeout, bounded)

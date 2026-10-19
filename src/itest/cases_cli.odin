@@ -142,6 +142,26 @@ run_cli_cases :: proc(r: ^Runner) {
 	}
 	end_case(r)
 
+	// A zero timeout is not "no limit": every query would answer SERVFAIL at once
+	// (#499). Refused at the top level and on a route.
+	start_case(r, "cli: --check rejects an upstream timeout of zero")
+	{
+		path := filepath.join({r.work_dir, "zero-timeout.yaml"}, context.temp_allocator) or_else ""
+		_ = os.write_entire_file(
+			path,
+			transmute([]u8)string(
+				"upstream:\n  timeout: 0s\n  servers: [1.1.1.1]\n  zones:\n    - domains: [home.arpa]\n      timeout: 0ms\n      servers: [192.168.1.1]\n",
+			),
+		)
+		res := run_binary(r, []string{"--config", path, "--check"}, "check-zero-timeout")
+		if check(r, res.ok, "could not run the binary") {
+			check(r, res.exit_code != 0, "a zero upstream timeout exited 0")
+			check(r, strings.contains(res.output, "upstream.timeout"), "the top-level timeout was not reported")
+			check(r, strings.contains(res.output, "upstream.zones[0].timeout"), "the route's timeout was not reported")
+		}
+	}
+	end_case(r)
+
 	start_case(r, "cli: --check reports every problem at once, with line numbers")
 	{
 		path := filepath.join({r.work_dir, "bad.yaml"}, context.temp_allocator) or_else ""
