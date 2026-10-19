@@ -1,5 +1,6 @@
 package filter
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:math/rand"
 import "core:mem"
@@ -8,7 +9,9 @@ import "core:mem"
 The names a Set holds: an open-addressed hash table over one byte blob.
 
 Each name is written once into `blob` as its flags byte, the name, and a NUL,
-which `rule_key` never lets into a name. A slot holds the name's 32-bit hash and
+which `rule_key` never lets into a name. A `.Typed` entry is followed by the ids
+of its two `$dnstype` filters (TYPED_IDS), so a name a typed rule covers costs
+eight bytes more and no second probe. A slot holds the name's 32-bit hash and
 the offset of its entry, so a probe compares hashes in the slot array and reads
 the blob only on a match: a lookup is one hash and a short linear scan. A rule
 costs its name, two bytes, and an 8-byte slot at up to 80% load.
@@ -76,9 +79,16 @@ table_home :: #force_inline proc(hash: u32, n: int) -> int {
 // pointer is into the blob, so it is good only until the next insert.
 @(private)
 table_entry :: proc(t: ^Table, key: string) -> ^Rule_Flags {
+	i := table_find(t, key)
+	return nil if i < 0 else (^Rule_Flags)(&t.blob[t.slots[i].off])
+}
+
+// The slot holding `key`, or -1.
+@(private)
+table_find :: proc(t: ^Table, key: string) -> int {
 	n := len(t.slots)
 	if n == 0 {
-		return nil
+		return -1
 	}
 	h := table_hash(t, key)
 	i := table_home(h, n)
@@ -87,13 +97,13 @@ table_entry :: proc(t: ^Table, key: string) -> ^Rule_Flags {
 		// Robin Hood order: every entry this far from its home or further sits
 		// before any entry nearer to its own, so the first nearer one ends a miss.
 		if slot.off == 0 || table_distance(slot, i, n) < d {
-			return nil
+			return -1
 		}
 		if slot.hash == h {
 			start := int(slot.off) + 1
 			end := start + len(key)
 			if end < len(t.blob) && t.blob[end] == 0 && string(t.blob[start:end]) == key {
-				return (^Rule_Flags)(&t.blob[slot.off])
+				return i
 			}
 		}
 		i += 1
@@ -111,25 +121,66 @@ blob_fits :: proc(blob_len, key_len: int) -> bool {
 }
 
 /*
-Add `key`, which the caller has found absent, with `flags`. False when the blob
-can take no more: 4 GiB of names is no list a resolver can be asked to hold, and
-refusing it is what keeps every offset in a u32.
+Add `key`, which the caller has found absent, with `flags`, and the zeroed ids
+that follow a `.Typed` entry. False when the blob can take no more: 4 GiB of
+names is no list a resolver can be asked to hold, and refusing it is what keeps
+every offset in a u32.
 */
 @(private)
 table_insert :: proc(t: ^Table, key: string, flags: Rule_Flags) -> bool {
-	if !blob_fits(len(t.blob), len(key)) {
+	if !blob_fits(len(t.blob), len(key) + TYPED_IDS) {
 		return false
 	}
 	if (t.used + 1) * 5 > len(t.slots) * TABLE_LOAD_FIFTHS {
 		table_resize(t, max(len(t.slots) * 2, 64))
 	}
+	table_place(t.slots, Slot{hash = table_hash(t, key), off = table_write(t, key, flags)})
+	t.used += 1
+	return true
+}
+
+// Append an entry for `key` to the blob, returning where it starts.
+@(private)
+table_write :: proc(t: ^Table, key: string, flags: Rule_Flags) -> u32 {
 	off := u32(len(t.blob))
 	append(&t.blob, transmute(u8)flags)
 	append(&t.blob, key)
 	append(&t.blob, 0)
-	table_place(t.slots, Slot{hash = table_hash(t, key), off = off})
-	t.used += 1
-	return true
+	if .Typed in flags {
+		resize(&t.blob, len(t.blob) + TYPED_IDS)
+	}
+	return off
+}
+
+/*
+Give `key`'s entry the room for its `$dnstype` filters, returning it: written
+again at the end of the blob with `.Typed` set, and its slot pointed there. The
+old bytes stay, unreachable; a name is moved once, since `.Typed` is never taken
+away. Nil when `key` is absent or the blob is full.
+*/
+@(private)
+table_retype :: proc(t: ^Table, key: string) -> ^Rule_Flags {
+	i := table_find(t, key)
+	if i < 0 || !blob_fits(len(t.blob), len(key) + TYPED_IDS) {
+		return nil
+	}
+	flags := (transmute(Rule_Flags)t.blob[t.slots[i].off]) + {.Typed}
+	t.slots[i].off = table_write(t, key, flags)
+	return (^Rule_Flags)(&t.blob[t.slots[i].off])
+}
+
+// The bytes after a `.Typed` entry's NUL: the filter ids for its apex and for
+// below it, unaligned.
+TYPED_IDS :: size_of([2]u32)
+
+@(private)
+typed_ids :: proc(entry: ^Rule_Flags, key_len: int) -> [2]u32 {
+	return intrinsics.unaligned_load((^[2]u32)(uintptr(entry) + uintptr(key_len + 2)))
+}
+
+@(private)
+typed_ids_store :: proc(entry: ^Rule_Flags, key_len: int, ids: [2]u32) {
+	intrinsics.unaligned_store((^[2]u32)(uintptr(entry) + uintptr(key_len + 2)), ids)
 }
 
 // How many slots past its home `slot` sits at `i`.

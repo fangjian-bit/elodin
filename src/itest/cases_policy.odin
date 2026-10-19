@@ -251,8 +251,12 @@ blocking:
 		}
 		end_case(r)
 
-		// `$dnstype` narrows a rule to the query types it names (#406).
-		start_case(r, "blocking: a $dnstype rule blocks only its types")
+		/*
+		`$dnstype` narrows a rule to the query types it names (#406). The name
+		keeps its other types, so the block is NODATA where `blocking.response`
+		says nxdomain (RFC 8020 section 2), and it never reaches the upstream.
+		*/
+		start_case(r, "blocking: a $dnstype rule blocks only its types, as NODATA")
 		{
 			Typed :: struct {
 				name:    string,
@@ -271,11 +275,16 @@ blocking:
 				{"v6only.regex.test.", .A, false},
 			}
 			for c in typed {
+				before := mock_total(mock)
 				res := query_udp(udp_port, build_query(c.name, u16(c.qtype)))
 				if check(r, res.ok, "no response for %s %v", c.name, c.qtype) {
 					h := parse_header(r, res.wire)
-					want := dns.Rcode.NX_Domain if c.blocked else dns.Rcode.No_Error
-					check(r, h.rcode == int(want), "%s %v: rcode %d, want %v", c.name, c.qtype, h.rcode, want)
+					asked := mock_total(mock) > before
+					check(r, h.rcode == int(dns.Rcode.No_Error), "%s %v: rcode %d, want NOERROR", c.name, c.qtype, h.rcode)
+					check(r, asked != c.blocked, "%s %v: blocked %v, want %v", c.name, c.qtype, !asked, c.blocked)
+					if c.blocked {
+						check(r, h.ancount == 0 && h.nscount == 1, "%s %v: %d answers, %d authority, want NODATA with its SOA", c.name, c.qtype, h.ancount, h.nscount)
+					}
 				}
 			}
 		}

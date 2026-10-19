@@ -1,8 +1,8 @@
 package filter
 
-import "core:mem"
 import "core:reflect"
 import "core:slice"
+import "core:strings"
 import "elodin:dns"
 
 /*
@@ -13,7 +13,9 @@ rule matches a type the restricted list does not name and, when the permitted
 one names any, one it does (`matchDNSType`). So a rule is either "one of P \ R"
 or, permitting none, "anything but R": one `Type_Filter`. Several rules for one
 name match what any of them does, and that union is one of the two shapes again
-(`type_union`), so a name holds one filter however many rules name it.
+(`type_union`), so a name holds one filter however many rules name it. A set
+keeps each distinct filter once (`type_intern`) and a name its id, since lists
+narrow names to the same few types.
 
 A filter lists at most MAX_RULE_TYPES types, which bounds what adding a rule
 costs: a union only ever shrinks an exclusion, and grows a permitted list to the
@@ -45,7 +47,8 @@ mnemonic in any case, or RFC 3597 section 5's `TYPEnnn`, which urlfilter refuses
 */
 @(private)
 parse_dnstype :: proc(value: string, buf: []u16) -> (f: Type_Filter, ok: bool) {
-	permit, exclude: [MAX_RULE_TYPES + 1]u16
+	// A type named again takes no room, so only distinct ones count.
+	permit, exclude: [MAX_RULE_TYPES]u16
 	np, ne := 0, 0
 	rest := value
 	for {
@@ -63,12 +66,14 @@ parse_dnstype :: proc(value: string, buf: []u16) -> (f: Type_Filter, ok: bool) {
 		}
 		t := parse_type_name(item) or_return
 		if negated {
-			if ne == len(exclude) {
-				return
+			if !slice.contains(exclude[:ne], t) {
+				if ne == len(exclude) {
+					return
+				}
+				exclude[ne] = t
+				ne += 1
 			}
-			exclude[ne] = t
-			ne += 1
-		} else {
+		} else if !slice.contains(permit[:np], t) {
 			if np == len(permit) {
 				return
 			}
@@ -80,11 +85,10 @@ parse_dnstype :: proc(value: string, buf: []u16) -> (f: Type_Filter, ok: bool) {
 		}
 		rest = rest[bar + 1:]
 	}
-	slice.sort(permit[:np])
-	slice.sort(exclude[:ne])
-	ps := slice.unique(permit[:np])
-	es := slice.unique(exclude[:ne])
-	if len(ps) + len(es) > MAX_RULE_TYPES || len(buf) < MAX_RULE_TYPES {
+	ps, es := permit[:np], exclude[:ne]
+	slice.sort(ps)
+	slice.sort(es)
+	if len(buf) < MAX_RULE_TYPES {
 		return
 	}
 	if len(ps) == 0 {
@@ -131,35 +135,49 @@ parse_type_name :: proc(s: string) -> (t: u16, ok: bool) {
 }
 
 /*
-What matches either filter, in `allocator` unless it is `a` again; false when
-that lists more than MAX_RULE_TYPES types.
+What matches either filter, its types in `buf`, which holds 2 * MAX_RULE_TYPES;
+false when it lists more than MAX_RULE_TYPES.
 
 Either list: their union. Anything but either list: anything but what both
 name. One of P, or anything but R: anything but what R names and P does not.
 */
 @(private)
-type_union :: proc(a, b: Type_Filter, allocator: mem.Allocator) -> (out: Type_Filter, ok: bool) {
-	buf: [2 * MAX_RULE_TYPES]u16
+type_union :: proc(a, b: Type_Filter, buf: []u16) -> (out: Type_Filter, ok: bool) {
 	n: int
 	switch {
 	case !a.negated && !b.negated:
-		n = sorted_combine(a.types, b.types, true, true, true, buf[:])
+		n = sorted_combine(a.types, b.types, true, true, true, buf)
 	case a.negated && b.negated:
-		n = sorted_combine(a.types, b.types, false, false, true, buf[:])
+		n = sorted_combine(a.types, b.types, false, false, true, buf)
 	case a.negated:
-		n = sorted_combine(a.types, b.types, true, false, false, buf[:])
+		n = sorted_combine(a.types, b.types, true, false, false, buf)
 	case:
-		n = sorted_combine(b.types, a.types, true, false, false, buf[:])
+		n = sorted_combine(b.types, a.types, true, false, false, buf)
 	}
-	if n > MAX_RULE_TYPES {
-		return
+	return {buf[:n], a.negated || b.negated}, n <= MAX_RULE_TYPES
+}
+
+/*
+The id of `f` among the set's filters, added if it is new. Id 0 is the filter
+that matches nothing, which a name's anchor without a `$dnstype` rule has.
+
+What a list can make this hold is bounded by what it writes: a filter is new
+only when a rule changes a name's, and a name's permitted list only grows to
+MAX_RULE_TYPES and its exclusion only shrinks.
+*/
+@(private)
+type_intern :: proc(s: ^Set, f: Type_Filter) -> u32 {
+	key_buf: [1 + 2 * MAX_RULE_TYPES]u8
+	key_buf[0] = u8(f.negated)
+	n := 1 + copy(key_buf[1:], slice.to_bytes(f.types))
+	key := string(key_buf[:n])
+	if id, found := s.filter_ids[key]; found {
+		return id
 	}
-	out.negated = a.negated || b.negated
-	if out.negated == a.negated && slice.equal(buf[:n], a.types) {
-		return a, true
-	}
-	out.types = slice.clone(buf[:n], allocator) if n > 0 else nil
-	return out, true
+	id := u32(len(s.filters))
+	append(&s.filters, Type_Filter{slice.clone(f.types, s.allocator) if len(f.types) > 0 else nil, f.negated})
+	s.filter_ids[strings.clone(key, s.allocator)] = id
+	return id
 }
 
 // Walk two sorted lists together, keeping what is only in `x`, only in `y`, or

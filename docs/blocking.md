@@ -128,7 +128,9 @@ digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share o
   `$dnstype=A|AAAA` either, and `$dnstype=~A` every type but A. A type is a
   mnemonic in any case or `TYPEnnn` (RFC 3597). The type checked is the one the
   client asked for, for the question and for every name a CNAME in the answer
-  leads to. Every rule for a name applies, so `||x^$dnstype=A` and
+  leads to. A block only `$dnstype` rules make is answered NODATA where
+  `response` is `nxdomain`: NXDOMAIN would say the name has no other types
+  either (RFC 8020), and a client caching it would lose them. Every rule for a name applies, so `||x^$dnstype=A` and
   `||x^$dnstype=AAAA` block both, and a rule without `$dnstype` blocks every
   type. A rule naming an unknown type, nothing, or more than 64 types (with the
   name's other `$dnstype` rules), is skipped; so is one that excludes every

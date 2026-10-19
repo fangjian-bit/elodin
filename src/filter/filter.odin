@@ -24,6 +24,16 @@ domain's depth rather than by the size of the list.
 Rule_Flag :: enum u8 {
 	Apex,
 	Subdomains,
+	// The entry is followed by `$dnstype` filter ids (table.odin), and `Apex`
+	// and `Subdomains` say what it covers for every type.
+	Typed,
+}
+
+// What covers a name: nothing, only a `$dnstype` rule, or a rule for every type.
+Coverage :: enum u8 {
+	None,
+	Typed,
+	Any,
 }
 
 Rule_Flags :: bit_set[Rule_Flag;u8]
@@ -47,10 +57,10 @@ Set :: struct {
 	// How many `$badfilter` rules were taken, so one that adds nothing can be
 	// told from one that was skipped.
 	cancels:   int,
-	// Names a `$dnstype` rule covers for some types, and which, for a name the
-	// table does not cover for all of them; see dnstype.odin. Rare enough that
-	// a lookup asks it only when it holds anything.
-	typed:     map[string][Rule_Flag]Type_Filter,
+	// Every distinct `$dnstype` filter a rule here has, by the id a `.Typed`
+	// table entry holds, and the ids by content; see `type_intern`.
+	filters:    [dynamic]Type_Filter,
+	filter_ids: map[string]u32,
 	// `/re/` rules, matched after the name tables; `engine_match` says when, and
 	// regex.odin what bounds them.
 	regexes:       [dynamic]Regex_Rule,
@@ -70,6 +80,7 @@ Set :: struct {
 	regex_scratch: virtual.Arena,
 	arena:     virtual.Arena,
 	allocator: mem.Allocator,
+	// Names any rule covers, for any type, plus the regex patterns held.
 	count:     int,
 }
 
@@ -112,7 +123,9 @@ set_make :: proc() -> ^Set {
 	s.allocator = virtual.arena_allocator(&s.arena)
 	table_init(&s.names, context.allocator)
 	s.cancelled = make(map[string]Rule_Flags, s.allocator)
-	s.typed = make(map[string][Rule_Flag]Type_Filter, s.allocator)
+	s.filters = make([dynamic]Type_Filter, 1, s.allocator)
+	s.filter_ids = make(map[string]u32, s.allocator)
+	s.filter_ids["\x00"] = 0
 	s.regexes = make([dynamic]Regex_Rule, s.allocator)
 	s.regex_held = make(map[string]^Type_Filter, s.allocator)
 	return s
@@ -149,21 +162,21 @@ set_add :: proc(s: ^Set, domain: string, flags: Rule_Flags, types := ANY_TYPE) -
 	if add == {} {
 		return false
 	}
-	if !types.negated || len(types.types) > 0 {
-		return typed_add(s, key, add, types)
-	}
-	if existing := table_entry(&s.names, key); existing != nil {
-		if existing^ == {} {
-			s.count += 1
+	held := name_held(s, key)
+	if types.negated && len(types.types) == 0 {
+		if existing := table_entry(&s.names, key); existing != nil {
+			existing^ += add
+			stored = true
+		} else {
+			stored = table_insert(&s.names, key, add)
 		}
-		existing^ += add
-		return true
+	} else {
+		stored = typed_add(s, key, add, types)
 	}
-	if !table_insert(&s.names, key, add) {
-		return false
+	if stored && !held {
+		s.count += 1
 	}
-	s.count += 1
-	return true
+	return
 }
 
 /*
@@ -189,91 +202,111 @@ set_cancel :: proc(s: ^Set, domain: string, flags: Rule_Flags) {
 	} else {
 		s.cancelled[strings.clone(key, s.allocator)] = flags
 	}
-	if existing := table_entry(&s.names, key); existing != nil && existing^ != {} {
+	held := name_held(s, key)
+	if existing := table_entry(&s.names, key); existing != nil {
 		existing^ -= flags
-		if existing^ == {} {
-			s.count -= 1
+		if .Typed in existing^ {
+			ids := typed_ids(existing, len(key))
+			for flag in flags {
+				ids[int(flag)] = 0
+			}
+			typed_ids_store(existing, len(key), ids)
 		}
 	}
-	if typed, found := &s.typed[key]; found {
-		held := typed_flags(typed^)
-		for flag in flags {
-			typed[flag] = {}
-		}
-		if held != {} && typed_flags(typed^) == {} {
-			s.count -= 1
-		}
+	if held && !name_held(s, key) {
+		s.count -= 1
 	}
 }
 
-// `set_add` for a rule covering only some types: merged into what the name's
-// other such rules cover, one filter for its apex and one for below it.
+/*
+`set_add` for a rule covering only some types: merged into what the name's other
+such rules cover, one filter for its apex and one for below it. An anchor the
+table covers for every type already takes nothing more.
+*/
 @(private)
 typed_add :: proc(s: ^Set, key: string, flags: Rule_Flags, types: Type_Filter) -> bool {
-	typed := s.typed[key]
-	held := typed_flags(typed)
-	for flag in flags {
-		typed[flag] = type_union(typed[flag], types, s.allocator) or_return
+	entry := table_entry(&s.names, key)
+	add := flags - (entry^ if entry != nil else {})
+	if add == {} {
+		return true
 	}
-	// `key` is the caller's buffer, so only a new entry is keyed by it, cloned.
-	if entry, held_already := &s.typed[key]; held_already {
-		entry^ = typed
-	} else {
-		s.typed[strings.clone(key, s.allocator)] = typed
+	ids: [2]u32
+	if entry != nil && .Typed in entry^ {
+		ids = typed_ids(entry, len(key))
 	}
-	if held == {} {
-		s.count += 1
+	buf: [2 * MAX_RULE_TYPES]u16
+	for flag in add {
+		merged := type_union(s.filters[ids[int(flag)]], types, buf[:]) or_return
+		ids[int(flag)] = type_intern(s, merged)
 	}
+	switch {
+	case entry == nil:
+		table_insert(&s.names, key, {.Typed}) or_return
+		entry = table_entry(&s.names, key)
+	case .Typed not_in entry^:
+		entry = table_retype(&s.names, key)
+		if entry == nil {
+			return false
+		}
+	}
+	typed_ids_store(entry, len(key), ids)
 	return true
 }
 
-// Which of a name's typed filters match any type at all.
+// Whether any rule covers `key`, for any type: what `count` counts.
 @(private)
-typed_flags :: proc(typed: [Rule_Flag]Type_Filter) -> (flags: Rule_Flags) {
-	for f, flag in typed {
-		if f.negated || len(f.types) > 0 {
-			flags += {flag}
-		}
-	}
-	return
-}
-
-// Whether a rule covers `name` for `qtype` as `flag` says: the table's for
-// every type, or a `$dnstype` rule's for some.
-@(private)
-covers :: proc(s: ^Set, name: string, flag: Rule_Flag, qtype: dns.Type) -> bool {
-	if flags := table_entry(&s.names, name); flags != nil && flag in flags^ {
-		return true
-	}
-	if len(s.typed) == 0 {
+name_held :: proc(s: ^Set, key: string) -> bool {
+	entry := table_entry(&s.names, key)
+	if entry == nil {
 		return false
 	}
-	typed, found := s.typed[name]
-	return found && type_matches(typed[flag], qtype)
+	return entry^ & {.Apex, .Subdomains} != {} || (.Typed in entry^ && typed_ids(entry, len(key)) != {})
 }
 
+// What covers `name` for `qtype` as `flag` says: the table, for every type, or
+// a `$dnstype` filter its entry holds.
+@(private)
+covers :: proc(s: ^Set, name: string, flag: Rule_Flag, qtype: dns.Type) -> Coverage {
+	entry := table_entry(&s.names, name)
+	switch {
+	case entry == nil:
+		return .None
+	case flag in entry^:
+		return .Any
+	case .Typed in entry^ && type_matches(s.filters[typed_ids(entry, len(name))[int(flag)]], qtype):
+		return .Typed
+	}
+	return .None
+}
+
+// Whether a rule covers `normalised` for `qtype`.
 set_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type) -> bool {
-	if s == nil || (s.names.used == 0 && len(s.typed) == 0) {
-		return false
+	return set_cover(s, normalised, qtype) != .None
+}
+
+/*
+What covers `normalised` for `qtype`: its own entry's apex, or a parent's
+subdomains. A rule for every type is looked for past one for some, so a block
+can say which it was.
+*/
+set_cover :: proc(s: ^Set, normalised: string, qtype: dns.Type) -> (best: Coverage) {
+	if s == nil || s.names.used == 0 {
+		return .None
 	}
-	if covers(s, normalised, .Apex, qtype) {
-		return true
-	}
-	// Walk up the parents; only Subdomains rules apply to them.
+	best = covers(s, normalised, .Apex, qtype)
 	rest := normalised
-	for {
+	for best != .Any {
 		idx := strings.index_byte(rest, '.')
 		if idx < 0 {
-			return false
+			break
 		}
 		rest = rest[idx + 1:]
 		if rest == "" {
-			return false
+			break
 		}
-		if covers(s, rest, .Subdomains, qtype) {
-			return true
-		}
+		best = max(best, covers(s, rest, .Subdomains, qtype))
 	}
+	return
 }
 
 // Starts empty; rule sets arrive via `engine_swap` once a load completes, so a
@@ -360,9 +393,14 @@ Pi-hole and AdGuard treat their allowlists.
 The regex rules come after the name tables, which settle most names in a few
 probes. An allow regex still has to be asked about a name the block table lists,
 and about one nothing blocks, since `Allowed` exempts an answer from the CNAME
-walk; a block regex only about a name no table has decided.
+walk; a block regex only about a name no table has blocked for every type.
+
+`qtype` is the type the client asked for, which a `$dnstype` rule is matched
+against. `typed_only`, when given, is set on a block to whether only such rules
+made it: then the name still has other types, so the answer must not say it has
+none (RFC 8020 section 2), and the caller answers NODATA for NXDOMAIN.
 */
-engine_match :: proc(e: ^Engine, name: string, qtype: dns.Type) -> Decision {
+engine_match :: proc(e: ^Engine, name: string, qtype: dns.Type, typed_only: ^bool = nil) -> Decision {
 	buf: [MAX_NORMALISED]u8
 	key, ok := normalise(name, buf[:])
 	if !ok {
@@ -373,18 +411,24 @@ engine_match :: proc(e: ^Engine, name: string, qtype: dns.Type) -> Decision {
 	defer sync.rw_mutex_shared_unlock(&e.mu)
 
 	sync.atomic_add(&e.stats.queries, 1)
-	if set_lookup(e.allow, key, qtype) {
+	if set_cover(e.allow, key, qtype) != .None {
 		return .Allowed
 	}
-	listed := set_lookup(e.block, key, qtype)
-	if regex_lookup(e.allow, key, qtype) {
+	listed := set_cover(e.block, key, qtype)
+	if regex_lookup(e.allow, key, qtype) != .None {
 		return .Allowed
 	}
-	if listed || regex_lookup(e.block, key, qtype) {
-		sync.atomic_add(&e.stats.blocked, 1)
-		return .Blocked
+	if listed != .Any {
+		listed = max(listed, regex_lookup(e.block, key, qtype))
 	}
-	return .None
+	if listed == .None {
+		return .None
+	}
+	sync.atomic_add(&e.stats.blocked, 1)
+	if typed_only != nil {
+		typed_only^ = listed == .Typed
+	}
+	return .Blocked
 }
 
 engine_stats :: proc(e: ^Engine) -> Stats {

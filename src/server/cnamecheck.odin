@@ -49,6 +49,9 @@ Cloak_Verdict :: enum u8 {
 	Listed,
 	Unwalkable,
 	Unreadable,
+	// Listed, but only by `$dnstype` rules, so the question's name still has
+	// other types: answered as `build_block_response` says for `typed_only`.
+	Listed_Typed,
 }
 
 /*
@@ -87,7 +90,7 @@ should have to answer this question rather than remember to.
 @(private)
 cloak_verdict_worth_keeping :: proc(verdict: Cloak_Verdict) -> bool {
 	switch verdict {
-	case .Listed, .Unwalkable:
+	case .Listed, .Listed_Typed, .Unwalkable:
 		return true
 	case .Clear, .Unreadable:
 		return false
@@ -233,6 +236,8 @@ cloaked_chain_target :: proc(
 	the bound on lookups; the scan below runs once per name on it, which is the
 	bound on passes over the answer.
 	*/
+	// `Listed` once any name is blocked by a rule for every type.
+	listed := Cloak_Verdict.Listed_Typed
 	pending: [MAX_CHAIN_NAMES + 1]string
 	pending[0] = qname
 	head, tail := 0, 1
@@ -251,7 +256,7 @@ cloaked_chain_target :: proc(
 				// behind it that an operator can go and look at. Same
 				// preference as the budget's, below.
 				if target != "" {
-					return target, .Listed
+					return target, listed
 				}
 				return "", .Unreadable
 			}
@@ -302,17 +307,21 @@ cloaked_chain_target :: proc(
 			*/
 			if tail >= len(pending) {
 				if target != "" {
-					return target, .Listed
+					return target, listed
 				}
 				return "", .Unwalkable
 			}
 			pending[tail] = v.name
 			tail += 1
 
-			switch filter.engine_match(s.filters, v.name, qtype) {
+			typed_only: bool
+			switch filter.engine_match(s.filters, v.name, qtype, &typed_only) {
 			case .Blocked:
 				if target == "" {
 					target = v.name
+				}
+				if !typed_only {
+					listed = .Listed
 				}
 			case .Allowed, .None:
 				// Allowed says this name is not a block. It says nothing about
@@ -321,7 +330,7 @@ cloaked_chain_target :: proc(
 			}
 		}
 	}
-	return target, .Listed if target != "" else .Clear
+	return target, listed if target != "" else .Clear
 }
 
 /*
@@ -459,7 +468,7 @@ refuse_cloaked :: proc(
 			dns.name_trim_root(target),
 		)
 	}
-	out := build_block_response(s, msg, q, allocator, limit)
+	out := build_block_response(s, msg, q, allocator, limit, verdict == .Listed_Typed)
 	detail := "cname-deep" if verdict == .Unwalkable else "cname"
 	log_query(s, client, proto, q, .Blocked, detail, started)
 	return out

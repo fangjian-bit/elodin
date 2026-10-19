@@ -42,19 +42,23 @@ parity_name_below :: proc(name: []u8, zone: string) -> bool {
 	return parity_name_under(name, zone) && !pw_names_equal_fold(name, pm_name(zone, context.temp_allocator))
 }
 
-// Whether the blocking scenario's rules cover `name` for a query of `qtype`:
-// under a blocked zone, below the subtree-only one, or under a typed one for a
-// type it blocks, and not under the allowed one inside them.
-parity_blocked_name :: proc(name: []u8, qtype: u16) -> bool {
+/*
+Whether the blocking scenario's rules cover `name` for a query of `qtype`: under
+a blocked zone, below the subtree-only one, or under a typed one for a type it
+blocks, and not under the allowed one inside them. `typed_only` when only a
+typed one does, which is answered NODATA rather than NXDOMAIN (RFC 8020 section
+2: the name keeps its other types).
+*/
+parity_blocked_name :: proc(name: []u8, qtype: u16) -> (blocked: bool, typed_only: bool) {
 	if parity_name_under(name, PARITY_ALLOWED) {
-		return false
+		return false, false
 	}
 	if parity_name_below(name, PARITY_BLOCKED_SUBTREE) {
-		return true
+		return true, false
 	}
 	for zone in PARITY_BLOCKED {
 		if parity_name_under(name, zone) {
-			return true
+			return true, false
 		}
 	}
 	for typed in PARITY_BLOCKED_TYPED {
@@ -66,10 +70,10 @@ parity_blocked_name :: proc(name: []u8, qtype: u16) -> bool {
 			listed ||= t == qtype
 		}
 		if listed != typed.negated {
-			return true
+			return true, true
 		}
 	}
-	return false
+	return false, false
 }
 
 /*
@@ -81,24 +85,29 @@ mock's chains start at the question and are one link long (`pm_cname_chain`), so
 "any CNAME" and "the chain from the question" are the same set here, and the
 looser reading is the one that cannot miss a link.
 */
-parity_cloaked :: proc(reference: []u8, qtype: u16) -> bool {
+parity_cloaked :: proc(reference: []u8, qtype: u16) -> (cloaked: bool, typed_only: bool) {
 	m := pw_parse(reference, context.temp_allocator)
 	if !m.ok {
-		return false
+		return false, false
 	}
+	typed_only = true
 	for rec in m.answer {
-		if rec.type == 5 && parity_blocked_name(rec.rdata, qtype) {
-			return true
+		if rec.type != 5 {
+			continue
 		}
+		blocked, by_type := parity_blocked_name(rec.rdata, qtype)
+		cloaked ||= blocked
+		typed_only &&= !blocked || by_type
 	}
-	return false
+	return cloaked, cloaked && typed_only
 }
 
 /*
 An answer the rules said to block, held to the configured block response.
 
-`blocking.response: nxdomain`: NXDOMAIN, nothing in the answer section, and the
-question echoed as it was asked like any other answer. Blocked by name, the
+`blocking.response: nxdomain`: NXDOMAIN, or NOERROR when only a `$dnstype` rule
+blocked it, nothing in the answer section, and the question echoed as it was
+asked like any other answer. Blocked by name, the
 upstream must not have been asked at all - asking it is the leak a block list is
 there to prevent. Blocked by a CNAME target the upstream had to be asked, since
 the CNAME is in its answer; what must not happen there is the answer reaching
@@ -110,6 +119,7 @@ parity_check_blocked :: proc(
 	answer: []u8,
 	asked: bool,
 	by_cname: bool,
+	typed_only: bool,
 	stats: ^Parity_Stats,
 ) {
 	stats.blocked += 1
@@ -126,7 +136,9 @@ parity_check_blocked :: proc(
 		problem = "the question is not echoed byte for byte"
 	case !by_cname && asked:
 		problem = "the upstream was asked about a name the rules block"
-	case m.rcode != 3:
+	case typed_only && m.rcode != 0:
+		problem = fmt.tprintf("rcode %s, not noerror for a block by $dnstype alone", pc_rcode_text(m.rcode, context.temp_allocator))
+	case !typed_only && m.rcode != 3:
 		problem = fmt.tprintf("rcode %s, not the configured nxdomain", pc_rcode_text(m.rcode, context.temp_allocator))
 	case len(m.answer) != 0:
 		problem = fmt.tprintf("a block response carrying %d answer records", len(m.answer))

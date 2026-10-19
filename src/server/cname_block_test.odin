@@ -219,6 +219,8 @@ serve_cached_answer :: proc(
 	block, allow: []string,
 	stamped := false,
 	rules: []string = nil,
+	response: ^[]u8 = nil,
+	asks := 1,
 ) -> Outcome {
 	cfg := config.default_config()
 	cfg.log.queries = false
@@ -257,8 +259,16 @@ serve_cached_answer :: proc(
 		return .Failed
 	}
 
-	_, outcome, ok := handle_query(&s, cloak_query(qname), .UDP, "127.0.0.1:5555", context.temp_allocator)
+	out: []u8
+	outcome: Outcome
+	ok: bool
+	for _ in 0 ..< asks {
+		out, outcome, ok = handle_query(&s, cloak_query(qname), .UDP, "127.0.0.1:5555", context.temp_allocator)
+	}
 	testing.expect(t, ok, "nothing came back at all")
+	if response != nil {
+		response^ = out
+	}
 	return outcome
 }
 
@@ -1478,4 +1488,42 @@ test_a_dnstype_rule_is_judged_on_the_question_type :: proc(t: ^testing.T) {
 	testing.expect(t, serve_cached_answer(t, hops[0], chain_reply(hops), nil, nil, rules = allowed) != .Blocked)
 	not_allowed := []string{"||tracker.evil.example^", "@@||www.brand.example^$dnstype=AAAA"}
 	testing.expect_value(t, serve_cached_answer(t, hops[0], chain_reply(hops), nil, nil, rules = not_allowed), Outcome.Blocked)
+}
+
+/*
+A block made only by `$dnstype` rules leaves the name its other types, so under
+the default `blocking.response: nxdomain` it is answered NODATA: NXDOMAIN would
+say the name has nothing of any type (RFC 8020 section 2), and a stub caching
+that would stop resolving the types the rule left open. Asked about the cache
+twice, so a refusal it remembers is answered the same way.
+*/
+@(test)
+test_a_block_by_dnstype_alone_is_nodata :: proc(t: ^testing.T) {
+	hops := []string{"www.brand.example.", "tracker.evil.example."}
+	Case :: struct {
+		rules: []string,
+		rcode: dns.Rcode,
+	}
+	cases := []Case {
+		{{"||www.brand.example^$dnstype=A"}, .No_Error},
+		{{"||tracker.evil.example^$dnstype=A"}, .No_Error},
+		{{"/^tracker\\.evil\\.example$/$dnstype=~AAAA"}, .No_Error},
+		{{"||www.brand.example^"}, .NX_Domain},
+		{{"||tracker.evil.example^"}, .NX_Domain},
+		{{"||www.brand.example^$dnstype=A", "||brand.example^"}, .NX_Domain},
+		{{"||tracker.evil.example^$dnstype=A", "||evil.example^"}, .NX_Domain},
+	}
+	for c in cases {
+		for asks in 1 ..= 2 {
+			out: []u8
+			outcome := serve_cached_answer(t, hops[0], chain_reply(hops), nil, nil, rules = c.rules, response = &out, asks = asks)
+			decoded, derr := dns.decode_message(out, context.temp_allocator)
+			if !testing.expectf(t, outcome == .Blocked && derr == .None, "%v: %v, %v", c.rules, outcome, derr) {
+				continue
+			}
+			rcode := dns.Rcode(decoded.flags.rcode)
+			testing.expectf(t, rcode == c.rcode, "%v, asked %d times: rcode %v, want %v", c.rules, asks, rcode, c.rcode)
+			testing.expectf(t, len(decoded.answer) == 0, "%v: %d answers", c.rules, len(decoded.answer))
+		}
+	}
 }

@@ -171,6 +171,9 @@ test_a_rule_lists_at_most_max_rule_types :: proc(t: ^testing.T) {
 	testing.expect_value(t, decide(neg, "v6.example.", dns.Type(1001)), Decision.None)
 	neg_over := strings.concatenate({neg, "|~TYPE999"}, context.temp_allocator)
 	testing.expect_value(t, decide(neg_over, "v6.example.", .A), Decision.None)
+	// A type named again in one rule takes no room.
+	repeated := strings.concatenate({fits, "|TYPE1001|type1001|~A|~A"}, context.temp_allocator)
+	testing.expect_value(t, decide(repeated, "v6.example.", dns.Type(1001)), Decision.Blocked)
 
 	// Rules that together name one type too many: the last is skipped, and
 	// what came before still holds.
@@ -245,4 +248,84 @@ test_dnstype_rules_are_counted_once_a_name :: proc(t: ^testing.T) {
 	testing.expect_value(t, block.count, 2)
 	parse_list(block, allow, "||a.example^$badfilter\n", .Adblock)
 	testing.expect_value(t, block.count, 1)
+
+	// A name with a plain rule too is still one name, whichever comes first, and
+	// is taken back once.
+	for list in ([]string{"||c.example^\n||c.example^$dnstype=A\n", "||c.example^$dnstype=A\n||c.example^\n"}) {
+		b, a := set_make(), set_make()
+		parse_list(b, a, list, .Adblock)
+		testing.expectf(t, b.count == 1, "%q counted %d", list, b.count)
+		parse_list(b, a, "||c.example^$badfilter\n", .Adblock)
+		testing.expectf(t, b.count == 0, "%q counted %d after its badfilter", list, b.count)
+		set_destroy(b)
+		set_destroy(a)
+	}
+}
+
+@(test)
+test_a_dnstype_rule_costs_little_more_than_a_plain_one :: proc(t: ^testing.T) {
+	/*
+	A typed name is a table entry with eight bytes of filter ids after it, and a
+	list narrowing names to the same types holds that filter once. These names
+	are 20 to 24 bytes; a plain rule for one is at most 38 (table_test.odin).
+	*/
+	N :: 20_000
+	block, allow := set_make(), set_make()
+	for i in 0 ..< N {
+		testing.expect(t, parse_rule(block, allow, fmt.tprintf("||sink-%d.bench.invalid^$dnstype=AAAA", i)) == 1)
+	}
+	testing.expect_value(t, block.count, N)
+	testing.expect_value(t, len(block.filters), 2)
+	e := engine_make()
+	defer engine_destroy(e)
+	engine_swap(e, block, allow)
+	bytes := len(block.names.slots) * size_of(Slot) + cap(block.names.blob)
+	testing.expectf(t, bytes / N <= 46, "%d bytes a rule", bytes / N)
+	testing.expect_value(t, engine_match(e, "sink-7.bench.invalid.", .AAAA), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "sink-7.bench.invalid.", .A), Decision.None)
+}
+
+@(test)
+test_a_typed_rule_joins_a_name_a_plain_rule_holds :: proc(t: ^testing.T) {
+	// The entry is written again with room for its filters; both rules hold.
+	list := "|v6.example^\n||*.v6.example^$dnstype=AAAA\n||other.example^\n"
+	block, allow := set_make(), set_make()
+	parse_list(block, allow, list, .Adblock)
+	testing.expect_value(t, block.count, 2)
+	set_destroy(block)
+	set_destroy(allow)
+	testing.expect_value(t, decide(list, "v6.example.", .A), Decision.Blocked)
+	testing.expect_value(t, decide(list, "a.v6.example.", .AAAA), Decision.Blocked)
+	testing.expect_value(t, decide(list, "a.v6.example.", .A), Decision.None)
+	testing.expect_value(t, decide(list, "other.example.", .A), Decision.Blocked)
+}
+
+@(test)
+test_a_block_says_when_only_a_dnstype_rule_made_it :: proc(t: ^testing.T) {
+	Case :: struct {
+		list:       string,
+		name:       string,
+		typed_only: bool,
+	}
+	cases := []Case {
+		{"||v6.example^$dnstype=AAAA", "v6.example.", true},
+		{"||v6.example^$dnstype=~A", "a.v6.example.", true},
+		{"/^v6\\.example$/$dnstype=AAAA", "v6.example.", true},
+		// A rule for every type makes it a block of the name, wherever it is.
+		{"||v6.example^$dnstype=AAAA\n||v6.example^", "v6.example.", false},
+		{"||v6.example^$dnstype=AAAA\n||example^", "v6.example.", false},
+		{"||a.v6.example^$dnstype=AAAA\n||v6.example^", "a.v6.example.", false},
+		{"||v6.example^$dnstype=AAAA\n/^v6\\./", "v6.example.", false},
+		{"/^v6\\.example$/$dnstype=AAAA\n/example$/", "v6.example.", false},
+	}
+	for c in cases {
+		block, allow := set_make(), set_make()
+		parse_list(block, allow, c.list, .Adblock)
+		e := engine_make()
+		engine_swap(e, block, allow)
+		typed_only := !c.typed_only
+		got := engine_match(e, c.name, .AAAA, &typed_only)
+		testing.expectf(t, got == .Blocked && typed_only == c.typed_only, "%q: %v, typed only %v", c.list, got, typed_only)
+		engine_destroy(e)
+	}
 }

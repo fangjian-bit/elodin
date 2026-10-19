@@ -282,8 +282,8 @@ PARITY_BLOCKED_SUBTREE :: "subtree.parity.test."
 /*
 Rules on pool names that must block nothing, so their answers are held to the
 upstream's like any other. Each names a rule a list really carries - one
-cancelled by `$badfilter`, one narrowed to a client - which read as a plain block
-used to take the name off the air (#319).
+cancelled by `$badfilter`, one narrowed to a client - which, read as a plain
+block, would take the name off the air (#319).
 */
 PARITY_NOT_BLOCKING :: []string {
 	"||deep.nested.parity.test^",

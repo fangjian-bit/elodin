@@ -113,8 +113,11 @@ regex_add :: proc(s: ^Set, pattern: string, types := ANY_TYPE) -> (stored: bool)
 	if len(pattern) == 0 || len(pattern) > MAX_REGEX_PATTERN || regex_key(pattern, key_buf[:]) in s.cancelled {
 		return false
 	}
+	merge_buf: [2 * MAX_RULE_TYPES]u16
 	if held, found := s.regex_held[pattern]; found {
-		held^ = type_union(held^, types, s.allocator) or_return
+		merged := type_union(held^, types, merge_buf[:]) or_return
+		id := type_intern(s, merged)
+		held^ = s.filters[id]
 		return true
 	}
 	if s.regex_scratch.curr_block == nil && virtual.arena_init_growing(&s.regex_scratch) != nil {
@@ -167,7 +170,9 @@ regex_add :: proc(s: ^Set, pattern: string, types := ANY_TYPE) -> (stored: bool)
 	re := regex_copy(trial, s.allocator)
 	shortcut := strings.clone(regex_shortcut(pattern, temp), s.allocator)
 	held := new(Type_Filter, s.allocator)
-	held^ = type_union({}, types, s.allocator) or_return
+	first := type_union({}, types, merge_buf[:]) or_return
+	id := type_intern(s, first)
+	held^ = s.filters[id]
 	kept := Regex_Rule{strings.clone(pattern, s.allocator), re, cost, shortcut, held}
 	append(&s.regexes, kept)
 	s.regex_held[kept.pattern] = held
@@ -274,15 +279,19 @@ regex_cost :: proc(re: regex.Regular_Expression) -> int {
 	return cost
 }
 
-// Whether any of the set's patterns matches `normalised`, for `qtype`.
-regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type) -> bool {
+/*
+What pattern matches `normalised` for `qtype`: none, only ones with a
+`$dnstype`, or one for every type, which is looked for past the others so a
+block can say which it was.
+*/
+regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type) -> (best: Coverage) {
 	if s == nil || len(s.regexes) == 0 {
-		return false
+		return .None
 	}
 	subject_buf: [MAX_REGEX_NAME]u8
 	subject, fits := regex_subject(normalised, subject_buf[:])
 	if !fits {
-		return false
+		return .None
 	}
 	// Left uninitialised: the arena zeroes what it hands out, and zeroing all
 	// 33 KiB here would be a memset on every lookup.
@@ -296,16 +305,20 @@ regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type) -> bool {
 	copy(url_buf[len(URL_PREFIX):], subject)
 	url := string(url_buf[:len(URL_PREFIX) + len(subject)])
 	for r in s.regexes {
-		if !type_matches(r.types^, qtype) || !strings.contains(url, r.shortcut) {
+		any_type := r.types.negated && len(r.types.types) == 0
+		if (best == .Typed && !any_type) || !type_matches(r.types^, qtype) || !strings.contains(url, r.shortcut) {
 			continue
 		}
 		mem.arena_free_all(&arena)
 		_, matched := regex.match_and_allocate_capture(r.re, subject, scratch, scratch)
 		if matched {
-			return true
+			if any_type {
+				return .Any
+			}
+			best = .Typed
 		}
 	}
-	return false
+	return
 }
 
 /*
