@@ -2,7 +2,8 @@
 #
 # Every setting below is optional; the values shown are the defaults unless
 # noted otherwise. Durations accept "500ms", "30s", "5m", "12h", "7d" or a bare
-# number of seconds.
+# number of seconds. A TTL anywhere is 0 to 2147483647 seconds (RFC 2181), and a
+# listener's port 1 to 65535.
 
 log:
   level: info          # debug | info | warn | error
@@ -47,6 +48,7 @@ server:
   # queries asked over it, and a client can stay inside both while letting go of
   # nothing - so this is the only setting that says how long one may be held.
   max_connections_per_prefix: 0
+  # How long an idle client connection is held; at least 1ms.
   client_timeout: 10s
   # Queries queued or in flight before new ones are dropped. 0 derives it as
   # `workers * 8`, which keeps the backlog to about eight upstream round trips

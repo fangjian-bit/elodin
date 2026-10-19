@@ -609,9 +609,8 @@ Checked where each request or frame is about to be read, so a connection is held
 past the figure by at most the one read it was waiting on - which the per-message
 budget bounds - and never indefinitely.
 
-A non-positive `client_timeout` is no idle wait at all, which is an operator
-choosing to keep connections for as long as they last, and this does not second
-guess it.
+The loader refuses a `client_timeout` under a millisecond; a non-positive one in a
+`Config` built elsewhere is no idle wait at all, and this adds none.
 */
 @(private)
 doh_question_overdue :: proc(s: ^Server, last_question: time.Tick, now: time.Tick) -> bool {

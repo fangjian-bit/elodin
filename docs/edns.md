@@ -92,8 +92,8 @@ The option is sent only when:
 - the transport is TCP or DoT. UDP must ignore it (RFC 7828 §3.3.1), and DoH
   leaves it to HTTP (RFC 8484 §10).
 - the client sent the option (§3.2.1).
-- `client_timeout` is positive. A non-positive one is no idle timeout, and the
-  only value that could say so, 0, means "close now" (§3.4).
+- `client_timeout` is at least 100ms. Under that the figure rounds to 0, which
+  means "close now" (§3.4).
 
 The option is hop-by-hop: a client's is removed from the query before it is
 forwarded.

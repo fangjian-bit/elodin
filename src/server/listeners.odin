@@ -2006,8 +2006,9 @@ once the handshake is done. Five seconds is many times over what a handshake
 costs on any path worth serving, and it is still a bound - which is the whole
 point, the trickle being what `tlsx.handshake_loop` is there to end.
 
-A non-positive `client_timeout` is no receive timeout at all and stays that way:
-the operator asked for no bound, and a floor is not a bound they asked to add.
+The loader refuses a `client_timeout` under a millisecond. A non-positive one in a
+`Config` built elsewhere is no receive timeout at all and stays that way, rather
+than gaining a floor nothing asked for.
 */
 @(private)
 HANDSHAKE_FLOOR :: 5 * time.Second
