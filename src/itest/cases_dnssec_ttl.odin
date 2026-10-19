@@ -251,9 +251,14 @@ run_dnssec_ttl_cases :: proc(r: ^Runner) {
 		{"dnssec: the cached copy of that answer keeps the ceiling", true, 2},
 		{"dnssec: and so does the copy stripped for a client without DO", false, 1},
 	}
-	for c in cases {
+	for c, i in cases {
 		start_case(r, c.name)
+		asked := mock_total(mock)
 		res := query_udp(udp_port, build_query(TTL_QNAME, u16(dns.Type.A), edns_size = 1232, dnssec_ok = c.dnssec_ok))
+		// The second case is the same question again, so it has to be the cache's copy.
+		if i == 1 {
+			check(r, mock_total(mock) == asked, "the repeated question went upstream rather than to the cache")
+		}
 		if check(r, res.ok, "no response") {
 			msg, err := dns.decode_message(res.wire, context.allocator)
 			if check(r, err == .None, "the answer does not decode") {

@@ -1061,8 +1061,7 @@ test_an_unrebuildable_answer_still_has_its_ttl_held :: proc(t: ^testing.T) {
 		0x00, 0x04, 0x00, 0x0a, 0xff, 0xff, // preference 10, pointer to 0x3fff
 	}
 	ancount := int(wire[7]) + 1
-	ends := dns.HEADER_SIZE
-	question_end := 0
+	answer_end := 0
 	{
 		// The answer section ends where the authority begins; re-encoding with
 		// only the question and answer gives that offset.
@@ -1070,13 +1069,12 @@ test_an_unrebuildable_answer_still_has_its_ttl_held :: proc(t: ^testing.T) {
 		head.authority = nil
 		head.additional = nil
 		head_wire, _, _ := dns.encode_message(head, context.temp_allocator)
-		question_end = len(head_wire)
+		answer_end = len(head_wire)
 	}
-	_ = ends
 	broken := make([dynamic]u8, 0, len(wire) + len(mx), context.temp_allocator)
-	append(&broken, ..wire[:question_end])
+	append(&broken, ..wire[:answer_end])
 	append(&broken, ..mx)
-	append(&broken, ..wire[question_end:])
+	append(&broken, ..wire[answer_end:])
 	broken[7] = u8(ancount)
 	verdict := secure_verdict()
 	verdict.answer[0].ttl = 300

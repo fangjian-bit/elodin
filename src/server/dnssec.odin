@@ -1,7 +1,6 @@
 package server
 
 import "core:mem"
-import "core:slice"
 import "core:strings"
 import "core:time"
 import "elodin:dns"
@@ -529,10 +528,9 @@ present_response :: proc(
 			4035 section 5.3.3 binds their TTLs whether or not AD goes out, and
 			this copy is the one the cache keeps. Capped as one message, at the
 			least any of the sets allows, since the sets cannot be told apart
-			without the rebuild that just failed. A copy, as the caller's bytes
-			are not this call's to rewrite.
+			without the rebuild that just failed. In place, as `set_ad_bit`
+			below already writes these bytes.
 			*/
-			out = slice.clone(out, allocator)
 			dns.cap_ttls(out, dnssec.ttl_ceiling(result))
 		}
 	}
