@@ -99,7 +99,13 @@ dot_handshake_verifies :: proc(dot_port: int, ca_file, hostname: string) -> bool
 	if derr != nil {
 		return false
 	}
-	defer net.close(socket)
+	// Closed here only while no session owns it: `tlsx.close` closes it too,
+	// and a second close of the same number can take a descriptor another
+	// thread has opened in between.
+	handshaken := false
+	defer if !handshaken {
+		net.close(socket)
+	}
 	_ = net.set_option(socket, .Receive_Timeout, CLIENT_TIMEOUT)
 	_ = net.set_option(socket, .Send_Timeout, CLIENT_TIMEOUT)
 
@@ -113,6 +119,7 @@ dot_handshake_verifies :: proc(dot_port: int, ca_file, hostname: string) -> bool
 	if terr != .None {
 		return false
 	}
+	handshaken = true
 	tlsx.close(conn)
 	return true
 }

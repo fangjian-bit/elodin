@@ -65,7 +65,8 @@ the budget plus one more span, and a forward of its own after that gets only
 what is left.
 
 One exchange with one server takes its `timeout`, whatever it does inside:
-resolving a hostname through `bootstrap`, asking again with a fresh DNS cookie,
+connecting and the TLS handshake, however slowly the server sends it, resolving
+a hostname through `bootstrap`, asking again with a fresh DNS cookie,
 retrying a truncated answer over TCP. A truncated answer that arrives late
 leaves its TCP retry little time, and fails rather than doubling the wait. The
 only overruns left are about a second: a TCP or DoT server finishing a message it
@@ -99,7 +100,7 @@ level=warn msg="upstream quad9-dot: TLS handshake with \"dns.quad9.net\" failed:
 
 | kind | meaning |
 |---|---|
-| `Timeout` | nothing usable arrived inside `upstream.timeout`, including a TLS or HTTPS session that handshook and then went quiet |
+| `Timeout` | nothing usable arrived inside `upstream.timeout`, including a TLS handshake that did not finish in it and a TLS or HTTPS session that handshook and then went quiet |
 | `Peer_Closed` | the peer hung up before a byte of the reply arrived, and hung up again on the retry |
 | `IO_Error` | the transport failed on an established session, including a reply cut off partway |
 | `Bad_Response` | a reply arrived and was thrown away: it did not echo the question, or on `udp://`/`tcp://` lacked the DNS cookie the query carried |
@@ -120,8 +121,8 @@ that; `cookies.upstream: false` is the test, and the fix if it is.
   its connections reaped at three quarters of that gap from then on, never below
   two seconds; the learned figure only comes down, and is forgotten after an
   hour.
-- A TLS handshake the peer resets partway through is retried once. Only a reset
-  is retried.
+- A TLS handshake the peer resets partway through is retried once, inside the
+  same `timeout`. Only a reset is retried.
 
 ## Rcodes and the rest of the group
 

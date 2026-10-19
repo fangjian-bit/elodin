@@ -52,7 +52,7 @@ and OpenSSL does not allow that: one `SSL` object belongs to one thread at a
 time. `mu` is what makes it so.
 
 The lock is never held across a wait. The socket is put into non-blocking mode
-once the handshake is done, so a call into OpenSSL either makes progress or
+before the handshake, so a call into OpenSSL either makes progress or
 asks to be retried, and the waiting happens in `poll` with the lock released.
 Holding it across a blocking read instead would park every writer behind a
 reader sitting on a quiet connection, which on the DoH server is a ten-second
@@ -162,45 +162,24 @@ reason OpenSSL keeps its queue that way.
 last_handshake_errno: posix.Errno
 
 /*
-Classify a handshake that did not complete.
+Classify a handshake that did not complete for any reason but a would-block,
+which `handshake_loop` waits out itself.
 
 `SSL_get_error` has to be read before anything else touches the session, and
-errno before anything else makes a system call, so both are taken here, right
-where the failure happened.
-
-A blocking socket - which is the client half, `client_connect` - only ever asks
-to be retried because SO_RCVTIMEO or SO_SNDTIMEO cut a wait short, which is a
-timeout rather than a protocol failure. The server half is non-blocking and
-waits those out in `accept_loop`, so what reaches here from it is never a
-would-block. A syscall-level error is the transport giving up rather than the
-peer refusing us. Telling those apart is what lets a caller log the difference
-between "the upstream is slow", "the upstream hung up on us", and "the
-certificate did not check out".
+errno before anything else makes a system call, so the caller takes both in that
+order, right where the failure happened, and passes them in. A syscall-level
+error is the transport giving up rather than the peer refusing us. Telling those
+apart is what lets a caller log the difference between "the upstream hung up on
+us" and "the certificate did not check out".
 */
-@(private)
-handshake_error :: proc(ssl: ^SSL, ret: c.int) -> Error {
-	saved := posix.errno()
-	return classify_handshake(SSL_get_error(ssl, ret), ret, saved)
-}
-
-// The half of `handshake_error` that reads neither, for a caller that has already
-// taken both in that order - see `accept_loop`, which needs the code to tell a
-// retry from a failure before it knows there is a failure to classify.
 @(private)
 classify_handshake :: proc(code: c.int, ret: c.int, saved: posix.Errno) -> Error {
 	last_handshake_errno = .NONE
 
 	switch code {
-	case SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE:
-		return .Timeout
 	case SSL_ERROR_ZERO_RETURN:
 		return .Closed
 	case SSL_ERROR_SYSCALL:
-		// OpenSSL reports a blocking socket's expired timeout this way too on
-		// some paths; it is still a timeout, not a broken connection.
-		if saved == .EAGAIN || saved == .EWOULDBLOCK {
-			return .Timeout
-		}
 		// errno zero here means the peer went away without a word: an EOF where
 		// a handshake message was due.
 		last_handshake_errno = saved
@@ -608,22 +587,22 @@ client_connect :: proc(ctx: ^Context, socket: net.TCP_Socket, hostname: string, 
 		}
 	}
 
-	ERR_clear_error()
-	if ret := SSL_connect(ssl); ret != 1 {
-		err = handshake_error(ssl, ret)
-		SSL_free(ssl)
-		return nil, err
-	}
-	if ctx.verify && SSL_get_verify_result(ssl) != X509_V_OK {
-		SSL_free(ssl)
-		return nil, .Verify_Failed
-	}
-
 	conn = new(Conn, allocator)
 	conn.ssl = ssl
 	conn.socket = socket
 	conn.allocator = allocator
+	// Before the handshake, for the reason `server_handshake` gives.
 	adopt_socket(conn)
+
+	err = handshake_loop(conn, .Connect)
+	if err == .None && ctx.verify && SSL_get_verify_result(ssl) != X509_V_OK {
+		err = .Verify_Failed
+	}
+	if err != .None {
+		SSL_free(ssl)
+		free(conn, allocator)
+		return nil, err
+	}
 	return conn, .None
 }
 
@@ -683,7 +662,7 @@ server_handshake :: proc(session: Server_Session, allocator := context.allocator
 	// here, and the deadline below needs them.
 	adopt_socket(conn)
 
-	if err = accept_loop(conn); err != .None {
+	if err = handshake_loop(conn, .Accept); err != .None {
 		SSL_free(conn.ssl)
 		free(conn, allocator)
 		return nil, err
@@ -691,44 +670,45 @@ server_handshake :: proc(session: Server_Session, allocator := context.allocator
 	return conn, .None
 }
 
+@(private)
+Handshake_Side :: enum u8 {
+	Connect,
+	Accept,
+}
+
 /*
 Shake hands within one deadline, however many messages the peer splits it into.
 
 SO_RCVTIMEO bounds one read and is restarted by every byte that arrives, so a
 handshake run on a blocking socket has no bound at all against a peer that sends
-a byte inside every wait: it holds the connection, its thread and one of the
-server's connection slots for as long as it cares to, before any of the server's
-per-query budgets can see it. The data phase is already bounded this way - see
-`transfer`, which takes its deadline once and waits in `poll` - and this is the
-same shape in front of it, on the socket `adopt_socket` has just made
-non-blocking.
+a byte inside every wait. On the server side that holds the connection, its
+thread and one of the server's connection slots before any of the server's
+per-query budgets can see it; on the client side - `client_connect`, which dials
+DoT and DoH upstreams - an upstream, or anything on the path to it, trickling its
+ServerHello holds the worker that dialled it (#346). The data phase is already
+bounded this way - see `transfer`, which takes its deadline once and waits in
+`poll` - and this is the same shape in front of it, on the socket `adopt_socket`
+has just made non-blocking.
 
-A zero timeout is the caller having set no SO_RCVTIMEO, and waits as long as the
-peer takes, which is what the blocking handshake did in that case.
-
-The client half - `client_connect`, which dials DoT and DoH upstreams - still
-runs `SSL_connect` on a blocking socket and is still bounded per read, so an
-upstream trickling its ServerHello holds the worker that dialled it. That is the
-same shape at the other trust boundary, where `upstream.read_full_tcp` is too,
-and it is not this procedure's to fix: what reaches here is anonymous and what
-reaches there is configured, and the two want different answers about how long
-to wait before giving up on one.
+The deadline is the socket's receive timeout, which is the caller's figure: for
+an accepted connection the per-connection budget, and for a dial the timeout
+`upstream.open_stream` was given. A zero timeout is the caller having set no
+SO_RCVTIMEO, and waits as long as the peer takes, which is what the blocking
+handshake did in that case.
 */
 @(private)
-accept_loop :: proc(conn: ^Conn) -> Error {
+handshake_loop :: proc(conn: ^Conn, side: Handshake_Side) -> Error {
 	timeout := time.Duration(conn.read_timeout_ns)
 	deadline := time.tick_add(time.tick_now(), timeout)
 	for {
 		ERR_clear_error()
-		ret := SSL_accept(conn.ssl)
+		ret := SSL_connect(conn.ssl) if side == .Connect else SSL_accept(conn.ssl)
 		if ret == 1 {
 			return .None
 		}
-		// Both taken here, in this order, for the reason `handshake_error` gives:
-		// errno before anything else makes a system call, and the code before
-		// anything else touches the session. A would-block is the retry to wait out
-		// rather than a failure now that the socket is non-blocking; everything
-		// else goes to the same classifier the blocking path uses.
+		// Both taken here, in this order, for the reason `classify_handshake`
+		// gives. A would-block is the retry to wait out rather than a failure on a
+		// non-blocking socket; everything else is classified.
 		saved := posix.errno()
 		code := SSL_get_error(conn.ssl, ret)
 		switch code {
@@ -760,9 +740,9 @@ A blocking read waits on SO_RCVTIMEO, which bounds one read and is restarted by
 every byte, and it waits inside OpenSSL where nothing outside can shorten it.
 Neither of the two things that follow can live with that. The data phase may have
 a reader and a writer at once, and the lock keeping them out of each other's way
-must not span a wait. The server handshake has to end at a deadline of its own
-rather than whenever a trickling peer stops - see `accept_loop`, which is why the
-client half takes this after its handshake and the server half before.
+must not span a wait. The handshake has to end at a deadline of its own rather
+than whenever a trickling peer stops - see `handshake_loop`, which is why both
+halves take this before their handshake.
 */
 @(private)
 adopt_socket :: proc(conn: ^Conn) {
@@ -889,7 +869,7 @@ The deadline is a `Tick` rather than a `Time` because it is a bound on waiting
 rather than a moment anyone reads off a clock: `Time` is the wall clock, and a
 backward step of it - an NTP correction on a host whose clock has drifted -
 extends every deadline in flight by the size of the step, which on a handshake
-is the unbounded hold `accept_loop` exists to end, arriving by another route. A
+is the unbounded hold `handshake_loop` exists to end, arriving by another route. A
 forward step cuts healthy waits short. The monotonic clock has neither.
 */
 @(private)

@@ -698,6 +698,13 @@ immediately, so the retry costs a round trip.
 The same reset can also surface before the handshake starts: `dial_tcp_timeout`
 reports `Dial_Reset` when the peer closed before this side finished connecting,
 which is retried on the same terms.
+
+`timeout` is one deadline over all of it - both dials, both handshakes - so each
+step is given what the ones before it left. Given `timeout` apiece instead, a
+peer slow to accept and slow to shake hands, or one that resets the first
+attempt just short of the deadline, held the caller for up to four times its
+budget (#346). The socket leaves carrying whatever was left; every caller sets
+its own timeouts on the stream before using it.
 */
 open_stream :: proc(
 	endpoint: net.Endpoint,
@@ -709,15 +716,29 @@ open_stream :: proc(
 	stream: Stream,
 	err: Error,
 ) {
+	// Zero is a configured `timeout: 0`, which is no deadline, and stays zero.
+	deadline := time.tick_add(time.tick_now(), timeout)
+	left :: proc(timeout: time.Duration, deadline: time.Tick) -> time.Duration {
+		return timeout if timeout <= 0 else time.tick_diff(time.tick_now(), deadline)
+	}
 	for attempt in 0 ..< 2 {
-		socket, derr := dial_tcp_timeout(endpoint, timeout)
+		// A retry is only made inside the deadline.
+		remaining := left(timeout, deadline)
+		if attempt > 0 && timeout > 0 && remaining <= 0 {
+			return {}, .Timeout
+		}
+		socket, derr := dial_tcp_timeout(endpoint, remaining)
 		if derr != .None {
 			if derr != .Dial_Reset || attempt == 1 {
 				return {}, derr
 			}
 			continue
 		}
-		set_socket_timeouts(socket, timeout)
+		// The handshake's deadline is the socket's receive timeout - see
+		// `tlsx.handshake_loop` - so this is what bounds it. Floored at a
+		// millisecond, so a dial that used the last of the budget still gets one
+		// bounded attempt: a negative figure reaching the socket is no timeout.
+		set_socket_timeouts(socket, max(left(timeout, deadline), time.Millisecond) if timeout > 0 else timeout)
 		_ = net.set_option(socket, .TCP_Nodelay, true)
 
 		if tls_ctx == nil {

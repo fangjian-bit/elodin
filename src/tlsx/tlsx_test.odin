@@ -1042,7 +1042,7 @@ handshake run on a blocking socket had no bound across the whole of it: a peer
 sending a byte inside every wait held the connection, its thread and one of the
 server's connection slots indefinitely, and did it before the handshake completed
 - so before anything the server counts per connection or per query could see it.
-`accept_loop` takes one deadline instead; see it, and `Read_Budget` on the
+`handshake_loop` takes one deadline instead; see it, and `Read_Budget` on the
 server side, where the data phase has the same shape.
 
 The drip is shorter than the timeout, which is what makes it a drip. Forty bytes
@@ -1123,6 +1123,81 @@ test_a_drip_fed_handshake_is_given_up_on_at_the_deadline :: proc(t: ^testing.T) 
 	testing.expectf(t, herr == .Timeout, "the handshake ended as %v rather than a timeout", herr)
 	// Generously above the budget and well below the trickle, so a slow machine
 	// does not fail the case and a handshake bounded per read cannot pass it.
+	testing.expectf(
+		t,
+		elapsed < 2 * time.Second,
+		"the handshake was held for %v by a byte every %v, against a %v budget",
+		elapsed,
+		DRIP_INTERVAL,
+		time.Duration(BUDGET),
+	)
+}
+
+/*
+The client half of the same: an upstream trickling its ServerHello is given up on
+at the dialler's timeout, not held for as long as it keeps trickling (#346).
+
+`open_stream` dials DoT and DoH upstreams with SO_RCVTIMEO set to the query's
+timeout, and that is the figure the whole handshake is held to. Bounded per read
+instead, a peer - or anything on the path to it - sending a byte inside every
+wait held the worker that dialled it for as long as it cared to.
+*/
+@(test)
+test_a_drip_fed_server_hello_is_given_up_on_at_the_deadline :: proc(t: ^testing.T) {
+	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if !testing.expectf(t, lerr == nil, "cannot listen on loopback: %v", lerr) {
+		return
+	}
+	defer net.close(listener)
+	bound, berr := net.bound_endpoint(listener)
+	if !testing.expectf(t, berr == nil, "cannot read the bound port: %v", berr) {
+		return
+	}
+
+	cctx, cerr := client_context(false)
+	if !testing.expectf(t, cerr == .None, "client_context: %v", cerr) {
+		return
+	}
+	defer context_destroy(cctx)
+
+	sock, derr := net.dial_tcp_from_endpoint(bound)
+	if !testing.expectf(t, derr == nil, "cannot dial: %v", derr) {
+		return
+	}
+	accepted, _, aerr := net.accept_tcp(listener)
+	if !testing.expectf(t, aerr == nil, "nothing connected: %v", aerr) {
+		net.close(sock)
+		return
+	}
+	defer net.close(accepted)
+
+	// What `open_stream` puts on the socket it dials, shortened so the case is
+	// quick.
+	BUDGET :: 400 * time.Millisecond
+	_ = net.set_option(sock, .Receive_Timeout, BUDGET)
+	_ = net.set_option(sock, .Send_Timeout, BUDGET)
+
+	drip := Drip_Ctx {
+		socket = accepted,
+	}
+	dripper := thread.create_and_start_with_poly_data(&drip, drip_worker)
+	defer {
+		sync.atomic_store(&drip.stop, true)
+		thread.join(dripper)
+		thread.destroy(dripper)
+	}
+
+	start := time.tick_now()
+	conn, herr := client_connect(cctx, sock, "")
+	elapsed := time.tick_since(start)
+	if conn != nil {
+		close(conn)
+		testing.expect(t, false, "a handshake completed out of a trickle that never sent a ServerHello")
+		return
+	}
+	net.close(sock)
+
+	testing.expectf(t, herr == .Timeout, "the handshake ended as %v rather than a timeout", herr)
 	testing.expectf(
 		t,
 		elapsed < 2 * time.Second,

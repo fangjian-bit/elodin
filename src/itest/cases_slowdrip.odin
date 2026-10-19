@@ -2,6 +2,7 @@ package itest
 
 import "core:fmt"
 import "core:net"
+import "core:sync"
 import "core:time"
 import "elodin:dns"
 import "elodin:h2"
@@ -171,6 +172,70 @@ run_slow_drip_cases :: proc(r: ^Runner) {
 			check(r, closed, "a byte every %v held the connection for all %d bytes", DRIP, sent)
 			check(r, sent <= DRIPS_ALLOWED, "the connection was held for %d drips of a %v budget", sent, BUDGET)
 		}
+	}
+	end_case(r)
+	run_upstream_drip_case(r)
+}
+
+/*
+The other side of the same trust boundary: an upstream that trickles its
+ServerHello is given up on at the query's timeout, not held for as long as it
+keeps trickling (#346). The handshake ran on a blocking socket bounded per read,
+so a DoT upstream - or anything on the path to it - sending a byte inside every
+wait held the worker that dialled it, and the client got nothing.
+*/
+@(private = "file")
+run_upstream_drip_case :: proc(r: ^Runner) {
+	upstream_port := next_port(r)
+	mock := mock_make("drip-dot", upstream_port)
+	mock.drip_handshake = true
+	if !mock_start(mock, r.cert_file, r.key_file) {
+		skip_case(r, "drip: upstream", "cannot start the TLS mock")
+		return
+	}
+	defer mock_stop(mock)
+
+	udp_port := next_port(r)
+	config := fmt.tprintf(
+		`log: {{ level: warn }}
+listeners:
+  udp: {{ enabled: true, address: "127.0.0.1", port: %d }}
+  tcp: {{ enabled: false }}
+upstream:
+  timeout: 1s
+  attempts: 1
+  servers:
+    - {{ name: drip, type: tls, address: 127.0.0.1, port: %d, hostname: elodin.local, verify: false }}
+cache: {{ enabled: false }}
+blocking: {{ enabled: false }}
+`,
+		udp_port,
+		upstream_port,
+	)
+	srv, ok := start_server(r, Server_Options{config = config, udp_port = udp_port})
+	if !ok {
+		skip_case(r, "drip: upstream", "server did not start")
+		return
+	}
+	defer stop_server(&srv)
+
+	start_case(r, "drip: a DoT upstream trickling its ServerHello is given up on at the timeout")
+	{
+		start := time.tick_now()
+		// Waits past the whole trickle, so a server held by it is seen answering
+		// late rather than not at all.
+		res := query_udp(udp_port, build_query("drip.example.", 1), timeout = 15 * time.Second)
+		spent := time.tick_since(start)
+		dripped := sync.atomic_load(&mock.dripped)
+		// The premise: the upstream was reached over TLS and was trickling.
+		check(r, dripped >= 2, "the upstream trickled %d bytes before the answer", dripped)
+		if check(r, res.ok, "no response") {
+			h := parse_header(r, res.wire)
+			check(r, h.rcode == int(dns.Rcode.Serv_Fail), "rcode %d, want SERVFAIL", h.rcode)
+		}
+		// A one-second timeout and one attempt; the room above it is for a loaded
+		// box. The trickle runs twelve seconds.
+		check(r, spent < 3 * time.Second, "a 1s upstream timeout held the query for %v", spent)
 	}
 	end_case(r)
 }
