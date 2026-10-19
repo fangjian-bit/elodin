@@ -118,12 +118,12 @@ Where every group has the same `timeout` - the configuration nearly everybody
 runs - it is two of them, the figure #327 set for one group.
 */
 question_span :: proc(s: ^Server, name: string, type: dns.Type) -> (span: time.Duration) {
-	for g in ([]^upstream.Group{s.group, route_group(s, name, type), zone_route_group(s, name)}) {
+	for g in ([]^upstream.Group{live(s).group, route_group(s, name, type), zone_route_group(s, name)}) {
 		if g != nil {
 			span = max(span, upstream.query_budget(g))
 		}
 	}
-	for route in s.routes {
+	for route in live(s).routes {
 		if route_meets_an_anchor(s, route) {
 			span = max(span, upstream.query_budget(route.group))
 		}
@@ -140,7 +140,7 @@ the zone, because a CNAME or DNAME can take any answer there.
 @(private)
 route_meets_an_anchor :: proc(s: ^Server, route: Zone_Route) -> bool {
 	for domain in route.domains {
-		for zone in s.anchor_zones {
+		for zone in live(s).anchor_zones {
 			if name_at_or_below(domain, zone) || name_at_or_below(zone, domain) {
 				return true
 			}
@@ -243,7 +243,7 @@ zone_route_group :: proc(s: ^Server, name: string) -> ^upstream.Group {
 	if route, found := zone_route(s, name); found {
 		return route.group
 	}
-	return s.group
+	return live(s).group
 }
 
 /*
@@ -541,7 +541,7 @@ what this buys is a key the memo can hold on to.
 */
 @(private)
 route_apex_name :: proc(s: ^Server, name: string) -> (apex: string, found: bool) {
-	for candidate in s.routes {
+	for candidate in live(s).routes {
 		for domain in candidate.domains {
 			if dns.name_equal_fold(name, domain) {
 				return domain, true
@@ -751,9 +751,9 @@ shows the rate matters.
 @(private)
 apex_ds_parent_unsettled :: proc(s: ^Server, name: string) -> bool {
 	now := time.now()
-	sync.mutex_lock(&s.apex_memo.mu)
-	defer sync.mutex_unlock(&s.apex_memo.mu)
-	for slot in s.apex_memo.slots {
+	sync.mutex_lock(&live(s).apex_memo.mu)
+	defer sync.mutex_unlock(&live(s).apex_memo.mu)
+	for slot in live(s).apex_memo.slots {
 		if slot.name != "" && dns.name_equal_fold(slot.name, name) {
 			return slot.strikes >= upstream.FAILURE_THRESHOLD && time.diff(now, slot.until) > 0
 		}
@@ -797,10 +797,10 @@ remember_apex_ds_parent :: proc(s: ^Server, name: string, reached, settled: bool
 		return
 	}
 	now := time.now()
-	sync.mutex_lock(&s.apex_memo.mu)
-	defer sync.mutex_unlock(&s.apex_memo.mu)
+	sync.mutex_lock(&live(s).apex_memo.mu)
+	defer sync.mutex_unlock(&live(s).apex_memo.mu)
 	victim := -1
-	for slot, i in s.apex_memo.slots {
+	for slot, i in live(s).apex_memo.slots {
 		if slot.name == apex {
 			victim = i
 			break
@@ -828,16 +828,16 @@ remember_apex_ds_parent :: proc(s: ^Server, name: string, reached, settled: bool
 		return
 	}
 	if settled {
-		s.apex_memo.slots[victim] = {}
+		live(s).apex_memo.slots[victim] = {}
 		return
 	}
 	// Consecutive means inside the window: a slot whose own has run out is a
 	// count that expired with it, and this reply is the first of the next one.
 	strikes := 1
-	if s.apex_memo.slots[victim].name == apex && time.diff(now, s.apex_memo.slots[victim].until) > 0 {
-		strikes = s.apex_memo.slots[victim].strikes + 1
+	if live(s).apex_memo.slots[victim].name == apex && time.diff(now, live(s).apex_memo.slots[victim].until) > 0 {
+		strikes = live(s).apex_memo.slots[victim].strikes + 1
 	}
-	s.apex_memo.slots[victim] = {
+	live(s).apex_memo.slots[victim] = {
 		name    = apex,
 		until   = time.time_add(now, upstream.COOLDOWN),
 		strikes = strikes,
@@ -854,7 +854,7 @@ name is served locally on purpose.
 @(private)
 zone_route :: proc(s: ^Server, name: string) -> (route: Zone_Route, found: bool) {
 	best := -1
-	for candidate in s.routes {
+	for candidate in live(s).routes {
 		for domain in candidate.domains {
 			if !name_at_or_below(name, domain) {
 				continue
@@ -886,13 +886,13 @@ grooms is one that holds file descriptors open against a server that may have
 gone away.
 */
 groom_upstreams :: proc(s: ^Server) -> (closed: int) {
-	if s.group != nil {
-		closed += upstream.groom(s.group)
+	if live(s).group != nil {
+		closed += upstream.groom(live(s).group)
 	}
 	// Guarded the same way the default group is: `upstream.groom` walks
 	// `g.servers` without a nil check of its own, and a `Zone_Route` is a plain
 	// struct anybody can build with no group in it.
-	for route in s.routes {
+	for route in live(s).routes {
 		if route.group != nil {
 			closed += upstream.groom(route.group)
 		}

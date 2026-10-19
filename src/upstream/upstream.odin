@@ -2,6 +2,7 @@ package upstream
 
 import "core:mem"
 import "core:net"
+import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
@@ -213,7 +214,7 @@ make_upstream :: proc(
 	err: Error,
 ) {
 	u = new(Upstream, allocator)
-	u.spec = spec
+	u.spec = clone_spec(spec, allocator)
 	u.allocator = allocator
 	u.max_idle = max(max_idle, 0)
 	u.idle_timeout = idle_timeout
@@ -228,6 +229,7 @@ make_upstream :: proc(
 		ctx, terr := tlsx.client_context(spec.verify, "", nil, allocator)
 		if terr != .None {
 			logx.errorf("upstream %s: cannot create TLS context: %s", spec.name, tlsx.describe_error(terr, context.temp_allocator))
+			destroy(u)
 			return nil, .TLS_Failed
 		}
 		u.tls_ctx = ctx
@@ -238,6 +240,7 @@ make_upstream :: proc(
 		ctx, terr := tlsx.client_context(spec.verify, "", []string{"h2", "http/1.1"}, allocator)
 		if terr != .None {
 			logx.errorf("upstream %s: cannot create TLS context: %s", spec.name, tlsx.describe_error(terr, context.temp_allocator))
+			destroy(u)
 			return nil, .TLS_Failed
 		}
 		u.tls_ctx = ctx
@@ -255,7 +258,44 @@ destroy :: proc(u: ^Upstream) {
 	delete(u.idle)
 	teardown_h2(u)
 	tlsx.context_destroy(u.tls_ctx)
+	free_spec(u.spec, u.allocator)
 	free(u, u.allocator)
+}
+
+/*
+The spec with every string in it copied into `allocator`.
+
+An upstream can outlive the configuration it was built from: a reload that
+leaves the upstream section alone hands the running groups to the next
+configuration and releases the one they were read from. So it holds its own
+copy rather than views into a file that is about to be freed.
+*/
+@(private)
+clone_spec :: proc(spec: config.Upstream_Spec, allocator: mem.Allocator) -> config.Upstream_Spec {
+	out := spec
+	out.name = strings.clone(spec.name, allocator)
+	out.address = strings.clone(spec.address, allocator)
+	out.hostname = strings.clone(spec.hostname, allocator)
+	out.url = strings.clone(spec.url, allocator)
+	out.path = strings.clone(spec.path, allocator)
+	out.bootstrap = make([]string, len(spec.bootstrap), allocator)
+	for b, i in spec.bootstrap {
+		out.bootstrap[i] = strings.clone(b, allocator)
+	}
+	return out
+}
+
+@(private)
+free_spec :: proc(spec: config.Upstream_Spec, allocator: mem.Allocator) {
+	for b in spec.bootstrap {
+		delete(b, allocator)
+	}
+	delete(spec.bootstrap, allocator)
+	delete(spec.name, allocator)
+	delete(spec.address, allocator)
+	delete(spec.hostname, allocator)
+	delete(spec.url, allocator)
+	delete(spec.path, allocator)
 }
 
 /*

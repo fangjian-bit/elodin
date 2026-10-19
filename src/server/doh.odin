@@ -509,7 +509,7 @@ fuzz_http_requests :: proc(conn: Conn) {
 
 @(private)
 serve_doh :: proc(s: ^Server, conn: Conn, client: string) {
-	path := s.cfg.listeners.doh.path
+	path := startup_config(s).listeners.doh.path
 
 	/*
 	One reader for the connection rather than one per request.
@@ -543,7 +543,7 @@ serve_doh :: proc(s: ^Server, conn: Conn, client: string) {
 		// of `client_timeout` for the next one to start and the request that then
 		// starts gets the whole of it too.
 		r.budget = Read_Budget {
-			idle = s.cfg.server.client_timeout,
+			idle = client_timeout(s),
 		}
 
 		req, status, ok := read_http_request(&r)
@@ -614,7 +614,7 @@ The loader refuses a `client_timeout` under a millisecond; a non-positive one in
 */
 @(private)
 doh_question_overdue :: proc(s: ^Server, last_question: time.Tick, now: time.Tick) -> bool {
-	limit := s.cfg.server.client_timeout
+	limit := client_timeout(s)
 	// Less the limit rather than against twice it, which overflows for a
 	// `client_timeout` past 146 years - refused by the loader, not by a `Config`
 	// built elsewhere - into a negative bound that closes every connection
@@ -633,7 +633,7 @@ serve_doh_request :: proc(
 	// `doh_question_overdue`.
 	asked: ^bool,
 ) -> bool {
-	mc_path := s.cfg.listeners.doh.mobileconfig_path
+	mc_path := startup_config(s).listeners.doh.mobileconfig_path
 	if mc_path != "" && req.path == mc_path {
 		return serve_doh_mobileconfig(s, conn, req)
 	}
@@ -712,7 +712,7 @@ serve_doh_request :: proc(
 	flooder occupies the same one slot either way.
 	*/
 	asked^ = true
-	if !stream_rate_check(s.limiter, conn.peer, time.tick_now()) {
+	if !stream_admits(s, conn.peer) {
 		report_rate_limited(client, .DoH, !req.keep_alive)
 		return send_http_error(conn, "doh", 429, "too many requests", req.keep_alive)
 	}

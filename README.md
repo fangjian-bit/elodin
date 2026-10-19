@@ -22,6 +22,7 @@ Pi-hole and AdGuard Home, minus the web interface. One binary, one YAML file.
 - DNS rebinding protection, off by default so split horizon keeps working
 - A `.mobileconfig` profile that points Apple devices at the DoH endpoint
 - A Prometheus endpoint, off by default
+- Configuration reloads on `SIGHUP`, keeping the cache, cookies and connections
 - Ships as a systemd service or a `.deb`, with optional system-resolver takeover
 
 ## Installing

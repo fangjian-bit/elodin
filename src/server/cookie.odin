@@ -105,35 +105,44 @@ Returns false when a configured secret cannot be read, which is worth refusing
 to start over: silently falling back to a random one would leave the members of
 an anycast set handing out cookies none of the others would accept.
 */
-start_cookies :: proc(s: ^Server) -> bool {
-	if !s.cfg.cookies.enabled {
+start_cookies :: proc(
+	l: ^Live,
+	// A keeper whose secret to keep rather than parse or draw again: a reload
+	// that leaves `cookies.secret` alone hands the running one over, so no client
+	// has to be issued a new cookie.
+	reuse: ^Cookie_Keeper = nil,
+) -> bool {
+	if !l.cfg.cookies.enabled {
 		return true
 	}
 	k := new(Cookie_Keeper)
-	k.require = s.cfg.cookies.require
+	k.require = l.cfg.cookies.require
 
-	if s.cfg.cookies.secret != "" {
-		if !config.parse_cookie_secret(s.cfg.cookies.secret, &k.secret) {
+	switch {
+	case reuse != nil:
+		k.secret = reuse.secret
+	case l.cfg.cookies.secret != "":
+		if !config.parse_cookie_secret(l.cfg.cookies.secret, &k.secret) {
 			logx.errorf("cookies.secret must be %d hex characters", COOKIE_SECRET_LEN * 2)
 			free(k)
 			return false
 		}
-	} else {
+	case:
 		crypto.rand_bytes(k.secret[:])
 	}
 
-	s.cookies = k
+	l.cookies = k
 	logx.infof("cookies: enabled (require=%v)", k.require)
 	return true
 }
 
-stop_cookies :: proc(s: ^Server) {
-	if s.cookies == nil {
+stop_cookies :: proc(l: ^Live) {
+	if l.cookies == nil {
 		return
 	}
-	mem.zero_explicit(&s.cookies.secret, COOKIE_SECRET_LEN)
-	free(s.cookies)
-	s.cookies = nil
+	mem.zero_explicit(&l.cookies.secret, COOKIE_SECRET_LEN)
+	free(l.cookies)
+	l.cookies = nil
 }
 
 /*

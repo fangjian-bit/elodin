@@ -107,8 +107,52 @@ client connection is only noticed when its read times out, so stopping can take
 up to `server.client_timeout` (ten seconds by default). A second signal
 terminates immediately.
 
-`SIGHUP` re-reads the DoT/DoH certificate and key from the configured paths and
-switches the listeners over without dropping connections; a session in progress
-keeps the certificate it handshook with. One that fails to load is logged and the
-listener keeps serving what it had. Nothing else is reloaded — listener
-addresses, the upstream set and blocking need a restart.
+`SIGHUP` (`systemctl reload elodin`) reloads without dropping a connection or a
+cached answer it has no reason to, in this order:
+
+1. The log file is opened again by name, which is what logrotate's `create`
+   expects.
+2. The configuration file is read again. It goes through the checks `--check`
+   runs, and every upstream group, trust anchor and cookie secret a change needs
+   is built before anything is swapped in. A file that fails any of that is
+   logged (`reload: ... is not usable; keeping the configuration already in
+   effect`) and changes nothing. A query already being answered finishes under
+   the configuration it started with.
+3. The DoT/DoH certificate and key are read again from the paths the process
+   started with, whether or not the file loaded. A session in progress keeps the
+   certificate it handshook with; one that fails to load is logged and the
+   listener keeps serving what it had.
+
+A reload that applies something logs one line, then the warnings startup logs
+about the configuration:
+
+```
+ts=2026-10-19T19:35:57Z level=info msg=reloaded changed=upstream,rewrites rebuilt=upstreams cache=flushed
+```
+
+`changed` is the sections that differ; `rebuilt` the parts built afresh
+(`upstreams`, `validator`, `cookies`, `limiter`, `answers`, `rules`, or `none`);
+`cache` is `kept`, `flushed`, `new` or `off`.
+
+| section | on reload |
+|---|---|
+| `log`, `rewrites`, `special_use`, `rebind` | applied from the next query |
+| `server.allow_from`, `max_pending`, `max_udp_response`, `client_timeout` | applied from the next query or read |
+| `server.rate_limit` | a change rebuilds the limiter, so every prefix starts again from a full budget |
+| `upstream`, `cookies.upstream` | a change rebuilds every group and route: new connections, new upstream cookies |
+| `cache` | resized in place; turned off or on, dropped or started empty |
+| `dnssec` | a change rebuilds the validator, which fetches its zone keys again |
+| `cookies` | applied; the secret is kept unless `cookies.secret` changes |
+| `blocking` | a change rebuilds the rule sets; a list whose cached copy is within `refresh` is not downloaded again |
+| `listeners`, `metrics`, `server.workers`, `upstream_workers`, `running_workers`, `max_connections`, `max_connections_per_prefix`, `user`, `group` | need a restart; each one changed is named in a warning and keeps the value it started with |
+
+A change to which upstreams are asked (`upstream.servers`, `upstream.bootstrap`,
+`upstream.zones` and their servers), to `dnssec` or `rebind`, or to `cache.min_ttl`,
+`max_ttl` or `negative_ttl` empties the answer cache, since each decides what was
+stored and how it was checked first. An answer a query already in flight stores afterwards is not served
+either. Unchanged sections keep what they built: the upstream connections and
+cookies, the cache, the client cookie secret and the rate-limit budgets survive a
+reload of anything else.
+
+A listener cannot move without a restart: below port 1024 it could not be bound
+again once privileges are dropped, and its threads are started once.

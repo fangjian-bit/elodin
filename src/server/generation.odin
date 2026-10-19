@@ -1,0 +1,614 @@
+package server
+
+import "core:mem/virtual"
+import "core:net"
+import "core:reflect"
+import "core:strings"
+import "core:sync"
+import "core:time"
+import "elodin:cache"
+import "elodin:config"
+import "elodin:dnssec"
+import "elodin:logx"
+import "elodin:upstream"
+
+/*
+Everything a request reads that a configuration reload can change, built from
+one `config.Config` and read as one.
+
+A request pins the generation that is current when it starts (`pin`) and reaches
+all of this through `live` until it is done, so the upstreams it asks, the
+policy it applies and the limits it is held to all come from the same
+configuration however many reloads land while it runs. Reading `s.cfg` once
+before a swap and once after would act on half of each: a rewrite found by index
+in one table and read out of the other, say.
+
+A `Server` built as a literal - which is every test - has no generations; it
+holds one of these directly and `live` hands that back.
+*/
+Live :: struct {
+	cfg:          ^config.Config,
+	// The default upstream: everything that no route in `routes` claims, plus
+	// every lookup the validator makes on its own account. See `routes.odin`.
+	group:        ^upstream.Group,
+	// The per-domain upstreams, in configuration order. Empty on a server that
+	// forwards everything to one place.
+	routes:       []Zone_Route,
+	/*
+	Which routed apexes the parent's group would not settle a `DS` for, and
+	until when.
+
+	Only the apex `DS` carve-out reads or writes it, and only to decide whether
+	to spend a client's query on a parent that has just proved it cannot answer
+	this question. `Apex_Memo` argues it in full; the zero value is no memory of
+	anything, which is what a `Server` built as a literal wants.
+
+	One per generation because the names in it are the routes' own strings,
+	which live exactly as long as the configuration they were read from. A
+	reload starts with no memory, which costs at most one cooldown's worth of
+	queries to a parent that is still not settling.
+	*/
+	apex_memo:    Apex_Memo,
+	// Nil when `cache.enabled` is off.
+	answers:      ^cache.Cache,
+	validator:    ^dnssec.Validator,
+	/*
+	The operator's own trust anchors, as parsed.
+
+	Held here rather than left to the validator because the validator borrows
+	them: with none configured it points at `dnssec.root_anchors`, which is
+	static, so `destroy_validator` cannot free what it has and these would have
+	nobody to release them. Empty when the built-in anchors are in use.
+	*/
+	anchors:      []dnssec.Trust_Anchor,
+	// The zones of the operator's own trust anchors, root excluded, in canonical
+	// form. An anchor here is a deliberate request to validate the zone it names,
+	// which the locally-served bypass has to defer to; see `covered_by_local_anchor`.
+	// The strings are the anchors' own; only the slice belongs to this field.
+	anchor_zones: []string,
+	cookies:      ^Cookie_Keeper,
+	// Nil when rate limiting is off; `rate_check` takes that as "allow".
+	limiter:      ^Rate_Limiter,
+	/*
+	The number the rules an answer is judged by before it is cached go by: which
+	upstreams are asked, whether and against what it is validated, whether rebind
+	protection reads it, and the lifetimes the cache gives it. It is part of every
+	cache key (`cache.make_key`), so an answer stored under one number is never
+	served under another.
+
+	A reload that changes any of those moves it. Emptying the cache alone would
+	not do: a request still running under the old rules stores its answer after
+	the cache was emptied, and that answer - unvalidated, say, where the new
+	configuration turned validation on - would then be served for its whole
+	lifetime to clients the new rules were written for. Under the old number it
+	is never found.
+	*/
+	policy:       u64,
+}
+
+/*
+The parts of a `Live` a generation can own, which are the ones that have to be
+released when nothing uses them any more.
+
+A part whose section of the configuration a reload left alone is handed to the
+new generation rather than rebuilt - the idle connections and client cookies of
+the upstreams, the cached answers, the validator's zone keys, the cookie secret
+every client holds a cookie under and the rate limiter's budgets all survive -
+and with it the duty to release it.
+*/
+Part :: enum u8 {
+	Upstreams,
+	Validator,
+	Cookies,
+	Limiter,
+	Answers,
+}
+
+Parts :: bit_set[Part]
+
+Generation :: struct {
+	using live: Live,
+	// Where `cfg` points, for a generation a reload loaded.
+	config:     config.Config,
+	/*
+	What `config`'s strings live in, for a generation a reload loaded.
+
+	Nil for the first generation, whose configuration the caller loaded and keeps
+	until the process ends. That one has to: the listeners, the metrics endpoint
+	and the profile signer hold its strings for as long as they run, and none of
+	them is rebuilt by a reload.
+	*/
+	arena:      ^virtual.Arena,
+	// Requests that pinned this generation and have not let go of it yet.
+	refs:       int,
+	owns:       Parts,
+	// The next newer retired generation, once this one is retired.
+	next:       ^Generation,
+}
+
+Generations :: struct {
+	// Held shared by `pin` while it takes a reference, exclusively by the swap.
+	mu:      sync.RW_Mutex,
+	current: ^Generation,
+	// The configuration the process started with, which is what every
+	// restart-only key is held to.
+	boot:    ^config.Config,
+	// Swapped out and not yet released, oldest first; see `reap_generations`.
+	retired: ^Generation,
+}
+
+@(private)
+Pin :: struct {
+	server: ^Server,
+	gen:    ^Generation,
+	depth:  int,
+}
+
+/*
+The generation this thread's request is running under.
+
+Per thread rather than passed along, because the request reaches its
+configuration through some two hundred reads in a few dozen procedures that all
+take the `Server` and nothing else; threading a second argument through every
+one of them would be the same guarantee bought with a much larger change. What
+makes it safe is that a request runs start to finish on one thread: the work it
+hands to another thread - a race worker, a refresh - is either given everything
+it needs up front, or pins for itself when it starts.
+*/
+@(private, thread_local)
+pinned: Pin
+
+/*
+Take a reference to the current generation for the rest of this request.
+
+Nests: an inner `pin` of the server already pinned by this thread keeps the outer
+one's generation, so a procedure can pin without knowing whether its caller did.
+A server with no generations - one built as a literal - is pinned to nothing,
+and `live` hands back its own `Live`.
+*/
+pin :: proc(s: ^Server) {
+	if pinned.server == s {
+		pinned.depth += 1
+		return
+	}
+	assert(pinned.server == nil, "a thread pins one server at a time")
+	sync.rw_mutex_shared_lock(&s.gens.mu)
+	g := s.gens.current
+	if g != nil {
+		sync.atomic_add(&g.refs, 1)
+	}
+	sync.rw_mutex_shared_unlock(&s.gens.mu)
+	pinned = Pin{s, g, 1}
+}
+
+unpin :: proc(s: ^Server) {
+	assert(pinned.server == s, "unpinning a server this thread has not pinned")
+	pinned.depth -= 1
+	if pinned.depth > 0 {
+		return
+	}
+	if pinned.gen != nil {
+		sync.atomic_sub(&pinned.gen.refs, 1)
+	}
+	pinned = {}
+}
+
+// `pin` for the rest of the enclosing scope.
+@(deferred_in = unpin)
+pin_scope :: proc(s: ^Server) {
+	pin(s)
+}
+
+/*
+What this request reads its configuration and everything built from it through.
+
+A server with generations must be pinned first. Reading one unpinned would race
+a reload that frees what was read, which is why it stops the process rather
+than guessing: every thread that serves anything pins on the way in, and a path
+that does not is a bug the test suites are there to find.
+*/
+live :: proc(s: ^Server) -> ^Live {
+	if pinned.server == s && pinned.gen != nil {
+		return &pinned.gen.live
+	}
+	assert(sync.atomic_load(&s.gens.current) == nil, "configuration read outside a pinned request")
+	return &s.live
+}
+
+/*
+The configuration the process started with, which is where every key a reload
+cannot change is read: the listeners, the metrics endpoint, the pool sizes and
+the connection table (see `keep_restart_only`). It never changes and lives as
+long as the server, so it needs no pin and its strings can be kept.
+*/
+startup_config :: proc(s: ^Server) -> ^config.Config {
+	if s.gens.boot != nil {
+		return s.gens.boot
+	}
+	return live(s).cfg
+}
+
+/*
+The configuration in effect, for the maintenance thread.
+
+That thread is the only one that swaps or releases a generation, so the current
+one cannot be released under it and it reads without pinning. Any other thread
+pins.
+*/
+live_config :: proc(s: ^Server) -> ^config.Config {
+	if g := sync.atomic_load(&s.gens.current); g != nil {
+		return g.cfg
+	}
+	return s.cfg
+}
+
+/*
+`server.client_timeout`, for a connection thread between requests.
+
+Pinned for the one reading and let go at once: the wait it bounds is the
+client's to stretch, and a connection holding a generation across it would hold
+up the release of every one after it.
+*/
+client_timeout :: proc(s: ^Server) -> time.Duration {
+	pin_scope(s)
+	return live(s).cfg.server.client_timeout
+}
+
+// Whether a query on a connection is within its prefix's budget; see
+// `stream_rate_check`. Pinned for the check alone, as `client_timeout` is.
+stream_admits :: proc(s: ^Server, peer: net.Endpoint) -> bool {
+	pin_scope(s)
+	return stream_rate_check(live(s).limiter, peer, time.tick_now())
+}
+
+// Whether two values of one type differ anywhere, slices and strings included.
+@(private)
+differs :: proc(a, b: $T) -> bool {
+	a, b := a, b
+	return !reflect.equal(a, b, including_indirect_array_recursion = true)
+}
+
+cache_options :: proc(c: config.Cache_Config) -> cache.Options {
+	return cache.Options {
+		max_entries = c.max_entries,
+		max_bytes = c.max_bytes,
+		min_ttl = c.min_ttl,
+		max_ttl = c.max_ttl,
+		negative_ttl = c.negative_ttl,
+		serve_stale = c.serve_stale,
+		prefetch = c.prefetch,
+		prefetch_min_ttl = c.prefetch_min_ttl,
+	}
+}
+
+/*
+The default group and one per `upstream.zones` entry.
+
+A route whose servers are all unusable fails the whole build rather than being
+dropped. The names it claims are the ones an operator added the route to keep
+resolving, and a server that quietly carried on without it would send them to
+the public upstream instead - which is both the leak the route was written to
+stop and the answer least likely to be noticed, since the public resolver
+replies rather than failing.
+*/
+@(private)
+build_upstreams :: proc(s: ^Server, l: ^Live) -> bool {
+	cfg := l.cfg
+	group, gerr := upstream.make_group(cfg.upstream, s.race_pool, cookies = cfg.cookies.upstream)
+	if gerr != .None {
+		logx.errorf("no usable upstream servers")
+		return false
+	}
+	routes := make([]Zone_Route, len(cfg.upstream.zones))
+	for zone, i in cfg.upstream.zones {
+		zg, zerr := upstream.make_group(zone.upstream, s.race_pool, cookies = cfg.cookies.upstream)
+		if zerr != .None {
+			logx.errorf("upstream.zones[%d]: no usable servers for %s", i, zone.domains[0])
+			// The routes built so far and the slice under them, which this
+			// sub-slice starts at and so releases.
+			l.group, l.routes = group, routes[:i]
+			release_parts(l, {.Upstreams})
+			return false
+		}
+		// Copied for the reason `upstream.make_upstream` copies its spec: the
+		// routes can be handed to the next configuration, and the apex memory
+		// keeps these strings for as long as they are in use.
+		domains := make([]string, len(zone.domains))
+		for d, j in zone.domains {
+			domains[j] = strings.clone(d)
+		}
+		routes[i] = Zone_Route {
+			domains = domains,
+			group   = zg,
+		}
+		logx.infof("routing %s to its own upstream", strings.join(zone.domains, ", ", context.temp_allocator))
+	}
+	l.group = group
+	l.routes = routes
+	return true
+}
+
+@(private)
+release_parts :: proc(l: ^Live, parts: Parts) {
+	if .Upstreams in parts {
+		for route in l.routes {
+			upstream.destroy_group(route.group)
+			for d in route.domains {
+				delete(d)
+			}
+			delete(route.domains)
+		}
+		delete(l.routes)
+		upstream.destroy_group(l.group)
+		l.group, l.routes = nil, nil
+	}
+	if .Validator in parts {
+		stop_validator(l)
+	}
+	if .Cookies in parts {
+		stop_cookies(l)
+	}
+	if .Limiter in parts {
+		stop_rate_limiter(l)
+	}
+	if .Answers in parts {
+		cache.destroy(l.answers)
+		l.answers = nil
+	}
+}
+
+/*
+Build what `l.cfg` describes into `l`, taking from `prev` every part whose
+section of the configuration has not changed.
+
+`built` is what this call made, and is the new generation's to release; what was
+taken from `prev` is not, until the swap hands it over. A part that cannot be
+built fails the whole call, with everything it had built released and `prev`
+untouched - a reload that half-applies is worse than one that does not happen.
+
+What can fail comes first, so nothing shared is touched by a call that then
+fails: the cache, taken over and resized rather than rebuilt, is resized by the
+caller once the build has succeeded.
+*/
+build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built: Parts, ok: bool) {
+	cfg := l.cfg
+	defer if !ok {
+		release_parts(l, built)
+		built = {}
+	}
+
+	if prev == nil ||
+	   differs(prev.cfg.upstream, cfg.upstream) ||
+	   prev.cfg.cookies.upstream != cfg.cookies.upstream {
+		if !build_upstreams(s, l) {
+			return
+		}
+		built += {.Upstreams}
+	} else {
+		l.group, l.routes = prev.group, prev.routes
+	}
+
+	if cfg.dnssec.enabled {
+		if prev == nil || prev.validator == nil || differs(prev.cfg.dnssec, cfg.dnssec) {
+			if !start_validator(s, l) {
+				return
+			}
+			built += {.Validator}
+		} else {
+			l.validator, l.anchors, l.anchor_zones = prev.validator, prev.anchors, prev.anchor_zones
+		}
+	}
+
+	if cfg.cookies.enabled {
+		if prev == nil ||
+		   prev.cookies == nil ||
+		   prev.cfg.cookies.require != cfg.cookies.require ||
+		   prev.cfg.cookies.secret != cfg.cookies.secret {
+			// The same secret, configured or drawn at startup, is kept across a
+			// reload that only changes `require`: every client holds a cookie
+			// under it, and a new one would cost each of them a round trip.
+			reuse :=
+				prev.cookies if prev != nil && prev.cookies != nil && prev.cfg.cookies.secret == cfg.cookies.secret else nil
+			if !start_cookies(l, reuse) {
+				return
+			}
+			built += {.Cookies}
+		} else {
+			l.cookies = prev.cookies
+		}
+	}
+
+	if cfg.server.rate_limit.enabled {
+		/*
+		Rebuilt when its figures change, and with it every prefix's budget: the
+		buckets name their tier by an index into the figures, which a changed list
+		of overrides renumbers. What that costs is one full bucket per prefix at
+		the moment of the reload, an operator's act and not a client's. Left
+		alone otherwise, so a reload of anything else hands nobody a fresh one.
+		*/
+		if prev == nil || prev.limiter == nil || differs(prev.cfg.server.rate_limit, cfg.server.rate_limit) {
+			if !start_rate_limiter(l) {
+				return
+			}
+			built += {.Limiter}
+		} else {
+			l.limiter = prev.limiter
+		}
+	}
+
+	if cfg.cache.enabled {
+		if prev == nil || prev.answers == nil {
+			l.answers = cache.make_cache(cache_options(cfg.cache))
+			built += {.Answers}
+		} else {
+			l.answers = prev.answers
+		}
+	}
+
+	if prev != nil {
+		l.policy = prev.policy
+		if policy_changed(prev.cfg, cfg) {
+			l.policy += 1
+		}
+	}
+	return built, true
+}
+
+/*
+Whether the rules an answer is judged by before it is stored have changed; see
+`Live.policy`.
+
+Which upstreams are asked - their addresses, how they are dialled and whether
+their certificates are checked, the bootstrap that finds them, and the routes -
+because an answer from one the file no longer names, or for a zone now routed
+somewhere else, is not what the new configuration would have asked for. Not how
+long they are waited on or in what order, which change nothing about an answer
+once it has arrived. `dnssec`, because validation and the anchors it starts from
+run before the answer is stored and not when it is served; `rebind`, for the
+same reason. And the lifetimes the cache stamps on an entry when it stores it.
+
+Not the blocking rules, which the filter engine's own generation already covers
+(see `rules_generation`), and not the rewrites, the reserved names or the
+access list, which are all answered ahead of the cache. Each flush is a cold
+cache for every client, so a reload that only retunes a timeout does not pay
+for one.
+*/
+@(private)
+policy_changed :: proc(prev, cfg: ^config.Config) -> bool {
+	return(
+		upstreams_asked_changed(prev.upstream, cfg.upstream) ||
+		differs(prev.dnssec, cfg.dnssec) ||
+		differs(prev.rebind, cfg.rebind) ||
+		prev.cache.min_ttl != cfg.cache.min_ttl ||
+		prev.cache.max_ttl != cfg.cache.max_ttl ||
+		prev.cache.negative_ttl != cfg.cache.negative_ttl \
+	)
+}
+
+@(private)
+upstreams_asked_changed :: proc(a, b: config.Upstream_Config) -> bool {
+	if differs(a.servers, b.servers) || differs(a.bootstrap, b.bootstrap) || len(a.zones) != len(b.zones) {
+		return true
+	}
+	for zone, i in a.zones {
+		other := b.zones[i]
+		if differs(zone.domains, other.domains) ||
+		   differs(zone.upstream.servers, other.upstream.servers) ||
+		   differs(zone.upstream.bootstrap, other.upstream.bootstrap) {
+			return true
+		}
+	}
+	return false
+}
+
+/*
+Put the first generation into effect, from the configuration the process was
+started with. The caller keeps `cfg` for as long as the server runs.
+*/
+boot_generation :: proc(s: ^Server, cfg: ^config.Config) -> bool {
+	g := new(Generation)
+	g.cfg = cfg
+	built, ok := build_live(s, &g.live, nil)
+	if !ok {
+		free(g)
+		return false
+	}
+	g.owns = built
+	s.gens.boot = cfg
+	sync.atomic_store(&s.gens.current, g)
+	return true
+}
+
+/*
+Make `g` current and retire the generation it replaces.
+
+`carried` is what `g` took from the one it replaces rather than building, and
+the duty to release it goes with it. Nothing older can still be using any of it
+once the one it replaces is released, because generations are released oldest
+first (`reap_generations`).
+*/
+@(private)
+swap_generation :: proc(s: ^Server, g: ^Generation, carried: Parts) {
+	sync.rw_mutex_lock(&s.gens.mu)
+	old := s.gens.current
+	sync.atomic_store(&s.gens.current, g)
+	sync.rw_mutex_unlock(&s.gens.mu)
+
+	g.owns += old.owns & carried
+	old.owns -= carried
+
+	tail := &s.gens.retired
+	for tail^ != nil {
+		tail = &tail^.next
+	}
+	tail^ = old
+}
+
+/*
+Release every retired generation nothing is using any more, oldest first.
+
+Oldest first, and stopping at the first one still in use: a part is handed from
+one generation to the next, so a newer generation can own something an older one
+is still reading, and releasing it first would free that under the older one's
+requests.
+
+In use means a request still pinned to it, or a race worker still asking one of
+its upstreams - those outlive the request that started them. No new pin can
+reach a retired generation, so a count that reads zero here stays zero.
+*/
+reap_generations :: proc(s: ^Server) -> (released: int) {
+	for s.gens.retired != nil {
+		g := s.gens.retired
+		if sync.atomic_load(&g.refs) > 0 || generation_racing(g) {
+			break
+		}
+		s.gens.retired = g.next
+		destroy_generation(g)
+		released += 1
+	}
+	return
+}
+
+@(private)
+generation_racing :: proc(g: ^Generation) -> bool {
+	if .Upstreams not_in g.owns {
+		return false
+	}
+	if upstream.busy(g.group) {
+		return true
+	}
+	for route in g.routes {
+		if upstream.busy(route.group) {
+			return true
+		}
+	}
+	return false
+}
+
+@(private)
+destroy_generation :: proc(g: ^Generation) {
+	release_parts(&g.live, g.owns)
+	if g.arena != nil {
+		virtual.arena_destroy(g.arena)
+		free(g.arena)
+	}
+	free(g)
+}
+
+/*
+Release every generation, current and retired, at shutdown.
+
+Only once nothing can be using any of them: the listeners are stopped and both
+pools drained.
+*/
+destroy_generations :: proc(s: ^Server) {
+	for s.gens.retired != nil {
+		g := s.gens.retired
+		s.gens.retired = g.next
+		destroy_generation(g)
+	}
+	if s.gens.current != nil {
+		destroy_generation(s.gens.current)
+		s.gens.current = nil
+	}
+}

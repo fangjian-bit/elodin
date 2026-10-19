@@ -196,7 +196,7 @@ cloaked_chain_target :: proc(
 	target: string,
 	verdict: Cloak_Verdict,
 ) {
-	if !s.cfg.blocking.enabled || s.filters == nil || len(answer) == 0 {
+	if !live(s).cfg.blocking.enabled || s.filters == nil || len(answer) == 0 {
 		return "", .Clear
 	}
 
@@ -495,5 +495,5 @@ not as a claim that reload exists.
 */
 @(private)
 cloak_refusal_stands :: proc(s: ^Server) -> bool {
-	return s.cfg.blocking.enabled && s.filters != nil
+	return live(s).cfg.blocking.enabled && s.filters != nil
 }

@@ -279,16 +279,44 @@ Options :: struct {
 make_cache :: proc(opts: Options, allocator := context.allocator) -> ^Cache {
 	c := new(Cache, allocator)
 	c.allocator = allocator
+	apply_options(c, opts)
+	c.entries = make(map[string]^Entry, max(opts.max_entries, 16), allocator)
+	return c
+}
+
+/*
+Take new limits and lifetimes in place, keeping what is stored.
+
+A configuration reload that changes the `cache` section lands here rather than
+on a new cache, so the answers already held survive it. Smaller limits evict
+down to themselves now rather than at the next insert, which on a quiet server
+could be a while. A lifetime applies to answers stored from here on: the ones
+already held keep the one they were stored with, and the caller that needs them
+judged afresh moves its policy number instead (see `make_key`).
+*/
+reconfigure :: proc(c: ^Cache, opts: Options) {
+	if c == nil {
+		return
+	}
+	sync.mutex_lock(&c.mu)
+	defer sync.mutex_unlock(&c.mu)
+	apply_options(c, opts)
+	for (len(c.entries) > c.max_entries || c.bytes > c.max_bytes) && c.tail != nil {
+		remove_entry(c, c.tail)
+		c.stats.evictions += 1
+	}
+}
+
+@(private)
+apply_options :: proc(c: ^Cache, opts: Options) {
 	c.max_entries = max(opts.max_entries, 1)
 	c.max_bytes = opts.max_bytes if opts.max_bytes > 0 else DEFAULT_MAX_BYTES
 	c.min_ttl = opts.min_ttl
-	c.max_ttl = opts.max_ttl if opts.max_ttl > 0 else 86400
+	sync.atomic_store(&c.max_ttl, opts.max_ttl if opts.max_ttl > 0 else 86400)
 	c.negative_ttl = opts.negative_ttl
 	c.serve_stale = opts.serve_stale
 	c.prefetch = opts.prefetch
 	c.prefetch_min = time.Duration(opts.prefetch_min_ttl) * time.Second
-	c.entries = make(map[string]^Entry, max(opts.max_entries, 16), allocator)
-	return c
 }
 
 destroy :: proc(c: ^Cache) {
@@ -302,8 +330,9 @@ destroy :: proc(c: ^Cache) {
 	free(c, c.allocator)
 }
 
-// Longest key we build on the stack: a presentation name plus type/class/flags.
-KEY_MAX :: 1024 + 8
+// Longest key we build on the stack: a presentation name plus type/class/flags
+// and the policy number.
+KEY_MAX :: 1024 + 16
 
 /*
 Build a lookup key for a question.
@@ -342,6 +371,14 @@ expired answer `serve_stale` is holding for that name - and the two are wanted a
 once. The verdict is what the next minute of queries is answered with; the
 expired answer is what covers the upstream being down after that minute runs
 out. See `server.remember_bogus_verdict`.
+
+`policy` is not part of the question either. It is the caller's number for the
+rules an answer was judged by before it was stored - which upstream asked,
+whether it was validated, whether rebind protection looked at it - and an entry
+stored under one number is never found under another. A configuration reload
+that changes those rules moves the number, and the answers judged under the old
+ones stop being served at once, including one a request still in flight under
+the old rules stores after the reload. See `server.Live.policy`.
 */
 make_key :: proc(
 	buf: []u8,
@@ -351,9 +388,10 @@ make_key :: proc(
 	dnssec_ok: bool,
 	checking_disabled := false,
 	verdict := false,
+	policy: u64 = 0,
 ) -> string {
 	n := 0
-	limit := len(buf) - 8
+	limit := len(buf) - 15
 	for i in 0 ..< len(name) {
 		if n >= limit {
 			break
@@ -369,7 +407,10 @@ make_key :: proc(
 	buf[n + 4] = 1 if dnssec_ok else 0
 	buf[n + 5] = 1 if checking_disabled else 0
 	buf[n + 6] = 1 if verdict else 0
-	return string(buf[:n + 7])
+	for i in 0 ..< 8 {
+		buf[n + 7 + i] = u8(policy >> uint(56 - 8 * i))
+	}
+	return string(buf[:n + 15])
 }
 
 /*
@@ -760,7 +801,8 @@ ttl_ceiling :: proc(c: ^Cache) -> u32 {
 	if c == nil {
 		return dns.TTL_MAX
 	}
-	return c.max_ttl
+	// Atomic, being read outside the lock that `reconfigure` writes it under.
+	return sync.atomic_load(&c.max_ttl)
 }
 
 /*

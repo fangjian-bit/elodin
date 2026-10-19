@@ -248,7 +248,7 @@ start_refresh :: proc(
 
 	sync.mutex_lock(&s.refreshes.mu)
 	free_slot := -1
-	live := 0
+	in_flight := 0
 	for i in 0 ..< REFRESH_SLOTS {
 		held := s.refreshes.slots[i]
 		if held == nil {
@@ -257,7 +257,7 @@ start_refresh :: proc(
 			}
 			continue
 		}
-		live += 1
+		in_flight += 1
 		// Already being refreshed. The keys are the cache's own, so this is the
 		// same question with the same DO and CD bits and nothing else.
 		if held.key == key {
@@ -265,7 +265,7 @@ start_refresh :: proc(
 			return nil
 		}
 	}
-	if free_slot < 0 || live >= ceiling {
+	if free_slot < 0 || in_flight >= ceiling {
 		sync.mutex_unlock(&s.refreshes.mu)
 		return nil
 	}
@@ -287,7 +287,7 @@ start_refresh :: proc(
 	s.refreshes.slots[free_slot] = r
 	sync.mutex_unlock(&s.refreshes.mu)
 
-	if pool.try_submit(s.handler_pool, refresh_job, r, s.cfg.server.max_pending) != .Accepted {
+	if pool.try_submit(s.handler_pool, refresh_job, r, live(s).cfg.server.max_pending) != .Accepted {
 		/*
 		The backlog is full or the pool is stopping, so nothing will run this.
 		The table's reference, the job's and the caller's all go here - the
@@ -423,9 +423,11 @@ refresh_job :: proc(data: rawptr) {
 	may read it after the frame this was built in is gone.
 	*/
 	s := r.server
+	// Before the deferred block below, so it is still pinned when that runs.
+	pin_scope(s)
 	prefetching = r.prefetch
 	if r.prefetch {
-		cache.note_prefetch(s.answers)
+		cache.note_prefetch(live(s).answers)
 	}
 	defer {
 		/*
@@ -433,8 +435,8 @@ refresh_job :: proc(data: rawptr) {
 		and still leave nothing to store, and then the old entry is what the
 		next client meets, and what it will meet until it expires.
 		*/
-		if r.prefetch && !cache.renewed(s.answers, r.key, r.serial) {
-			cache.note_prefetch_failed(s.answers)
+		if r.prefetch && !cache.renewed(live(s).answers, r.key, r.serial) {
+			cache.note_prefetch_failed(live(s).answers)
 		}
 		prefetching = false
 		finish_refresh(r)
@@ -460,7 +462,7 @@ refresh_job :: proc(data: rawptr) {
 	be a value read on one thread and used on another for no gain; this is a
 	hash of eight bytes.
 	*/
-	cookie := inspect_cookie(s.cookies, msg, r.client)
+	cookie := inspect_cookie(live(s).cookies, msg, r.client)
 
 	unanswered: bool
 	ede: u16

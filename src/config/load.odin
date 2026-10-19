@@ -2954,7 +2954,8 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 		)
 	}
 	if cfg.server.max_pending == 0 {
-		cfg.server.max_pending = cfg.server.workers * 8
+		cfg.server.max_pending = derive_max_pending(cfg.server.workers)
+		cfg.server.sizing.derived_max_pending = true
 	}
 	/*
 	The table itself, refused rather than clamped.

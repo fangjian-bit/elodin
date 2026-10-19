@@ -137,7 +137,7 @@ It covers:
 - blocklist downloads and their cache directory
 - DNSSEC refusal and the CD bypass, the reserved-name table with each key,
   cookies in both directions
-- certificate reload over `SIGHUP`, the metrics endpoint
+- certificate and configuration reload over `SIGHUP`, the metrics endpoint
 
 `src/itest/fixtures.odin` holds real DNS responses captured from a public
 resolver, including compression pointers, DNSSEC records and types the codec

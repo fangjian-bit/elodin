@@ -112,6 +112,7 @@ Sizing :: struct {
 	derived_chain_walks:      bool,
 	derived_connection_walks: bool,
 	derived_udp_readers:      bool,
+	derived_max_pending:      bool,
 }
 
 /*
@@ -258,6 +259,12 @@ upstreams is known.
 */
 derive_chain_walks :: proc(threads: int) -> int {
 	return max(threads - max(threads / RESERVED_HANDLERS_SHARE, MIN_RESERVED_HANDLERS), 1)
+}
+
+// `server.max_pending` where the file leaves it unset: eight queued queries per
+// handler worker.
+derive_max_pending :: proc(workers: int) -> int {
+	return workers * 8
 }
 
 // What this process can see of the machine, at the moment it asks.

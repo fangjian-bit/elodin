@@ -94,7 +94,7 @@ H2_Job :: struct {
 h2_begin :: proc(user: rawptr, starts_frame: bool) {
 	ctx := cast(^H2_Context)user
 	ctx.budget = Read_Budget {
-		idle = ctx.server.cfg.server.client_timeout,
+		idle = client_timeout(ctx.server),
 	}
 	// A deadline that has already passed is a budget with nothing left, so the
 	// read this begins fails and `h2.serve` ends the connection. Only where a
@@ -130,7 +130,7 @@ serve_doh2 :: proc(s: ^Server, conn: ^tlsx.Conn, client: string, peer: net.Endpo
 		conn          = conn,
 		client        = client,
 		peer          = peer,
-		path          = s.cfg.listeners.doh.path,
+		path          = startup_config(s).listeners.doh.path,
 		last_question = time.tick_now(),
 	}
 
@@ -144,7 +144,7 @@ serve_doh2 :: proc(s: ^Server, conn: ^tlsx.Conn, client: string, peer: net.Endpo
 	// A response waits no longer for flow-control credit than the connection
 	// waits for anything else, so a client that stops reading cannot hold a
 	// query worker past its welcome.
-	hc.write_timeout = s.cfg.server.client_timeout
+	hc.write_timeout = client_timeout(s)
 
 	h2.serve(hc)
 	// `ctx` and the TLS connection live in this frame, so every handler must be
@@ -156,6 +156,8 @@ serve_doh2 :: proc(s: ^Server, conn: ^tlsx.Conn, client: string, peer: net.Endpo
 @(private)
 h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 	ctx := cast(^H2_Context)hc.user
+	// For the charge and the queueing below, which wait on nothing.
+	pin_scope(ctx.server)
 
 	/*
 	Charged before the request is queued, which is the order the UDP loop charges
@@ -180,11 +182,11 @@ h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 	and telling them apart would be the base64 decode the note above avoids.
 	*/
 	now := time.tick_now()
-	asked := ctx.server.limiter == nil || h2_charged(ctx, req)
+	asked := live(ctx.server).limiter == nil || h2_charged(ctx, req)
 	if asked {
 		sync.atomic_store(&ctx.last_question._nsec, now._nsec)
 	}
-	if ctx.server.limiter != nil && asked && !stream_rate_check(ctx.server.limiter, ctx.peer, now) {
+	if live(ctx.server).limiter != nil && asked && !stream_rate_check(live(ctx.server).limiter, ctx.peer, now) {
 		h2_rate_limited(ctx, hc, req)
 		return
 	}
@@ -222,7 +224,7 @@ h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 		ctx.server.handler_pool,
 		h2_job,
 		job,
-		ctx.server.cfg.server.max_pending,
+		live(ctx.server).cfg.server.max_pending,
 	) {
 	case .Accepted:
 	case .Full:
@@ -279,7 +281,7 @@ h2_shed :: proc(ctx: ^H2_Context, hc: ^h2.Conn, req: ^h2.Request) {
 	logx.debugf(
 		"doh/h2: shedding a request from %s, server.max_pending (%d) is reached",
 		ctx.client,
-		ctx.server.cfg.server.max_pending,
+		live(ctx.server).cfg.server.max_pending,
 	)
 	h2.respond(hc, req.stream_id, h2.Response{status = 503})
 	h2.request_destroy(hc, req)
@@ -457,7 +459,7 @@ build_h2_response :: proc(
 ) {
 	path, _ := h2_split_path(req.path)
 
-	mc_path := ctx.server.cfg.listeners.doh.mobileconfig_path
+	mc_path := startup_config(ctx.server).listeners.doh.mobileconfig_path
 	if mc_path != "" && path == mc_path {
 		return build_h2_mobileconfig(ctx, req)
 	}

@@ -103,7 +103,7 @@ apply_reverse_rewrite :: proc(
 	response: []u8,
 	matched: bool,
 ) {
-	if len(s.cfg.rewrites) == 0 {
+	if len(live(s).cfg.rewrites) == 0 {
 		return nil, false
 	}
 	/*
@@ -140,7 +140,7 @@ apply_reverse_rewrite :: proc(
 	if covered_by_local_anchor(s, q.name) {
 		return nil, false
 	}
-	domain, ttl, found := reverse_rewrite_target(s.cfg.rewrites, q.name)
+	domain, ttl, found := reverse_rewrite_target(live(s).cfg.rewrites, q.name)
 	if !found {
 		return nil, false
 	}
