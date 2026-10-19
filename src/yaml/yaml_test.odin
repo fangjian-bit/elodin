@@ -160,6 +160,22 @@ test_duration_forms :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
+// A sum too large to hold saturates rather than wrapping into a small figure
+// that a caller's ceiling would let through (#499).
+@(test)
+test_an_overflowing_duration_saturates :: proc(t: ^testing.T) {
+	root, err := parse(
+		"a: 99999999999999999999h99999999999999999999h5s\nb: 6148914692903184us6148914692903184us6148914692903184us\n",
+		context.temp_allocator,
+	)
+	testing.expectf(t, err == nil, "parse failed: %v", err)
+	for key in ([]string{"a", "b"}) {
+		v, ok := as_duration(get(root, key))
+		testing.expectf(t, ok && v == max(time.Duration), "%s read %v, %v", key, v, ok)
+	}
+	free_all(context.temp_allocator)
+}
+
 @(test)
 test_byte_size_forms :: proc(t: ^testing.T) {
 	Case :: struct {

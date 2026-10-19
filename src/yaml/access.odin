@@ -234,7 +234,15 @@ as_duration :: proc(n: ^Node) -> (time.Duration, bool) {
 		case:
 			return 0, false
 		}
-		total += time.Duration(value * scale)
+		// Saturating, so a figure too large to hold reads as the largest there is
+		// and fails a caller's ceiling, rather than wrapping round into a small
+		// one that passes it.
+		part := value * scale
+		if part >= f64(max(time.Duration)) || time.Duration(part) > max(time.Duration) - total {
+			total = max(time.Duration)
+		} else {
+			total += time.Duration(part)
+		}
 		saw_any = true
 	}
 	return total, saw_any

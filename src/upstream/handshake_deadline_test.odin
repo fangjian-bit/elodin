@@ -141,3 +141,14 @@ test_an_expired_deadline_is_a_millisecond_on_the_socket :: proc(t: ^testing.T) {
 		testing.expectf(t, tv.tv_sec == 0 && tv.tv_usec == 1000, "%v reads %ds %dus", option, tv.tv_sec, tv.tv_usec)
 	}
 }
+
+// A positive timeout never reaches the socket as zero, which is no timeout at
+// all: a deadline met exactly, or already gone, leaves a millisecond (#499).
+@(test)
+test_what_is_left_of_a_stream_deadline_is_never_zero :: proc(t: ^testing.T) {
+	now := time.tick_now()
+	testing.expect_value(t, stream_time_left(time.Second, now, now), time.Millisecond)
+	testing.expect_value(t, stream_time_left(time.Second, time.tick_add(now, -time.Second), now), time.Millisecond)
+	testing.expect_value(t, stream_time_left(time.Second, time.tick_add(now, 300 * time.Millisecond), now), 300 * time.Millisecond)
+	testing.expect_value(t, stream_time_left(0, now, now), time.Duration(0))
+}

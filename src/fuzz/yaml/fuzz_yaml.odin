@@ -13,6 +13,32 @@ fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
 	context = harness.setup(&f)
 	defer harness.teardown(&f)
 
-	_, _ = yaml.parse(string(data[:size]))
+	root, _ := yaml.parse(string(data[:size]))
+	read_scalars(root)
 	return 0
+}
+
+/*
+Every scalar through every reader the loader uses on one, which is where a
+figure written in the file becomes a number. A duration is never negative: the
+parser takes no sign, and parts too large to hold saturate rather than wrap
+round, so one that comes back negative is a wrapped sum - a figure that could
+equally have wrapped into a small one and passed a caller's bounds.
+*/
+read_scalars :: proc(n: ^yaml.Node) {
+	if n == nil {
+		return
+	}
+	_, _ = yaml.as_bool(n)
+	_, _ = yaml.as_int(n)
+	_, _ = yaml.as_bytes(n)
+	if d, ok := yaml.as_duration(n); ok {
+		assert(d >= 0, "a duration read negative")
+	}
+	for child in n.seq {
+		read_scalars(child)
+	}
+	for _, child in n.fields {
+		read_scalars(child)
+	}
 }
