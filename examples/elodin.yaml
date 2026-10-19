@@ -250,7 +250,7 @@ upstream:
   # round_robin  the same, but the starting point rotates per query
   # race         ask every server at once, take the first answer
   strategy: failover
-  timeout: 5s
+  timeout: 5s          # per exchange, 1ms to 24h; a query gets two of it
   attempts: 2
   max_idle: 8          # pooled idle connections per DoH (HTTP/1.1) upstream
   idle_timeout: 30s
