@@ -325,10 +325,10 @@ upstream:
   # validates. trust_anchors also replaces the built-in root keys rather than
   # adding to them, so list the root DS alongside your own.
   #
-  # What does not follow a route is the DNSSEC chain walk - DS and DNSKEY for
-  # the zones above a name always go to the servers above, because a server
-  # authoritative for a zone answers DS queries inside it from its own data and
-  # that breaks the chain instead of completing it.
+  # What does not follow a route, outside an anchored zone, is the DNSSEC chain
+  # walk - DS and DNSKEY for the zones above a name go to the servers above,
+  # because a server authoritative for a zone answers DS queries inside it from
+  # its own data and that breaks the chain instead of completing it.
   #
   # Careful if you are coming from dnsmasq: server=/corp.example/10.0.0.1 under
   # blocking.rules is discarded rather than routing the zone, and

@@ -51,7 +51,6 @@ dnssec: {{ enabled: false }}
 
 // The info-code of the extended error a response carries (RFC 8914), or -1 if
 // it has none.
-@(private = "file")
 extended_error :: proc(r: ^Runner, wire: []u8) -> int {
 	msg, ok := decode_reply(r, wire)
 	if !ok {

@@ -100,8 +100,10 @@ Zone_Route :: struct {
 /*
 How long one client question for `name` may spend waiting on upstreams, from its
 first exchange (issue #439): the longest `upstream.query_budget` of the groups
-it can ask - where it goes, the zone's own route for an apex `DS`, and the
-default group, which every chain lookup asks.
+it can ask - where it goes, the zone's own route for an apex `DS`, the default
+group, which every chain lookup outside an anchored zone asks, and inside one
+the route of each name from the anchor down, which is where `validator_query`
+sends the walk's lookups there.
 
 The longest rather than that of whichever group a question asks first, because
 one question can ask several: a LAN route's 200 ms forward would otherwise leave
@@ -116,6 +118,11 @@ runs - it is two of them, the figure #327 set for one group.
 question_span :: proc(s: ^Server, name: string, type: dns.Type) -> (span: time.Duration) {
 	for g in ([]^upstream.Group{s.group, route_group(s, name, type), zone_route_group(s, name)}) {
 		if g != nil {
+			span = max(span, upstream.query_budget(g))
+		}
+	}
+	for n := name; covered_by_local_anchor(s, n); n = dns.name_parent(n) {
+		if g := zone_route_group(s, n); g != nil {
 			span = max(span, upstream.query_budget(g))
 		}
 	}
@@ -653,13 +660,12 @@ The window is the whole of it wherever the route's answer can be served, and an
 anchor over the zone is where it cannot. A routed zone is served insecure - that
 is what `served_locally` does, and what this memory bets on when it lets the
 route's unsigned NODATA stand in for the parent's signed proof - unless the
-operator anchored the zone themselves, which is a request to hold exactly these
-names to the public chain. The route has no signatures to offer that chain, so
-its answer there is a Bogus verdict and a SERVFAIL rather than a stand-in, and a
-memory would spend a whole cooldown of them while the parent was healthy and
-holding what the client asked for. `routes.odin`'s summary of anchoring a routed
-zone - an insecure answer traded for SERVFAIL - is what that operator asked for,
-and this must not make the trade for them ten seconds at a time.
+operator anchored the zone themselves, which is a request to validate these
+names. The apex `DS` is still the parent's to answer and is read against the
+parent's chain, which the route has no signatures to offer, so its answer there
+is a Bogus verdict and a SERVFAIL rather than a stand-in, and a memory would
+spend a whole cooldown of them while the parent was healthy and holding what the
+client asked for.
 
 `covered_by_local_anchor` rather than `resolve_query`'s `validating`, which is
 the same fact for an ordinary query and not for every query. `validating` also

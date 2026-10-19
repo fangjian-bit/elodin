@@ -95,9 +95,9 @@ start_validator :: proc(s: ^Server) -> bool {
 	every answer goes out unvalidated: no AD bit anywhere and no SERVFAIL
 	either, which is the failure a validating resolver exists to not have. No
 	root anchor at all leaves `zone_keys` with nothing to match, which is
-	`Indeterminate` and SERVFAILs every name outside the anchored zones instead. Neither is a server worth
-	starting; an operator who does want unvalidated answers has
-	`dnssec.enabled: false` to ask for them with.
+	`Indeterminate` and SERVFAILs every name outside the anchored zones instead.
+	Neither is a server worth starting; an operator who does want unvalidated
+	answers has `dnssec.enabled: false` to ask for them with.
 	*/
 	in_use := anchors if len(anchors) > 0 else dnssec.root_anchors()
 	if !dnssec.usable_anchor(in_use, ".") {

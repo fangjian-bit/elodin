@@ -58,7 +58,8 @@ budget covers the whole question — the forward, the DNSSEC chain lookups, and
 both groups a routed apex `DS` asks — counted from its first exchange; a lookup
 that finds none left asks nobody. A rewrite alias's target is a lookup of its
 own, with a budget of its own. With routes of different `timeout`s, the budget
-is two of the longest among the question's route and the default group.
+is two of the longest among the question's route, the default group and, inside
+an anchored zone, the routes between the anchor and the name.
 
 Within it, a dead first server hands over to the second, which gets its full
 `timeout`; a third waits for the next query. A SERVFAIL, REFUSED or referral reply sends
@@ -266,9 +267,11 @@ so a route is how a reverse zone reaches your router.
 
 ### DS at a route's apex
 
-The DNSSEC chain walk's own `DS` and `DNSKEY` lookups always go to
-`upstream.servers`, never down a route: a local server answers `DS` for its zone
-from its own data, which breaks the chain.
+The DNSSEC chain walk's own `DS` and `DNSKEY` lookups go to
+`upstream.servers`, not down a route: a local server answers `DS` for its zone
+from its own data, which breaks the chain. The exception is a zone covered by a
+[`trust_anchors`](dnssec.md#trust-anchors) entry, where the walk starts at the
+anchor and asks the route's servers for the zone's own keys.
 
 A client's `DS` query for a route's apex (say `home.arpa DS`) is the one question
 about a routed zone that goes to the parent's upstreams — `upstream.servers`, or

@@ -246,15 +246,17 @@ run_dnssec_cases :: proc(r: ^Runner) {
 		anchored by no one - still bypasses and is served.
 
 		A second server anchors the zone with a key it does not publish, and
-		that is SERVFAIL: the anchor is what decides, not the public tree.
+		that is SERVFAIL with DNSSEC Bogus (EDE 6) rather than No Reachable
+		Authority: the walk reached the zone and the anchor decided it.
 		*/
 		for c in ([]struct {
 				anchor:   string,
 				rcode:    dns.Rcode,
 				ad:       bool,
+				ede:      int,
 			}{
-				{ANCHORED_REVERSE_ANCHOR, .No_Error, true},
-				{"168.192.in-addr.arpa. IN DS 18109 15 2 0000000000000000000000000000000000000000000000000000000000000000", .Serv_Fail, false},
+				{ANCHORED_REVERSE_ANCHOR, .No_Error, true, -1},
+				{"168.192.in-addr.arpa. IN DS 18109 15 2 0000000000000000000000000000000000000000000000000000000000000000", .Serv_Fail, false, 6},
 			}) {
 			anchored_port := next_port(r)
 			config := fmt.tprintf(
@@ -290,6 +292,7 @@ special_use: {{private_reverse: false}}
 				h := parse_header(r, covered.wire)
 				check_eq_int(r, h.rcode, int(c.rcode), "rcode for an anchored private name")
 				check(r, (len(covered.wire) >= 4 && covered.wire[3] & 0x20 != 0) == c.ad, "AD for an anchored private name: want %v", c.ad)
+				check_eq_int(r, extended_error(r, covered.wire), c.ede, "extended DNS error for an anchored private name")
 			}
 
 			uncovered := query_udp(anchored_port, build_query("1.1.10.in-addr.arpa.", u16(dns.Type.PTR)))

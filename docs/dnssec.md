@@ -23,8 +23,9 @@ DNSSEC records, such as an ISP or captive-portal resolver; against one of those
 every signed zone would stop resolving.
 
 As a forwarder, elodin fetches what it validates against: every DS and DNSKEY
-down from the root, through the configured upstreams, with DO and CD set. Zone
-keys are cached, so the cost falls on the first query into a zone.
+down from the root, or from the closest trust anchor, through the configured
+upstreams, with DO and CD set. Zone keys are cached, so the cost falls on the
+first query into a zone.
 
 ## What is checked
 
