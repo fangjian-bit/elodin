@@ -34,9 +34,9 @@ rewritten in place on each hit.
 - A TTL with its top bit set is read as zero (RFC 2181 section 8), forwarded
   answers included, so it is uncacheable unless `min_ttl` raises it.
 - **Signed answers.** An entry carrying RRSIGs, in any section, is kept no longer
-  than the first of them stays valid, and no copy is told a longer TTL; `min_ttl`
-  does not extend it. One whose signature has already expired is not kept
-  (RFC 4034 section 3.1.5).
+  than the first of them stays valid, and no copy, fresh, stale or forwarded, is
+  told a longer TTL. `min_ttl` extends neither. One whose signature has already
+  expired is not kept (RFC 4034 section 3.1.5).
 
 ## Prefetching
 

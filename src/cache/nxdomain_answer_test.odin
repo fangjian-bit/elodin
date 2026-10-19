@@ -163,8 +163,7 @@ test_nxdomain_after_a_cname_is_cached_for_an_rrsig_question :: proc(t: ^testing.
 	// asked about. Its expiration, at offset 8, is read too - an entry is not
 	// kept past it - so it is set a day ahead.
 	sig := make([]u8, 24, context.temp_allocator)
-	expiration := u32(time.time_to_unix(time.now())) + 86400
-	sig[8], sig[9], sig[10], sig[11] = u8(expiration >> 24), u8(expiration >> 16), u8(expiration >> 8), u8(expiration)
+	dns.write_ttl_at(sig, 8, u32(time.time_to_unix(time.now())) + 86400)
 	answer[1] = dns.Record {
 		name  = "www.example.com.",
 		type  = .RRSIG,

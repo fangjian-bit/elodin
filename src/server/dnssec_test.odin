@@ -70,9 +70,8 @@ rrsig_over :: proc(covered: dns.Type) -> dns.Rdata_Raw {
 	// signatures (#165) keeps this one: expiration a day ahead, inception a day
 	// behind.
 	now := u32(time.time_to_unix(time.now()))
-	for v, i in ([2]u32{now + 86400, now - 86400}) {
-		rdata[8 + 4 * i], rdata[9 + 4 * i], rdata[10 + 4 * i], rdata[11 + 4 * i] = u8(v >> 24), u8(v >> 16), u8(v >> 8), u8(v)
-	}
+	dns.write_ttl_at(rdata, 8, now + 86400)
+	dns.write_ttl_at(rdata, 12, now - 86400)
 	copy(rdata[18:], name_buf[:n])
 	return dns.Rdata_Raw{data = rdata}
 }

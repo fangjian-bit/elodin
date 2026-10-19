@@ -455,6 +455,10 @@ get :: proc(
 		// set a ceiling below thirty seconds meant it, and the fixed figure is
 		// there to bring the client back soon rather than to be a floor.
 		stale_ttl := min(u32(STALE_TTL), c.max_ttl)
+		// And no longer than its signatures have left: `deadline` keeps the
+		// stale window inside them, and the figure a copy carries stays there
+		// too (RFC 4034 section 3.1.5).
+		stale_ttl = min(stale_ttl, signature_left(e, now))
 		for off in e.ttl_offsets {
 			dns.write_ttl_at(out, off, stale_ttl)
 		}
@@ -471,7 +475,9 @@ get :: proc(
 		}
 		hit.stale = true
 	} else {
-		dns.patch_ttls(out, e.ttl_offsets, e.ttls, elapsed, c.min_ttl)
+		// `min_ttl` floors what records claim, not what their signatures allow
+		// (RFC 4034 section 3.1.5): no copy is told to hold one past it.
+		dns.patch_ttls(out, e.ttl_offsets, e.ttls, elapsed, min(c.min_ttl, signature_left(e, now)))
 		if !probe {
 			c.stats.hits += 1
 		}
@@ -1268,6 +1274,16 @@ behind.
 
 The caller holds the lock.
 */
+// Whole seconds before the entry's first RRSIG expires, or no bound for an
+// entry that carries none.
+@(private)
+signature_left :: proc(e: ^Entry, now: time.Time) -> u32 {
+	if e.signed_until == {} {
+		return max(u32)
+	}
+	return u32(max(0, time.duration_seconds(time.diff(now, e.signed_until))))
+}
+
 @(private)
 deadline :: proc(c: ^Cache, e: ^Entry) -> time.Time {
 	if !c.serve_stale || e.bogus {

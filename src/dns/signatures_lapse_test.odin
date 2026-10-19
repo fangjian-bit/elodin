@@ -9,7 +9,7 @@ import "core:testing"
 sl_rrsig :: proc(expiration: u32, rdlength := 24) -> Record {
 	d := make([]u8, rdlength, context.temp_allocator)
 	if rdlength >= 12 {
-		d[8], d[9], d[10], d[11] = u8(expiration >> 24), u8(expiration >> 16), u8(expiration >> 8), u8(expiration)
+		write_ttl_at(d, 8, expiration)
 	}
 	return {name = "example.com.", type = .RRSIG, class = .IN, ttl = 300, data = Rdata_Raw{data = d}}
 }

@@ -21,18 +21,16 @@ RX_QNAME :: "signed.stale.example."
 // The answer the mock serves, its RRSIG lapsing at `expiration`.
 @(private = "file")
 rx_answer :: proc(expiration: u32) -> []u8 {
-	be := proc(v: u32) -> [4]u8 {return {u8(v >> 24), u8(v >> 16), u8(v >> 8), u8(v)}}
-	exp, inc := be(expiration), be(expiration - 86400)
-	sig := make([dynamic]u8, 0, 48, context.allocator)
-	append(&sig, 0, 1, 13, 3, 0, 0, 0x0e, 0x10)
-	append(&sig, ..exp[:])
-	append(&sig, ..inc[:])
-	append(&sig, 0x12, 0x34, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0, 0xde, 0xad, 0xbe, 0xef)
+	sig := make([]u8, 31, context.allocator)
+	copy(sig, []u8{0, 1, 13, 3, 0, 0, 0x0e, 0x10})
+	dns.write_ttl_at(sig, 8, expiration)
+	dns.write_ttl_at(sig, 12, expiration - 86400) // inception
+	copy(sig[16:], []u8{0x12, 0x34, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0, 0xde, 0xad, 0xbe, 0xef})
 	question := make([]dns.Question, 1, context.allocator)
 	question[0] = {name = RX_QNAME, type = .A, class = .IN}
 	answer := make([]dns.Record, 2, context.allocator)
 	answer[0] = {name = RX_QNAME, type = .A, class = .IN, ttl = 3600, data = dns.Rdata_A{addr = {203, 0, 113, 65}}}
-	answer[1] = {name = RX_QNAME, type = .RRSIG, class = .IN, ttl = 3600, data = dns.Rdata_Raw{data = sig[:]}}
+	answer[1] = {name = RX_QNAME, type = .RRSIG, class = .IN, ttl = 3600, data = dns.Rdata_Raw{data = sig}}
 	m := dns.Message {
 		id       = 0x1650,
 		question = question,
