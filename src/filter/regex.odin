@@ -116,8 +116,7 @@ regex_add :: proc(s: ^Set, pattern: string, types := ANY_TYPE) -> (stored: bool)
 	merge_buf: [2 * MAX_RULE_TYPES]u16
 	if held, found := s.regex_held[pattern]; found {
 		merged := type_union(held^, types, merge_buf[:]) or_return
-		id := type_intern(s, merged)
-		held^ = s.filters[id]
+		held^ = type_keep(s, merged) or_return
 		return true
 	}
 	if s.regex_scratch.curr_block == nil && virtual.arena_init_growing(&s.regex_scratch) != nil {
@@ -167,11 +166,11 @@ regex_add :: proc(s: ^Set, pattern: string, types := ANY_TYPE) -> (stored: bool)
 		s.regex_refused += 1
 		return false
 	}
+	kept_types := type_keep(s, types) or_return
 	re := regex_copy(trial, s.allocator)
 	shortcut := strings.clone(regex_shortcut(pattern, temp), s.allocator)
 	held := new(Type_Filter, s.allocator)
-	id := type_intern(s, types)
-	held^ = s.filters[id]
+	held^ = kept_types
 	kept := Regex_Rule{strings.clone(pattern, s.allocator), re, cost, shortcut, held}
 	append(&s.regexes, kept)
 	s.regex_held[kept.pattern] = held

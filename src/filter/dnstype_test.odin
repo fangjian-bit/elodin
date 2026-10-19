@@ -285,6 +285,28 @@ test_a_dnstype_rule_costs_little_more_than_a_plain_one :: proc(t: ^testing.T) {
 	testing.expect_value(t, engine_match(e, "sink-7.bench.invalid.", .A), Decision.None)
 }
 
+/*
+Every step a name's filter takes stays interned, so a list adding one type at a
+time to each name, on distinct types, makes a filter per rule. The set keeps
+MAX_TYPE_FILTERS and skips rules past them, typed regexes too.
+*/
+@(test)
+test_the_dnstype_filters_a_set_keeps_are_bounded :: proc(t: ^testing.T) {
+	block, allow := set_make(), set_make()
+	defer set_destroy(block)
+	defer set_destroy(allow)
+	added := 0
+	for i in 0 ..< MAX_TYPE_FILTERS + 64 {
+		added += parse_rule(block, allow, fmt.tprintf("||n%d.example^$dnstype=TYPE%d", i / 32, 1000 + i))
+	}
+	testing.expect_value(t, len(block.filters), MAX_TYPE_FILTERS)
+	testing.expect_value(t, added, MAX_TYPE_FILTERS - 1)
+	testing.expect_value(t, parse_rule(block, allow, "/^re\\.example$/$dnstype=TYPE9"), 0)
+	// A filter already held, and a rule for every type, still take.
+	testing.expect_value(t, parse_rule(block, allow, "||m.example^$dnstype=TYPE1000"), 1)
+	testing.expect_value(t, parse_rule(block, allow, "/^re\\.example$/"), 1)
+}
+
 @(test)
 test_a_typed_rule_joins_a_name_a_plain_rule_holds :: proc(t: ^testing.T) {
 	// The entry is written again with room for its filters; both rules hold.

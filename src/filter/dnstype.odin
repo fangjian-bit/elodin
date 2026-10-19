@@ -163,23 +163,41 @@ type_union :: proc(a, b: Type_Filter, buf: []u16) -> (out: Type_Filter, ok: bool
 The id of `f` among the set's filters, added if it is new. Id 0 is the filter
 that matches nothing, which a name's anchor without a `$dnstype` rule has.
 
-What a list can make this hold is bounded by what it writes: a filter is new
-only when a rule changes a name's, and a name's permitted list only grows to
-MAX_RULE_TYPES and its exclusion only shrinks.
+A filter stays once interned, including each step a name's filter takes on
+its way to the last: a name named by 64 rules adding a type each holds 64
+filters. So a set keeps at most MAX_TYPE_FILTERS, and false past them skips the
+rule, which bounds what a list built to make every step distinct can make this
+hold, at about 300 bytes each, where lists in use narrow names to a few.
 */
+MAX_TYPE_FILTERS :: 4096
+
 @(private)
-type_intern :: proc(s: ^Set, f: Type_Filter) -> u32 {
+type_intern :: proc(s: ^Set, f: Type_Filter) -> (id: u32, ok: bool) {
 	key_buf: [1 + 2 * MAX_RULE_TYPES]u8
 	key_buf[0] = u8(f.negated)
 	n := 1 + copy(key_buf[1:], slice.to_bytes(f.types))
 	key := string(key_buf[:n])
-	if id, found := s.filter_ids[key]; found {
-		return id
+	if held, found := s.filter_ids[key]; found {
+		return held, true
 	}
-	id := u32(len(s.filters))
+	if len(s.filters) >= MAX_TYPE_FILTERS {
+		return
+	}
+	id = u32(len(s.filters))
 	append(&s.filters, Type_Filter{slice.clone(f.types, s.allocator) if len(f.types) > 0 else nil, f.negated})
 	s.filter_ids[strings.clone(key, s.allocator)] = id
-	return id
+	return id, true
+}
+
+// What a regex rule keeps for `f`: the interned copy, or ANY_TYPE, which needs
+// no storage and so leaves `filters` to say whether any `$dnstype` rule is held.
+@(private)
+type_keep :: proc(s: ^Set, f: Type_Filter) -> (kept: Type_Filter, ok: bool) {
+	if type_is_any(f) {
+		return ANY_TYPE, true
+	}
+	id := type_intern(s, f) or_return
+	return s.filters[id], true
 }
 
 // Walk two sorted lists together, keeping what is only in `x`, only in `y`, or

@@ -195,7 +195,7 @@ operator_rule_takes :: proc(block, allow: ^filter.Set, text: string) -> bool {
 warn_rule_adds_nothing :: proc(rule: string) {
 	// A dnsmasq route has its own warning at startup.
 	if !strings.has_prefix(strings.trim_space(rule), "server=/") {
-		logx.warnf("blocking rule %q adds nothing: it carries a modifier DNS cannot honour or a $dnstype this engine cannot read or that takes its name past %d types, is cosmetic, is a wildcard or path rule, is a regex this engine cannot run as AdGuard Home does (see docs/blocking.md) or over %d compiled bytes, or no longer fits the regex budget, names no domain, a $badfilter cancels it, or its name is not ASCII (write an international name in punycode, xn--...)", rule, filter.MAX_RULE_TYPES, filter.MAX_REGEX_PROGRAM)
+		logx.warnf("blocking rule %q adds nothing: it carries a modifier DNS cannot honour or a $dnstype this engine cannot read, that takes its name past %d types, or that needs one set of types past the %d the lists loaded first left room for, is cosmetic, is a wildcard or path rule, is a regex this engine cannot run as AdGuard Home does (see docs/blocking.md) or over %d compiled bytes, or no longer fits the regex budget, names no domain, a $badfilter cancels it, or its name is not ASCII (write an international name in punycode, xn--...)", rule, filter.MAX_RULE_TYPES, filter.MAX_TYPE_FILTERS, filter.MAX_REGEX_PROGRAM)
 	}
 }
 

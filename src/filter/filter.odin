@@ -244,7 +244,7 @@ typed_add :: proc(s: ^Set, key: string, entry: ^Rule_Flags, flags: Rule_Flags, t
 			every += {flag}
 			ids[int(flag)] = 0
 		} else {
-			ids[int(flag)] = type_intern(s, merged)
+			ids[int(flag)] = type_intern(s, merged) or_return
 		}
 	}
 	switch {
@@ -451,7 +451,9 @@ engine_match :: proc(e: ^Engine, name: string, qtype: dns.Type, typed_only: ^boo
 	if regex_lookup(e.allow, key, qtype) != .None {
 		return .Allowed
 	}
-	if listed != .Any {
+	// Past a block for some types, the regexes are asked only for whether it
+	// was one for every type, which only `typed_only` wants to know.
+	if listed == .None || (listed == .Typed && typed_only != nil) {
 		listed = max(listed, regex_lookup(e.block, key, qtype))
 	}
 	if listed == .None {
@@ -459,10 +461,13 @@ engine_match :: proc(e: ^Engine, name: string, qtype: dns.Type, typed_only: ^boo
 	}
 	sync.atomic_add(&e.stats.blocked, 1)
 	if typed_only != nil {
+		// The zero filter alone in `filters`: the allow set holds no `$dnstype`
+		// rule (`type_keep`), and most never do.
 		typed_only^ =
 			listed == .Typed ||
-			set_covers_some_type(e.allow, key) ||
-			regex_lookup(e.allow, key, qtype, some_type = true) != .None
+			(e.allow != nil &&
+					len(e.allow.filters) > 1 &&
+					(set_covers_some_type(e.allow, key) || regex_lookup(e.allow, key, qtype, some_type = true) != .None))
 	}
 	return .Blocked
 }

@@ -136,7 +136,8 @@ digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share o
   as one without `$dnstype` does, and a rule without `$dnstype` blocks every
   type. A rule naming an unknown type, nothing, or more than 64 types (with the
   name's other `$dnstype` rules), is skipped; so is one that excludes every
-  type it names (`$dnstype=A|~A`). `$badfilter` cancels a rule whatever either
+  type it names (`$dnstype=A|~A`), and one that would need a 4097th distinct
+  set of types in its block or allow set, which lists in use never come near. `$badfilter` cancels a rule whatever either
   one's `$dnstype`.
 - Skipped, without failing the list: any other modifier (`$client`, `$ctag`,
   `$denyallow`, `$dnsrewrite`, `$domain`, `$elemhide`, `$removeparam`, ...),
