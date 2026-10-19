@@ -42,6 +42,12 @@ test_a_listener_port_outside_1_to_65535_is_refused :: proc(t: ^testing.T) {
 		}
 		accepted(t, strings.concatenate({base, "  ", key, ":\n    enabled: true\n    port: 65535\n"}, context.temp_allocator))
 		accepted(t, strings.concatenate({base, "  ", key, ":\n    enabled: false\n    port: 0\n"}, context.temp_allocator))
+		// Only 0 is let through on a disabled listener: past either edge is no
+		// port whether or not it binds.
+		for port in ([]string{"-1", "65536"}) {
+			doc := strings.concatenate({base, "  ", key, ":\n    enabled: false\n    port: ", port, "\n"}, context.temp_allocator)
+			refused(t, doc, path, "between 1 and 65535")
+		}
 	}
 	// DoT and DoH go through the same check; their certificates are checked
 	// later, so the port is what is read here.

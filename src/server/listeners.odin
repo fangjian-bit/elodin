@@ -472,8 +472,9 @@ start_udp :: proc(s: ^Server, l: ^Listeners) -> bool {
 	}
 
 	// The port that was bound rather than the one that was asked for. They are
-	// the same figure everywhere but `port: 0`, where the file names no port at
-	// all and this line is the only place the one the kernel chose is said.
+	// the same figure everywhere but port 0, which the loader refuses in a file
+	// and a `Config` built elsewhere (the tests) uses to have the kernel choose:
+	// this line is then the only place the chosen one is said.
 	logx.infof(
 		"listening for DNS on %s:%d/udp (%s)",
 		cfg.address,

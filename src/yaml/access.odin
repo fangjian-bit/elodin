@@ -256,13 +256,13 @@ as_duration :: proc(n: ^Node) -> (time.Duration, bool) {
 		case:
 			return 0, false
 		}
-		// Saturating, so a figure too large to hold reads as the largest there is
-		// and fails a caller's ceiling, rather than wrapping round into a small
-		// one that passes it.
 		// Rounded to the nanosecond, not cut: "2.3h" multiplies out a hair under
 		// 8280s, and a figure that must come to whole seconds, a TTL, would be
 		// refused for it.
 		part := math.round(value * scale)
+		// Saturating, so a figure too large to hold reads as the largest there is
+		// and fails a caller's ceiling, rather than wrapping round into a small
+		// one that passes it.
 		if part >= f64(max(time.Duration)) || time.Duration(part) > max(time.Duration) - total {
 			total = max(time.Duration)
 		} else {
