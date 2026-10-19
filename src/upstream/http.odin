@@ -715,6 +715,21 @@ retry_due :: proc(timeout: time.Duration, deadline, now: time.Tick, attempt: int
 	return attempt == 0 && (timeout <= 0 || time.tick_diff(now, deadline) > 0)
 }
 
+/*
+What is left of `open_stream`'s deadline at `now`.
+
+Zero is no deadline, and stays zero. No configuration reaches it - the loader
+refuses an `upstream.timeout` under a millisecond (#499) - and a positive timeout
+never decays into it: what is left is floored at a millisecond, since a deadline
+met to the nanosecond, or one already gone, would otherwise hand the socket a
+zero, which is no timeout at all. `now` is passed in so a test can put it on
+the deadline exactly.
+*/
+@(private)
+stream_time_left :: proc(timeout: time.Duration, deadline, now: time.Tick) -> time.Duration {
+	return timeout if timeout <= 0 else max(time.tick_diff(now, deadline), time.Millisecond)
+}
+
 open_stream :: proc(
 	endpoint: net.Endpoint,
 	tls_ctx: ^tlsx.Context,
@@ -725,14 +740,9 @@ open_stream :: proc(
 	stream: Stream,
 	err: Error,
 ) {
-	// Zero is no deadline, and stays zero. No configuration reaches it - the
-	// loader refuses an `upstream.timeout` under a millisecond (#499).
 	deadline := time.tick_add(time.tick_now(), timeout)
-	left :: proc(timeout: time.Duration, deadline: time.Tick) -> time.Duration {
-		return timeout if timeout <= 0 else time.tick_diff(time.tick_now(), deadline)
-	}
 	for attempt in 0 ..< 2 {
-		socket, derr := dial_tcp_timeout(endpoint, left(timeout, deadline))
+		socket, derr := dial_tcp_timeout(endpoint, stream_time_left(timeout, deadline, time.tick_now()))
 		if derr != .None {
 			if derr != .Dial_Reset || !retry_due(timeout, deadline, time.tick_now(), attempt) {
 				return {}, derr
@@ -741,9 +751,9 @@ open_stream :: proc(
 		}
 		// The handshake's deadline is the socket's receive timeout - see
 		// `tlsx.handshake_loop` - so this is what bounds it. A dial that used the
-		// last of the budget still gets one bounded attempt: `set_socket_timeouts`
+		// last of the budget still gets one bounded attempt: `stream_time_left`
 		// floors what is left at a millisecond.
-		set_socket_timeouts(socket, left(timeout, deadline))
+		set_socket_timeouts(socket, stream_time_left(timeout, deadline, time.tick_now()))
 		_ = net.set_option(socket, .TCP_Nodelay, true)
 
 		if tls_ctx == nil {

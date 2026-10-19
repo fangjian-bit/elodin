@@ -209,7 +209,7 @@ opt_bytes :: proc(l: ^Loader, n: ^yaml.Node, key: string, dst: ^int, path: strin
 }
 
 /*
-An upstream `timeout`, which has to be a wait.
+An upstream `timeout`, which has to be a wait the server can keep.
 
 It is what one exchange with one server is given and a query's budget is two of
 them, so zero is not "no limit": the query has run out before it starts and every
@@ -218,28 +218,40 @@ one answers SERVFAIL (#499). A millisecond is the smallest wait the sockets and
 its default and AdGuard Home a zero `upstream_timeout`; refused here instead, as
 every other figure this file cannot honour is, so the server says what it will
 not do rather than quietly doing something else.
+
+The ceiling is the same refusal from the other end. A dial hands `poll` the
+timeout in milliseconds as a C int, which wraps past about 596h into a negative
+that `dial_tcp_timeout` floors to one millisecond, and two of a timeout past
+about 1.28 million hours overflow into a budget already spent - either way every
+query fails at once. A day is far above any upstream worth waiting on and far
+below either edge.
 */
+MAX_UPSTREAM_TIMEOUT :: 24 * time.Hour
+
 @(private)
 opt_upstream_timeout :: proc(l: ^Loader, n: ^yaml.Node, dst: ^time.Duration, path: string) {
-	opt_duration(l, n, "timeout", dst, path)
-	// Only a figure this node writes: a route that writes none has the top
-	// level's, which was checked there.
-	if !yaml.is_null(yaml.get(n, "timeout")) && dst^ < time.Millisecond {
-		errorf(l, "%s.timeout must be at least 1ms; a query is given two of it", path)
+	// Only a figure this node writes and that parsed: a route that writes none
+	// has the top level's, which was checked there, and one that does not parse
+	// has been reported already.
+	if opt_duration(l, n, "timeout", dst, path) && (dst^ < time.Millisecond || dst^ > MAX_UPSTREAM_TIMEOUT) {
+		errorf(l, "%s.timeout must be from 1ms to 24h; a query is given two of it", path)
 	}
 }
 
+// Whether `key` was written and parsed, in which case `dst` holds it.
 @(private)
-opt_duration :: proc(l: ^Loader, n: ^yaml.Node, key: string, dst: ^time.Duration, path: string) {
+opt_duration :: proc(l: ^Loader, n: ^yaml.Node, key: string, dst: ^time.Duration, path: string) -> bool {
 	child := yaml.get(n, key)
 	if yaml.is_null(child) {
-		return
+		return false
 	}
-	if v, ok := yaml.as_duration(child); ok {
-		dst^ = v
-	} else {
+	v, ok := yaml.as_duration(child)
+	if !ok {
 		errorf(l, "%s.%s: expected a duration such as 30s, 5m or 24h", path, key)
+		return false
 	}
+	dst^ = v
+	return true
 }
 
 @(private)

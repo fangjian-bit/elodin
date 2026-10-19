@@ -49,8 +49,8 @@ set on several of them included, are counted as one.
 
 ## Time budget
 
-`timeout` is at least `1ms`, at the top level and on a route; `0` is refused at
-load rather than read as "no limit", since a query is given two of it.
+`timeout` is from `1ms` to `24h`, at the top level and on a route; `0` is
+refused at load rather than read as "no limit", since a query is given two of it.
 
 A query waits at most about two `timeout`s on its upstreams, however many servers
 and `attempts` there are, then answers SERVFAIL (a `race` forward: one). The
