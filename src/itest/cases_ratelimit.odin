@@ -94,6 +94,11 @@ run_rate_limit_cases :: proc(r: ^Runner) {
 	the 1232 `max_udp_response` default, so what comes back is the whole answer
 	rather than a TC bit.
 
+	Answered a second late, past the 700 ms a flood drains for: a burst's answers
+	are billed as they are packed, so this is the server still packing them when
+	the next flood arrives, which a loaded machine produces at random and the
+	case has to be measured past rather than raced against.
+
 	Here because `mock_reply` keeps the slice rather than copying it, so the
 	payload has to outlive the mock that is still serving it - and a `defer` in
 	the case block runs while the mock is up. Registered before `defer
@@ -101,7 +106,7 @@ run_rate_limit_cases :: proc(r: ^Runner) {
 	*/
 	big := big_txt_answer("large.example.", 4, context.allocator)
 	defer delete(big)
-	mock_reply(mock, "large.example.", u16(dns.Type.TXT), big)
+	mock_delay(mock, "large.example.", u16(dns.Type.TXT), time.Second, big)
 	if !mock_start(mock) {
 		skip_case(r, "rate limit", "cannot start the mock upstream")
 		return
@@ -324,9 +329,18 @@ run_rate_limit_cases :: proc(r: ^Runner) {
 		)
 		if check(r, sok, "the server charging by size did not start") {
 			defer stop_server(&sized)
-			// The burst, which both servers send, and then the flood that
-			// follows it, which is the one being measured.
-			_ = udp_flood(sized_port, big_query, QUERIES)
+			/*
+			The burst, which both servers send, and then the flood that
+			follows it, which is the one being measured.
+
+			The burst is drained until its answers are in, not for a fixed
+			time: each is billed before it is sent (`rate_charge_response`),
+			so once they have arrived the whole debt is in the bucket. Drained
+			on the clock, a server slowed by a loaded machine could still be
+			packing them when the next flood arrived, and admit it on the
+			refill the debt had not yet reached.
+			*/
+			_ = udp_flood(sized_port, big_query, QUERIES, drain = 10 * time.Second, want = BURST)
 			by_size := udp_flood(sized_port, big_query, QUERIES)
 
 			// Counted: every answer is one token whatever it weighs, so the

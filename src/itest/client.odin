@@ -247,7 +247,9 @@ Flood_Result :: struct {
 	reset:     bool,
 }
 
-udp_flood :: proc(udp_port: int, query: []u8, count: int, drain := 700 * time.Millisecond) -> Flood_Result {
+// `want` ends the drain once that many answers are in, rather than on the quiet:
+// what a caller waiting on the answers themselves passes, with `drain` its ceiling.
+udp_flood :: proc(udp_port: int, query: []u8, count: int, drain := 700 * time.Millisecond, want := 0) -> Flood_Result {
 	socket, err := net.make_unbound_udp_socket(.IP4)
 	if err != nil {
 		return {}
@@ -275,7 +277,7 @@ udp_flood :: proc(udp_port: int, query: []u8, count: int, drain := 700 * time.Mi
 	res: Flood_Result
 	buf := make([]u8, 65535, context.temp_allocator)
 	deadline := time.time_add(time.now(), drain)
-	for time.diff(deadline, time.now()) < 0 {
+	for time.diff(deadline, time.now()) < 0 && (want == 0 || res.answered < want) {
 		n, _, rerr := net.recv_udp(socket, buf)
 		if rerr != nil {
 			// The receive timeout expiring is how this notices the quiet.

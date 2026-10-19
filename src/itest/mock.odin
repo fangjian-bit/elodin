@@ -163,6 +163,11 @@ mock_go_silent :: proc(m: ^Mock) {
 	sync.atomic_store(&m.gone_silent, true)
 }
 
+// One name and type answered with `payload` after `delay`.
+mock_delay :: proc(m: ^Mock, qname: string, qtype: u16, delay: time.Duration, payload: []u8) {
+	append(&m.rules, Mock_Rule{qname = qname, qtype = qtype, behaviour = .Delayed, delay = delay, payload = payload})
+}
+
 mock_delay_all :: proc(m: ^Mock, delay: time.Duration, payload: []u8) {
 	m.fallback = Mock_Rule {
 		behaviour = .Delayed,
