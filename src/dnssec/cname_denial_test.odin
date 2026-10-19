@@ -94,6 +94,26 @@ CD_FIXTURES := []Fixture{
 			"93abbd92972fc51c73bd321a86cc0fd863d0a66040257e2f95556d071208f87a8b00",
 	},
 	{
+		key   = "cd_ds_cdoo",
+		name  = "cdoo.",
+		type  = .DS,
+		rcode = 0,
+		wire  = "1234858000010002000000000463646f6f00002b00010463646f6f00002b000100000e10002463b00f02f68ed550f3cd" +
+			"c2ff012af6b92382d8472a10ddd33e78c147751122bce263a4290463646f6f00002e000100000e100053002b0f010000" +
+			"0e107d3b18206a4788203f28002ebdb60d5ad3d1810976cb2b807f2ea55a81ab312a53ca7f0df38206b9c1a982c2d342" +
+			"b7946cb26d9c6441b21c59c7285d945302bee38a60acf4555e904d720d",
+	},
+	{
+		key   = "cd_dnskey_cdoo",
+		name  = "cdoo.",
+		type  = .DNSKEY,
+		rcode = 0,
+		wire  = "1234858000010002000000000463646f6f00003000010463646f6f000030000100000e1000240101030f621af6659a2f" +
+			"bc4918644e958c9795f3d6fccaf7349ae9bc63a79a81c40fa49d0463646f6f00002e000100000e10005800300f010000" +
+			"0e107d3b18206a47882063b00463646f6f00fa77a60b5b9ae733f698e048cac35ecbafc345f0bcf90f1b9faa1f21fe1c" +
+			"2edb55a93cad906d940d143681dd34d6ed4968b5fc8ad43c5f20c87059a7db783b0d",
+	},
+	{
 		key   = "cd_ds_cdun",
 		name  = "cdun.",
 		type  = .DS,
@@ -307,6 +327,75 @@ CD_FIXTURES := []Fixture{
 			"83b4d5455ab955b081728f2839063e7eb476f3e924f28f7de1c3ba7da11ee587117d099a0f47b8918976b696235c1aa3" +
 			"4b4696cc719d6414fe01",
 	},
+	{
+		key   = "cd_opt_out_wildcard",
+		name  = "x.cdoo.",
+		type  = .AAAA,
+		rcode = 0,
+		wire  = "12348580000100020006000001780463646f6f00001c000101780463646f6f000005000100000e10000c04686f737405" +
+			"63647467740001780463646f6f00002e000100000e10005800050f0100000e107d3b18206a47882063b00463646f6f00" +
+			"df036b07c0c6c8300b365d4c95d8855f7d3105338735e370d89e59753fafc709d5442daa692e3808525b2046f0659b41" +
+			"0c9005af0372849eef8609cedb95180d20377432396a69317332733338666733376f316a39353072656b767070366d74" +
+			"340463646f6f000032000100000e100023010100000014a5044b893d433669b12c22b9d7f66c2c1af753f30007220000" +
+			"0000029020377432396a69317332733338666733376f316a39353072656b767070366d74340463646f6f00002e000100" +
+			"000e10005800320f0200000e107d3b18206a47882063b00463646f6f0040f76211afdde4decc493416f8a3ee76b0028d" +
+			"c3309a3e60d4a440a4738ce51d692e76c37ea144d2d24e146933e80bfb91f503dfaed00524a2b85941042d2908206b6b" +
+			"32346e323974386372366a6339633461737466746a6335676466656b766a0463646f6f000032000100000e1000220101" +
+			"000000143f4499c83c170687c067c06692836ea7f3935ba40006040000000002206b6b32346e323974386372366a6339" +
+			"633461737466746a6335676466656b766a0463646f6f00002e000100000e10005800320f0200000e107d3b18206a4788" +
+			"2063b00463646f6f0004466b17c02880195443e26bde95908e076502e8203bd751d5783b0e36350e9a7e07116e6fedee" +
+			"1bbc0b3109e478afdb6f0edaddd1eabddf2f4a75bef17b9403056364746774000006000100000e100030026e73056364" +
+			"746774000a686f73746d6173746572056364746774000000000100000e100000038400093a800000012c056364746774" +
+			"00002e000100000e10005900060f0100000e107d3b18206a478820e8d4056364746774008789049a1cfeb4ec45cb0bc9" +
+			"6ff3dc697754698cb57b56c3901c25aefed09d583cd245571437d2a79239e89a28c889c47c87eb18c5839af4ec02b6f1" +
+			"fd2eaf0f",
+	},
+	{
+		key   = "cd_opt_out_wildcard_proven",
+		name  = "x.cdoo.",
+		type  = .AAAA,
+		rcode = 0,
+		wire  = "12348580000100020008000001780463646f6f00001c000101780463646f6f000005000100000e10000c04686f737405" +
+			"63647467740001780463646f6f00002e000100000e10005800050f0100000e107d3b18206a47882063b00463646f6f00" +
+			"df036b07c0c6c8300b365d4c95d8855f7d3105338735e370d89e59753fafc709d5442daa692e3808525b2046f0659b41" +
+			"0c9005af0372849eef8609cedb95180d20377432396a69317332733338666733376f316a39353072656b767070366d74" +
+			"340463646f6f000032000100000e100023010100000014a5044b893d433669b12c22b9d7f66c2c1af753f30007220000" +
+			"0000029020377432396a69317332733338666733376f316a39353072656b767070366d74340463646f6f00002e000100" +
+			"000e10005800320f0200000e107d3b18206a47882063b00463646f6f0040f76211afdde4decc493416f8a3ee76b0028d" +
+			"c3309a3e60d4a440a4738ce51d692e76c37ea144d2d24e146933e80bfb91f503dfaed00524a2b85941042d2908206b6b" +
+			"32346e323974386372366a6339633461737466746a6335676466656b766a0463646f6f000032000100000e1000220101" +
+			"000000143f4499c83c170687c067c06692836ea7f3935ba40006040000000002206b6b32346e323974386372366a6339" +
+			"633461737466746a6335676466656b766a0463646f6f00002e000100000e10005800320f0200000e107d3b18206a4788" +
+			"2063b00463646f6f0004466b17c02880195443e26bde95908e076502e8203bd751d5783b0e36350e9a7e07116e6fedee" +
+			"1bbc0b3109e478afdb6f0edaddd1eabddf2f4a75bef17b9403056364746774000006000100000e100030026e73056364" +
+			"746774000a686f73746d6173746572056364746774000000000100000e100000038400093a800000012c056364746774" +
+			"00002e000100000e10005900060f0100000e107d3b18206a478820e8d4056364746774008789049a1cfeb4ec45cb0bc9" +
+			"6ff3dc697754698cb57b56c3901c25aefed09d583cd245571437d2a79239e89a28c889c47c87eb18c5839af4ec02b6f1" +
+			"fd2eaf0f04686f737405636474677400002f000100000e10000f05636474677400000640000000000304686f73740563" +
+			"6474677400002e000100000e100059002f0f0200000e107d3b18206a478820e8d4056364746774006dd73b449a2b883b" +
+			"61fa0848b7fb313c902a11884d65d381b71fbfd72b14999a440d535ad43f81cc25c24a53b0d84d3aae327413977c6f9a" +
+			"435d0544eba5b207",
+	},
+	{
+		key   = "cd_x_cdoo_ds",
+		name  = "x.cdoo.",
+		type  = .DS,
+		rcode = 0,
+		wire  = "12348580000100000006000001780463646f6f00002b00010463646f6f000006000100000e10002e026e730463646f6f" +
+			"000a686f73746d61737465720463646f6f000000000100000e100000038400093a800000012c0463646f6f00002e0001" +
+			"00000e10005800060f0100000e107d3b18206a47882063b00463646f6f0082a5daf3ab206303b84c9882318db0ddbc09" +
+			"81976b28e89398b0b6f6ba81da84d7842243fd813760810503edb418364f5503c131be71a8bf7b7f5f9ff086ba092037" +
+			"7432396a69317332733338666733376f316a39353072656b767070366d74340463646f6f000032000100000e10002301" +
+			"0100000014a5044b893d433669b12c22b9d7f66c2c1af753f300072200000000029020377432396a6931733273333866" +
+			"6733376f316a39353072656b767070366d74340463646f6f00002e000100000e10005800320f0200000e107d3b18206a" +
+			"47882063b00463646f6f0040f76211afdde4decc493416f8a3ee76b0028dc3309a3e60d4a440a4738ce51d692e76c37e" +
+			"a144d2d24e146933e80bfb91f503dfaed00524a2b85941042d2908206b6b32346e323974386372366a63396334617374" +
+			"66746a6335676466656b766a0463646f6f000032000100000e1000220101000000143f4499c83c170687c067c0669283" +
+			"6ea7f3935ba40006040000000002206b6b32346e323974386372366a6339633461737466746a6335676466656b766a04" +
+			"63646f6f00002e000100000e10005800320f0200000e107d3b18206a47882063b00463646f6f0004466b17c028801954" +
+			"43e26bde95908e076502e8203bd751d5783b0e36350e9a7e07116e6fedee1bbc0b3109e478afdb6f0edaddd1eabddf2f" +
+			"4a75bef17b9403",
+	},
 }
 
 @(private = "file")
@@ -358,6 +447,16 @@ cd_validate :: proc(key: string, unreachable: ^string = nil, edit: proc(msg: ^dn
 		return validate(v, f.name, f.type, reply, time.unix(FIXTURE_TIME, 0))
 	}
 	return {status = .Indeterminate, reason = "no such fixture"}
+}
+
+// One record from the unsigned `cdun.` appended to the answer: no forgery, and
+// it drags the answer's verdict to `Insecure` without touching the chain.
+@(private = "file")
+append_unsigned :: proc(msg: ^dns.Message) {
+	answer := make([dynamic]dns.Record, 0, len(msg.answer) + 1, context.temp_allocator)
+	append(&answer, ..msg.answer)
+	append(&answer, dns.Record{name = "x.cdun.", type = .A, class = .IN, ttl = 300, data = dns.Rdata_A{addr = {192, 0, 2, 1}}})
+	msg.answer = answer[:]
 }
 
 @(private = "file")
@@ -455,12 +554,6 @@ record being the part nothing vouches for.
 */
 @(test)
 test_an_unsigned_rrset_does_not_buy_past_the_denial_after_a_cname :: proc(t: ^testing.T) {
-	append_unsigned :: proc(msg: ^dns.Message) {
-		answer := make([dynamic]dns.Record, 0, len(msg.answer) + 1, context.temp_allocator)
-		append(&answer, ..msg.answer)
-		append(&answer, dns.Record{name = "x.cdun.", type = .A, class = .IN, ttl = 300, data = dns.Rdata_A{addr = {192, 0, 2, 1}}})
-		msg.answer = answer[:]
-	}
 	for key in ([]string{"cd_no_proof", "cd_type_present", "cd_wrong_zone"}) {
 		result := cd_validate(key, edit = append_unsigned)
 		testing.expectf(t, result.status == .Bogus, "%s with an unsigned RRset appended: got %v (%q)", key, result.status, result.reason)
@@ -478,15 +571,26 @@ expansion proof: that proof is not gated on the rest of the answer being
 */
 @(test)
 test_an_unsigned_rrset_does_not_buy_past_the_wildcard_proof :: proc(t: ^testing.T) {
-	append_unsigned :: proc(msg: ^dns.Message) {
-		answer := make([dynamic]dns.Record, 0, len(msg.answer) + 1, context.temp_allocator)
-		append(&answer, ..msg.answer)
-		append(&answer, dns.Record{name = "x.cdun.", type = .A, class = .IN, ttl = 300, data = dns.Rdata_A{addr = {192, 0, 2, 1}}})
-		msg.answer = answer[:]
-	}
 	plain := cd_validate("cd_wildcard_replay")
 	testing.expectf(t, plain.status == .Bogus, "a replayed wildcard: got %v (%q)", plain.status, plain.reason)
 	padded := cd_validate("cd_wildcard_replay", edit = append_unsigned)
 	testing.expectf(t, padded.status == .Bogus, "a replayed wildcard with an unsigned RRset appended: got %v (%q)", padded.status, padded.reason)
+	free_all(context.temp_allocator)
+}
+
+/*
+A wildcard CNAME in an opt-out zone, whose expanded name sits in an opt-out
+span, has an expansion proof that is merely `Insecure` (RFC 5155 section 9.2).
+That lowers the verdict the way an unsigned RRset does, and it does not excuse
+the denial at the chain's end from its own proof: unproven, it is refused;
+proven, the answer stays insecure, for the expansion's reason.
+*/
+@(test)
+test_an_opt_out_wildcard_does_not_buy_past_the_denial_after_a_cname :: proc(t: ^testing.T) {
+	unproven := cd_validate("cd_opt_out_wildcard")
+	testing.expectf(t, unproven.status == .Bogus, "an unproven denial behind an opt-out wildcard: got %v (%q)", unproven.status, unproven.reason)
+	proven := cd_validate("cd_opt_out_wildcard_proven")
+	testing.expectf(t, proven.status == .Insecure, "a proven denial behind an opt-out wildcard: got %v (%q)", proven.status, proven.reason)
+	testing.expectf(t, proven.reason == "wildcard expansion not proven", "the reason is %q", proven.reason)
 	free_all(context.temp_allocator)
 }

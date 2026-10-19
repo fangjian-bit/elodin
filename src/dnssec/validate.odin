@@ -2219,7 +2219,14 @@ validate_answer :: proc(
 			append(&proved, ..records)
 		}
 		if worst != before {
-			return {status = worst, reason = proof_reason, detail = proof_detail}
+			reason, detail = proof_reason, proof_detail
+			// An expansion proven only through an opt-out span is insecure,
+			// and that is no more an excuse for the denial below than an
+			// unsigned RRset is: it carries on to be asked, and the reason
+			// stands.
+			if worst != .Insecure {
+				return {status = worst, reason = reason, detail = detail}
+			}
 		}
 	}
 
@@ -2275,7 +2282,13 @@ validate_answer :: proc(
 		denied := validate_denial(v, budget, msg, end, qtype, class, unix, now, allocator, &denials)
 		switch {
 		case denied.status == .Secure:
-			append(&proved, ..denied.authority)
+			// A wildcard proof read against the same zone has named these
+			// already, from the same memo.
+			for s in denied.authority {
+				if _, named := authenticated_rrset(proved[:], s.name, s.type, s.class); !named {
+					append(&proved, s)
+				}
+			}
 		case denied.status == .Insecure && worst == .Insecure:
 		// Insecure already, and the reason that made it so stands.
 		case:

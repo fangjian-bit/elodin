@@ -1361,7 +1361,6 @@ def wildcard_nodata():
     emit("wn_delegation_ds", "foo.wntest.", "DS", message("foo.wntest.", DS, [], authority))
 
 
-
 @scenario
 def cname_denial():
     """Cover a CNAME chain that ends in a NODATA or NXDOMAIN at another zone."""
@@ -1378,11 +1377,12 @@ def cname_denial():
     src = Key("cdsrc.", "cdenial-source")
     tgt = Key("cdtgt.", "cdenial-target")
     n3 = Key("cdn3.", "cdenial-nsec3")
+    oo = Key("cdoo.", "cdenial-opt-out")
 
     root_keys = [RR(".", DNSKEY, root.rdata)]
     print("// anchor: %s" % root.ds_text())
     emit("cd_root_dnskey", ".", "DNSKEY", message(".", DNSKEY, root_keys + [sign(root_keys, root)]))
-    for key in (src, tgt, n3):
+    for key in (src, tgt, n3, oo):
         ds_set = [RR(key.zone, DS, key.ds())]
         emit("cd_ds_" + key.zone[:-1], key.zone, "DS", message(key.zone, DS, ds_set + [sign(ds_set, root)]))
         keys = [RR(key.zone, DNSKEY, key.rdata)]
@@ -1451,6 +1451,28 @@ def cname_denial():
     answer("cd_wildcard_replay", "www.cdsrc.", A, wild + [sign(wild, src, labels=1)], [])
     www = signed_soa(src) + nsec(src, "www.cdsrc.", "x.cdsrc.", [CNAME, RRSIG, NSEC])
     emit("cd_www_ds", "www.cdsrc.", "DS", message("www.cdsrc.", DS, [], www))
+
+    # A wildcard CNAME in `cdoo.`, an NSEC3 opt-out zone: the expanded name
+    # sits in an opt-out span, so the expansion proof is merely insecure, and
+    # the walk's DS question for it gets the same span. The chain ends at
+    # `host.cdtgt.`, where the denial is claimed with a SOA and no proof, or
+    # proven.
+    spans = nsec3_chain(
+        "cdoo.",
+        [("cdoo.", [NS, SOA, RRSIG, DNSKEY, NSEC3PARAM]), ("*.cdoo.", [CNAME, RRSIG])],
+        b"",
+        0,
+        flags=1,
+    )
+    covers = []
+    for record in spans.values():
+        covers += [record, sign([record], oo)]
+    expanded = [RR("x.cdoo.", CNAME, wire_name("host.cdtgt."))]
+    expanded += [sign(expanded, oo, labels=1)]
+    answer("cd_opt_out_wildcard", "x.cdoo.", AAAA, expanded, covers + signed_soa(tgt))
+    answer("cd_opt_out_wildcard_proven", "x.cdoo.", AAAA, expanded, covers + nodata)
+    emit("cd_x_cdoo_ds", "x.cdoo.", "DS", message("x.cdoo.", DS, [], signed_soa(oo) + covers))
+
 
 if __name__ == "__main__":
     wanted = sys.argv[1:] or list(SCENARIOS)
