@@ -1505,6 +1505,19 @@ authenticated_only :: proc(
 	// and whether that one has been kept already.
 	sigs_kept := make([]int, len(kept), allocator)
 	verified_kept := make([]bool, len(kept), allocator)
+	/*
+	RFC 4035 section 5.3.3: the set and its RRSIGs go out with one TTL, no more
+	than the least of the set's received TTLs, the verified RRSIG's received
+	TTL, and the ceiling that RRSIG puts on it (`Authenticated_Set.ttl`). The
+	TTL field is the one part of a record no signature covers, so leaving it as
+	received would let an on-path sender keep a signed answer cached long after
+	its signer meant. `owner` is the set each kept record belongs to.
+	*/
+	set_ttl := make([]u32, len(kept), allocator)
+	for k, i in kept {
+		set_ttl[i] = k.ttl
+	}
+	owner := make([dynamic]int, 0, len(section), allocator)
 	out := make([dynamic]dns.Record, 0, len(section), allocator)
 	for rec in section {
 		covered := rec.type
@@ -1578,6 +1591,7 @@ authenticated_only :: proc(
 			exempt := !verified_kept[idx] && rrsig_equal(parsed, kept[idx].rrsig)
 			if exempt {
 				verified_kept[idx] = true
+				set_ttl[idx] = min(set_ttl[idx], rec.ttl)
 			} else {
 				if sigs_kept[idx] >= MAX_SIGNATURES_PER_RRSET {
 					continue
@@ -1585,15 +1599,14 @@ authenticated_only :: proc(
 				sigs_kept[idx] += 1
 			}
 		}
-		/*
-		RFC 4035 section 5.3.3: the set and its RRSIGs go out with no more than
-		the verified signature allows. The TTL field is the one part of the
-		record no signature covers, so leaving it as received would let an
-		on-path sender keep a signed answer cached long after its signer meant.
-		*/
-		kept_rec := rec
-		kept_rec.ttl = min(rec.ttl, kept[idx].ttl)
-		append(&out, kept_rec)
+		if rec.type != .RRSIG {
+			set_ttl[idx] = min(set_ttl[idx], rec.ttl)
+		}
+		append(&out, rec)
+		append(&owner, idx)
+	}
+	for &rec, i in out {
+		rec.ttl = set_ttl[owner[i]]
 	}
 	return out[:]
 }
@@ -1933,13 +1946,18 @@ validate_answer :: proc(
 		synthesizes exactly one, so a set with a second is not a set a DNAME
 		produced; the loop stops at the first record no DNAME accounts for.
 		*/
+		ceiling := signed_ttl_ceiling(carried, unix)
 		if status != .Secure && rec.type == .CNAME && len(sigs) == 0 {
 			covered := len(records) > 0
+			// No signature of its own, so the DNAME's sets its ceiling.
+			ceiling = max(u32)
 			for r in records {
-				if !dname_covered(v, budget, msg, r, class, unix, now, allocator) {
+				ok, by := dname_covered(v, budget, msg, r, class, unix, now, allocator)
+				if !ok {
 					covered = false
 					break
 				}
+				ceiling = min(ceiling, signed_ttl_ceiling(by, unix))
 			}
 			if covered {
 				status = .Secure
@@ -2016,7 +2034,7 @@ validate_answer :: proc(
 				class = class,
 				signer = signer,
 				rrsig = carried,
-				ttl = signed_ttl_ceiling(carried, unix),
+				ttl = ceiling,
 			},
 		)
 	}
@@ -3835,7 +3853,8 @@ zone_step :: proc(
 		cache_put(v, child, .Insecure, nil, min(negative_ttl(msg), sets_original_ttl(proved)), now, sets_lapse(proved, unix))
 	case .No_Cut:
 		/*
-		Remembered for the denial's own negative TTL, the way an insecure
+		Remembered for the denial's own negative TTL, held to the Original TTL
+		and expiration of the signatures that proved it, the way an insecure
 		delegation is, and for the same reason: this cost the network a round
 		trip and the answer holds until the records it came from expire.
 
@@ -4687,10 +4706,15 @@ dname_covered :: proc(
 	unix: u32,
 	now: time.Time,
 	allocator: mem.Allocator,
-) -> bool {
+) -> (
+	covered: bool,
+	// The DNAME's verified signature, which bounds the CNAME's TTL as it does
+	// the DNAME's own (RFC 4035 section 5.3.3).
+	vouched: Rrsig,
+) {
 	target, is_name := cname.data.(dns.Rdata_Name)
 	if !is_name {
-		return false
+		return false, {}
 	}
 
 	seen := make([dynamic]dns.Question, 0, 2, allocator)
@@ -4725,12 +4749,12 @@ dname_covered :: proc(
 		*/
 		records := records_of(msg.answer, rec.name, .DNAME, class, allocator)
 		sigs := sigs_covering(msg.answer, rec.name, .DNAME, class, allocator)
-		status, _, _, _, _ := validate_rrset(v, budget, rec.name, .DNAME, class, records, sigs, unix, now, allocator)
+		status, _, _, _, sig := validate_rrset(v, budget, rec.name, .DNAME, class, records, sigs, unix, now, allocator)
 		if status == .Secure {
-			return true
+			return true, sig
 		}
 	}
-	return false
+	return false, {}
 }
 
 /*

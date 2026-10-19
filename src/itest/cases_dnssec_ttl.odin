@@ -182,8 +182,7 @@ raised_answer :: proc(wire: []u8) -> (out: []u8, original: u32, ok: bool) {
 	for &rec in msg.answer {
 		rec.ttl = TTL_RAISED
 		if raw, is_raw := rec.data.(dns.Rdata_Raw); is_raw && rec.type == .RRSIG && len(raw.data) >= 8 {
-			d := raw.data
-			original = min(original, u32(d[4]) << 24 | u32(d[5]) << 16 | u32(d[6]) << 8 | u32(d[7]))
+			original = min(original, pw_u32(raw.data, 4))
 		}
 	}
 	encoded, _, eerr := dns.encode_message(msg, context.allocator)

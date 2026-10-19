@@ -1260,11 +1260,13 @@ pc_ttl :: proc(
 	if policy.dnssec_validation && ad {
 		reason = pc_signed_ttl(u, e, el_recs, policy)
 	}
-	if reason == "" && policy.cache {
-		reason = pc_cached_ttl(u, e, policy)
-	} else if reason == "" && !policy.ttl_exact {
-		// See `Parity_Policy.ttl_exact`.
-		reason = "the reference and this answer are two separate fetches, so their ttls have been counting down since two different moments"
+	if reason == "" {
+		if policy.cache {
+			reason = pc_cached_ttl(u, e, policy)
+		} else if !policy.ttl_exact {
+			// See `Parity_Policy.ttl_exact`.
+			reason = "the reference and this answer are two separate fetches, so their ttls have been counting down since two different moments"
+		}
 	}
 	pc_add(
 		c,
@@ -1314,32 +1316,35 @@ is required to lower. Bounded like the cache's allowance: the ceiling is the
 upstream's ttl under the signature's and `cache.max_ttl`, and the answer may sit
 below it by no more than the cache has held it, plus a second either side for
 the clock the expiration is read against.
+
+Which signature verified is elodin's to know, not the answer's: a set
+mid-rollover carries one per algorithm, each with its own ceiling. So the answer
+may sit as high as the most generous of them and as low as the least.
 */
 @(private = "file")
 pc_signed_ttl :: proc(u, e: Pw_RR, el_recs: []Pw_RR, policy: Parity_Policy) -> string {
 	covered := e.type
 	if e.type == 46 && len(e.rdata) >= 2 {
-		covered = u16(e.rdata[0]) << 8 | u16(e.rdata[1])
+		covered = pw_u16(e.rdata, 0)
 	}
 	now := u32(time.time_to_unix(time.now()))
-	signed := max(u32)
+	lo, hi := max(u32), u32(0)
 	for r in el_recs {
 		if r.type != 46 || r.class != e.class || len(r.rdata) < 12 || !pc_name_equal_fold(r.name, e.name) {
 			continue
 		}
-		d := r.rdata
-		if u16(d[0]) << 8 | u16(d[1]) != covered {
+		if pw_u16(r.rdata, 0) != covered {
 			continue
 		}
-		original := u32(d[4]) << 24 | u32(d[5]) << 16 | u32(d[6]) << 8 | u32(d[7])
-		expiration := u32(d[8]) << 24 | u32(d[9]) << 16 | u32(d[10]) << 8 | u32(d[11])
-		signed = min(signed, original, expiration - now if i32(expiration - now) > 0 else 0)
+		expiration := pw_u32(r.rdata, 8)
+		signed := min(pw_u32(r.rdata, 4), expiration - now if i32(expiration - now) > 0 else 0)
+		lo, hi = min(lo, signed), max(hi, signed)
 	}
-	ceiling := min(u.ttl, signed)
-	if policy.cache {
-		ceiling = min(ceiling, PARITY_CACHE_MAX_TTL)
+	if lo >= u.ttl {
+		return ""
 	}
-	if signed >= u.ttl || e.ttl > ceiling + 1 || e.ttl + policy.cache_age + 1 < ceiling {
+	limit := min(u.ttl, PARITY_CACHE_MAX_TTL) if policy.cache else u.ttl
+	if e.ttl > min(limit, hi) + 1 || e.ttl + policy.cache_age + 1 < min(limit, lo) {
 		return ""
 	}
 	return "a validated rrset is served with no more than its rrsig's original ttl or the time left before it expires (RFC 4035 section 5.3.3)"

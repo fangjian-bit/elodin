@@ -345,3 +345,31 @@ test_a_second_cname_beside_a_dname_synthesis_is_not_authenticated :: proc(t: ^te
 	}
 	free_all(context.temp_allocator)
 }
+
+/*
+The CNAME a DNAME synthesized carries no signature of its own, so its ceiling
+under RFC 4035 section 5.3.3 is the DNAME's: it goes out with the TTL it came
+with, held to the DNAME's signature, and never with zero for want of one (#337).
+*/
+@(test)
+test_a_synthesized_cname_keeps_its_ttl :: proc(t: ^testing.T) {
+	v := dname_validator()
+	testing.expect(t, v != nil, "the anchor should parse")
+	defer destroy_validator(v)
+
+	wire := dname_fixture("dname_answer")
+	result := validate(v, "a.dnametest.", .A, wire, time.unix(FIXTURE_TIME, 0))
+	testing.expect_value(t, result.status, Status.Secure)
+	out, ok := strip_unauthenticated(wire, result)
+	testing.expect(t, ok, "the prune failed")
+	served, _ := dns.decode_message(out, context.temp_allocator)
+	cnames := 0
+	for rec in served.answer {
+		if rec.type == .CNAME {
+			cnames += 1
+			testing.expect_value(t, rec.ttl, u32(3600))
+		}
+	}
+	testing.expect_value(t, cnames, 1)
+	free_all(context.temp_allocator)
+}

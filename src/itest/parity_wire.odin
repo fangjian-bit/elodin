@@ -784,12 +784,10 @@ pw_section_keys :: proc(recs: []Pw_RR, allocator := context.temp_allocator) -> [
 	return keys
 }
 
-@(private = "file")
 pw_u16 :: proc(b: []u8, off: int) -> u16 {
 	return u16(b[off]) << 8 | u16(b[off + 1])
 }
 
-@(private = "file")
 pw_u32 :: proc(b: []u8, off: int) -> u32 {
 	return u32(b[off]) << 24 | u32(b[off + 1]) << 16 | u32(b[off + 2]) << 8 | u32(b[off + 3])
 }

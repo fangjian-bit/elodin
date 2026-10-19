@@ -190,3 +190,28 @@ test_zone_keys_do_not_outlive_their_signatures :: proc(t: ^testing.T) {
 	}
 	free_all(context.temp_allocator)
 }
+
+/*
+RFC 4035 section 5.3.3 takes the least of four, two of them received: an RRSIG
+sent with a lower TTL than its set brings the set down to it, and a set whose
+records disagree goes out as one TTL, the lowest.
+*/
+@(test)
+test_served_ttl_takes_the_least_received :: proc(t: ^testing.T) {
+	v := make_validator(st_query, nil, Options{})
+	defer destroy_validator(v)
+	msg, _ := dns.decode_message(st_fixture("example_a"), context.temp_allocator)
+	for &rec in msg.answer {
+		rec.ttl = 100 if rec.type == .RRSIG else 250
+	}
+	wire, _, _ := dns.encode_message(msg, context.temp_allocator)
+	result := validate(v, "www.example.com.", .A, wire, time.unix(FIXTURE_TIME, 0))
+	testing.expect_value(t, result.status, Status.Secure)
+	out, _ := strip_unauthenticated(wire, result)
+	served, _ := dns.decode_message(out, context.temp_allocator)
+	testing.expect(t, len(served.answer) >= 2, "the answer lost its records")
+	for rec in served.answer {
+		testing.expectf(t, rec.ttl == 100, "%v went out with TTL %d, the RRSIG arrived with 100", rec.type, rec.ttl)
+	}
+	free_all(context.temp_allocator)
+}
