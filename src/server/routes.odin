@@ -101,9 +101,8 @@ Zone_Route :: struct {
 How long one client question for `name` may spend waiting on upstreams, from its
 first exchange (issue #439): the longest `upstream.query_budget` of the groups
 it can ask - where it goes, the zone's own route for an apex `DS`, the default
-group, which every chain lookup outside an anchored zone asks, and inside one
-the route of each name from the anchor down, which is where `validator_query`
-sends the walk's lookups there.
+group, which every chain lookup outside an anchored zone asks, and every route
+a walk inside an anchored zone can ask (`route_meets_an_anchor`).
 
 The longest rather than that of whichever group a question asks first, because
 one question can ask several: a LAN route's 200 ms forward would otherwise leave
@@ -111,7 +110,10 @@ the chain walk behind it a few hundred milliseconds for the public tree instead
 of the ten seconds the default group was given. Only those groups, though: a
 slow route elsewhere in the table is no group this question can reach, and its
 budget would hand every public question a deadline long enough to wait on a
-degraded default group lookup after lookup, which is the wait #439 bounds.
+degraded default group lookup after lookup, which is the wait #439 bounds. A
+route an anchor meets is the exception, and costs exactly that wait for the
+configurations that have one: any answer can CNAME into the anchored zone, and
+its walk then asks that route.
 Where every group has the same `timeout` - the configuration nearly everybody
 runs - it is two of them, the figure #327 set for one group.
 */
@@ -121,12 +123,30 @@ question_span :: proc(s: ^Server, name: string, type: dns.Type) -> (span: time.D
 			span = max(span, upstream.query_budget(g))
 		}
 	}
-	for n := name; covered_by_local_anchor(s, n); n = dns.name_parent(n) {
-		if g := zone_route_group(s, n); g != nil {
-			span = max(span, upstream.query_budget(g))
+	for route in s.routes {
+		if route_meets_an_anchor(s, route) {
+			span = max(span, upstream.query_budget(route.group))
 		}
 	}
 	return
+}
+
+/*
+Whether a chain walk can ask this route: inside an anchored zone `validator_query`
+follows the route at each name, so a route over the anchor holds its keys and
+one below it holds a cut's. Every question, and not only one for a name inside
+the zone, because a CNAME or DNAME can take any answer there.
+*/
+@(private)
+route_meets_an_anchor :: proc(s: ^Server, route: Zone_Route) -> bool {
+	for domain in route.domains {
+		for zone in s.anchor_zones {
+			if name_at_or_below(domain, zone) || name_at_or_below(zone, domain) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 /*

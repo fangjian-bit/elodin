@@ -2612,9 +2612,16 @@ validate_rrset :: proc(
 		shed:        bool,
 	}
 	walked := make([dynamic]Walked, 0, 4, allocator)
+	/*
+	And no signer above the closest anchor (RFC 6840 Appendix C.1): an operator
+	who anchors `corp.` has pinned that zone's keys, so a key above the anchor -
+	a public ancestor's copy of a split-horizon name - does not vouch for a name
+	inside it. Of the holder, so `corp. DS` is still the parent's to sign.
+	*/
+	anchor := closest_anchor(v.anchors, zone_holding(owner, type))
 
 	for sig in sigs {
-		if !signer_holds(owner, type, sig.signer) {
+		if !signer_holds(owner, type, sig.signer) || !name_in_zone(sig.signer, anchor) {
 			continue
 		}
 		/*
@@ -3540,12 +3547,13 @@ zone_trust :: proc(
 	}
 
 	/*
-	The walk starts at the closest anchor at or above the name, not always at
-	the root (issue #226). RFC 4035 section 4.3 makes a chain Secure when it
-	runs "from a trusted security anchor", any of them, and RFC 6840 section
-	5.10 leaves the choice between nested anchors to the implementation. This
-	is its Appendix C.1, "Closest Encloser", which is what Unbound, BIND, Knot
-	Resolver and PowerDNS Recursor all do: an operator who anchors `corp.` has
+	The walk starts at the closest anchor at or above the name (issue #226),
+	which is the root only where nothing closer is anchored. RFC 4035 section
+	4.3 makes a chain Secure when it runs "from a trusted security anchor", any
+	of them, and RFC 6840 section 5.10 leaves the choice between nested anchors
+	to the implementation. This is its Appendix C.1, "Closest Encloser", which
+	is what Unbound, BIND, Knot Resolver and PowerDNS Recursor all do: an
+	operator who anchors `corp.` has
 	pinned that zone's keys, so the public tree's opinion of `corp.` - a DS, or
 	a signed proof that there is none - is never asked, and cannot vouch for a
 	key the anchor does not name. The cost C.1 itself states: an anchor left

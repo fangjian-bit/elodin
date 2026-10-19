@@ -3017,12 +3017,20 @@ test_the_question_span_is_the_longest_group_budget :: proc(t: ^testing.T) {
 	// ...and for nothing else: a public name never asks that route.
 	testing.expect_value(t, question_span(&s, "example.com.", .A), 400 * time.Millisecond)
 
-	// Inside an anchored zone the walk follows the route at each name from the
-	// anchor down (`validator_query`), so a nested route's question also has
-	// the budget of the route holding the anchor's keys.
+	// Inside an anchored zone the walk follows the route at each name
+	// (`validator_query`), so a nested route's question also has the budget of
+	// the route holding the anchor's keys...
 	s.routes = []Zone_Route{{domains = []string{"lan."}, group = group}, {domains = []string{"dev.lan."}, group = routed}}
 	testing.expect_value(t, question_span(&s, "host.dev.lan.", .A), 400 * time.Millisecond)
 	s.anchor_zones = []string{"lan."}
 	testing.expect_value(t, question_span(&s, "host.dev.lan.", .A), 10 * time.Second)
+	// ...and so does a public name, whose answer can CNAME into the zone.
+	testing.expect_value(t, question_span(&s, "example.com.", .A), 10 * time.Second)
+	// An anchor below the route meets it too: the route holds the anchor's keys.
+	s.anchor_zones = []string{"corp.lan."}
+	testing.expect_value(t, question_span(&s, "example.com.", .A), 10 * time.Second)
+	// One elsewhere does not.
+	s.anchor_zones = []string{"corp.example."}
+	testing.expect_value(t, question_span(&s, "example.com.", .A), 400 * time.Millisecond)
 	free_all(context.temp_allocator)
 }

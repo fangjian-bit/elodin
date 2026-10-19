@@ -63,6 +63,26 @@ BA_FIXTURES := []Fixture{
 			"91bda553191268e258e74248939de3b6240cad6590c11a8c78395921d2acdcaa919c90da8c0e5a28949dc5029ddf60fb" +
 			"25716e297d75661c24592fa4d305",
 	},
+	{
+		key   = "ba_root_signed_answer",
+		name  = "www.corp.",
+		type  = .A,
+		rcode = 0,
+		wire  = "1234858000010002000000000377777704636f727000000100010377777704636f7270000001000100000e100004c000" +
+			"02010377777704636f727000002e000100000e10005300010f0200000e107d3b18206a478820f50500524d3e093f0284" +
+			"cb87e3ebbefd68ccea01c55db629517276cb015d44dd5077b775347b17b6b96eb702a878f6af87a18e461dcb02440d84" +
+			"46ccef1b9c9980ca01",
+	},
+	{
+		key   = "ba_www_ds",
+		name  = "www.corp.",
+		type  = .DS,
+		rcode = 0,
+		wire  = "1234858000010000000200000377777704636f727000002b00010377777704636f727000002f000100000e10000e0463" +
+			"6f72700000064000000000030377777704636f727000002e000100000e100058002f0f0200000e107d3b18206a478820" +
+			"e9ae04636f727000141dc621b15022ed5d2200c464bd6cb08be1ec9ecae197cbce2dad4f3082a756e32e2362ce216319" +
+			"378816691397eb754f3d255f97f508efa8c9fc4189b4c003",
+	},
 }
 
 @(private = "file")
@@ -161,6 +181,29 @@ test_a_wrong_anchor_below_the_root_is_bogus_not_insecure :: proc(t: ^testing.T) 
 }
 
 @(test)
+test_a_key_above_the_anchor_does_not_vouch_for_a_name_inside_it :: proc(t: ^testing.T) {
+	// `www.corp. A` signed by the root's key. The `corp.` anchor pins the zone
+	// (RFC 6840 Appendix C.1), so a signer above it - a public ancestor's view
+	// of a split-horizon name - is not a key the zone's names are read against.
+	answer, _ := decode_hex(BA_FIXTURES[4].wire, context.temp_allocator)
+	now := time.unix(FIXTURE_TIME, 0)
+
+	// The premise: with only the root anchored, the root's signature holds.
+	public := ba_validator(BA_ROOT_ANCHOR)
+	testing.expect(t, public != nil, "the anchor should parse")
+	defer destroy_validator(public)
+	premise := validate(public, "www.corp.", .A, answer, now)
+	testing.expectf(t, premise.status == .Secure, "root anchor only: want Secure, got %v (%q)", premise.status, premise.reason)
+
+	v := ba_validator(BA_ROOT_ANCHOR, BA_CORP_ANCHOR)
+	testing.expect(t, v != nil, "the anchors should parse")
+	defer destroy_validator(v)
+	result := validate(v, "www.corp.", .A, answer, now)
+	testing.expectf(t, result.status == .Bogus, "a root signature under a corp. anchor: want Bogus, got %v (%q)", result.status, result.reason)
+	free_all(context.temp_allocator)
+}
+
+@(test)
 test_a_ds_at_an_anchored_zone_is_the_parents :: proc(t: ^testing.T) {
 	// A DS lives in the parent (RFC 4035 section 5.3.1), so `corp. DS` is
 	// walked to the root and read against the root's key - the `corp.` anchor
@@ -188,7 +231,7 @@ test_closest_anchor_is_the_deepest_on_a_label_boundary :: proc(t: ^testing.T) {
 @(test)
 test_an_unfollowable_anchor_below_the_root_is_found :: proc(t: ^testing.T) {
 	// `start_validator` refuses to start on this zone: it is a starting point
-	// now, and an anchor nothing here can check would serve it insecure.
+	// for the walk, and an anchor nothing here can check would serve it insecure.
 	unknown := []Trust_Anchor {
 		{zone = ".", ds = {key_tag = 1, algorithm = ALG_ED25519, digest_type = DIGEST_SHA256}},
 		{zone = "corp.", ds = {key_tag = 2, algorithm = 200, digest_type = DIGEST_SHA256}},

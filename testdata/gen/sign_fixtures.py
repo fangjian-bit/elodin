@@ -1530,6 +1530,15 @@ def anchor_below_the_root():
     answer = [RR("www.corp.", A, bytes([192, 0, 2, 1]))]
     emit("ba_answer", "www.corp.", "A", message("www.corp.", A, answer + [sign(answer, corp)]))
 
+    # The same name signed by the root, as a public ancestor's view of a
+    # split-horizon name would be. The `corp.` anchor pins the zone, so a key
+    # above the anchor does not vouch for a name inside it.
+    emit("ba_root_signed_answer", "www.corp.", "A", message("www.corp.", A, answer + [sign(answer, root)]))
+    # And `corp.`'s proof that `www.corp.` is no cut, so the walk to the owner
+    # settles on `corp.` and that verdict is Bogus rather than unavailable.
+    no_cut = [RR("www.corp.", NSEC, nsec_rdata("corp.", [A, RRSIG, NSEC]))]
+    emit("ba_www_ds", "www.corp.", "DS", message("www.corp.", DS, [], no_cut + [sign(no_cut, corp)]))
+
 
 @scenario
 def anchored_internal_zones():
