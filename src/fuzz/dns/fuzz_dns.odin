@@ -27,5 +27,8 @@ fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
 	// Every upstream reply is judged by this on the raw bytes, and its alias
 	// branch walks and decodes them on its own (issues #410, #451).
 	_ = dns.peek_referral(data[:size])
+	// Every forwarded and cached answer is read for its RRSIGs' expirations on
+	// the raw bytes, before anything decodes them (issue #165).
+	_, _ = dns.signatures_lapse(data[:size], 0)
 	return 0
 }

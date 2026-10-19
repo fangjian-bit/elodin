@@ -665,6 +665,34 @@ read_ttls :: proc(msg: []u8, offsets: []int, allocator := context.allocator) -> 
 	return ttls
 }
 
+
+// Where the first resource record starts, past the header and the question
+// section, and how many the three sections after it claim; false when the
+// question section runs off the end. For the walks below that read the
+// records' fixed fields in place.
+@(private)
+records_start :: proc(msg: []u8) -> (pos: int, total: int, ok: bool) {
+	if len(msg) < HEADER_SIZE {
+		return
+	}
+	qdcount := int(u16(msg[4]) << 8 | u16(msg[5]))
+	total = int(u16(msg[6]) << 8 | u16(msg[7]))
+	total += int(u16(msg[8]) << 8 | u16(msg[9]))
+	total += int(u16(msg[10]) << 8 | u16(msg[11]))
+	pos = HEADER_SIZE
+	for _ in 0 ..< qdcount {
+		next, name_ok := skip_name(msg, pos)
+		if !name_ok {
+			return
+		}
+		pos = next + 4
+		if pos > len(msg) {
+			return
+		}
+	}
+	return pos, total, true
+}
+
 /*
 Bound every TTL a message carries, on the wire, in place.
 
@@ -704,24 +732,9 @@ collecting offsets first - so a reply claiming three sections of 65535 records
 costs the loop iterations it takes to fail on the first one and no memory at all.
 */
 cap_ttls :: proc(msg: []u8, ceiling: u32) {
-	if len(msg) < HEADER_SIZE {
+	pos, total, ok := records_start(msg)
+	if !ok {
 		return
-	}
-	qdcount := int(u16(msg[4]) << 8 | u16(msg[5]))
-	total := int(u16(msg[6]) << 8 | u16(msg[7]))
-	total += int(u16(msg[8]) << 8 | u16(msg[9]))
-	total += int(u16(msg[10]) << 8 | u16(msg[11]))
-
-	pos := HEADER_SIZE
-	for _ in 0 ..< qdcount {
-		next, name_ok := skip_name(msg, pos)
-		if !name_ok {
-			return
-		}
-		pos = next + 4
-		if pos > len(msg) {
-			return
-		}
 	}
 	for _ in 0 ..< total {
 		next, name_ok := skip_name(msg, pos)
@@ -742,6 +755,64 @@ cap_ttls :: proc(msg: []u8, ceiling: u32) {
 			return
 		}
 	}
+}
+
+/*
+Seconds before the first RRSIG anywhere in the message expires, and whether it
+carries one at all.
+
+RFC 4034 section 3.1.5: an RRSIG "MUST NOT be used for authentication after the
+expiration date", so nothing that hands one out - a forwarded copy, a cached
+one, a stale one - should tell a client to hold it past that. Every section is
+read, the additional one included: each goes to the client, and a DO client
+checks each signature it is handed.
+
+The expiration is the 32-bit field at offset 8 of the RDATA, compared in the
+serial-number space of RFC 1982 as validators compare it, so one already behind
+`now` reads as zero rather than as a lifetime of a century. An RRSIG too short
+to hold the field is read as one that has lapsed: these bytes reach a client
+unvalidated when it set CD or validation is off, and a signature that cannot
+say when it expires is no reason to keep anything.
+
+Walks the wire as `cap_ttls` does and stops where it does, at the first record
+it cannot read; nothing is allocated.
+*/
+signatures_lapse :: proc(msg: []u8, now: u32) -> (left: u32, signed: bool) {
+	left = max(u32)
+	pos, total, ok := records_start(msg)
+	if !ok {
+		return
+	}
+	for _ in 0 ..< total {
+		next, name_ok := skip_name(msg, pos)
+		if !name_ok {
+			return
+		}
+		pos = next
+		if pos + 10 > len(msg) {
+			return
+		}
+		rdlength := int(u16(msg[pos + 8]) << 8 | u16(msg[pos + 9]))
+		rdata := pos + 10
+		pos = rdata + rdlength
+		if pos > len(msg) {
+			return
+		}
+		if Type(u16(msg[next]) << 8 | u16(msg[next + 1])) != .RRSIG {
+			continue
+		}
+		signed = true
+		if rdlength < 12 {
+			return 0, true
+		}
+		expiration := read_ttl_at(msg, rdata + 8)
+		remaining := expiration - now
+		if i32(remaining) <= 0 {
+			return 0, true
+		}
+		left = min(left, remaining)
+	}
+	return
 }
 
 // Rewrites each TTL to `original - elapsed`, floored at `floor_ttl`.

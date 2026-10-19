@@ -1,6 +1,7 @@
 package itest
 
 import "core:fmt"
+import "core:time"
 import "elodin:dns"
 
 /*
@@ -242,6 +243,17 @@ run_wire_cases :: proc(r: ^Runner) {
 				*/
 				want := expected
 				want[3] &~= 0x20
+				/*
+				And the TTLs a signed answer may not be told past its RRSIGs
+				(RFC 4034 section 3.1.5, issue #165). The captured signatures
+				have either long expired - every TTL goes out as zero - or run
+				for days past the TTLs they sit beside, where the cap changes
+				nothing, so reading the clock after the reply rather than when
+				elodin did makes no difference to either.
+				*/
+				if left, signed := dns.signatures_lapse(want, u32(time.time_to_unix(time.now()))); signed {
+					dns.cap_ttls(want, left)
+				}
 				if check(r, len(res.wire) == len(expected), "length: got %d, want %d", len(res.wire), len(expected)) {
 					check(
 						r,

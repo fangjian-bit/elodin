@@ -23,6 +23,12 @@ Entry :: struct {
 	inserted:    time.Time,
 	expires:     time.Time,
 	/*
+	When the first RRSIG in the message stops verifying, or zero for a message
+	that carries none. Neither the entry nor its stale window outlives it: see
+	`signatures_lapse` and `deadline`.
+	*/
+	signed_until: time.Time,
+	/*
 	Whether the answer section redirects anywhere: it holds a CNAME. A DNAME
 	always arrives with one, so is not looked for separately - see `redirects`.
 
@@ -1064,6 +1070,30 @@ thing in both directions.
 		}
 		effective = clamp(effective, c.min_ttl, c.max_ttl)
 	}
+	/*
+	And no longer than its signatures. RFC 4034 section 3.1.5: an RRSIG "MUST
+	NOT be used for authentication after the expiration date", and a DO client
+	handed one past it - with the AD bit it was stored with - finds this server
+	the broken hop. A ceiling past `min_ttl`, which is a floor on what records
+	claim and not on what their signatures allow; and a message whose signature
+	has already lapsed is not stored at all.
+	*/
+	now := time.now()
+	now_unix := time.time_to_unix(now)
+	signed_left, signed := dns.signatures_lapse(wire, u32(now_unix))
+	if signed {
+		// The lifetime itself is capped below, at the expiration second.
+		if signed_left == 0 {
+			effective = 0
+		}
+		// What every copy tells the client too, as `max_ttl` is above: an
+		// answer nothing here validated - the client set CD, or validation is
+		// off - would otherwise go out telling it to hold the signatures for
+		// the upstream's figure.
+		for &t in ttls {
+			t = min(t, signed_left)
+		}
+	}
 	if effective == 0 {
 		delete(offsets, c.allocator)
 		delete(ttls, c.allocator)
@@ -1086,7 +1116,6 @@ thing in both directions.
 		return false
 	}
 
-	now := time.now()
 	e := new(Entry, c.allocator)
 	e.key = strings.clone(key, c.allocator)
 	e.wire = make([]u8, len(wire), c.allocator)
@@ -1100,6 +1129,14 @@ thing in both directions.
 	e.ede = ede
 	e.inserted = now
 	e.expires = time.time_add(now, time.Duration(effective) * time.Second)
+	if signed {
+		// The expiration second itself, which `now` is a fraction past the
+		// whole second `signed_left` counts from.
+		e.signed_until = time.unix(now_unix + i64(signed_left), 0)
+		if time.diff(e.signed_until, e.expires) > 0 {
+			e.expires = e.signed_until
+		}
+	}
 
 	sync.mutex_lock(&c.mu)
 	defer sync.mutex_unlock(&c.mu)
@@ -1233,7 +1270,16 @@ The caller holds the lock.
 */
 @(private)
 deadline :: proc(c: ^Cache, e: ^Entry) -> time.Time {
-	return time.time_add(e.expires, MAX_STALE) if c.serve_stale && !e.bogus else e.expires
+	if !c.serve_stale || e.bogus {
+		return e.expires
+	}
+	// The stale window is for an upstream outage, not for signatures that no
+	// longer verify: it ends where they do (RFC 4034 section 3.1.5).
+	stale := time.time_add(e.expires, MAX_STALE)
+	if e.signed_until != {} && time.diff(e.signed_until, stale) > 0 {
+		return e.signed_until
+	}
+	return stale
 }
 
 /*

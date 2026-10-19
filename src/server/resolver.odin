@@ -2621,7 +2621,17 @@ resolve_query :: proc(
 	which refuses what this walk stopped short on, so no entry pins the figure
 	and no later client is served it.
 	*/
-	dns.cap_ttls(resp, cache.ttl_ceiling(s.answers))
+	/*
+	And no longer than the signatures the answer carries (RFC 4034 section
+	3.1.5): the copy forwarded here is the one a client holds, and a validated
+	answer is already held to this by `present_response` while one nothing
+	validated - CD, or validation off - is held to it only here.
+	*/
+	ceiling := cache.ttl_ceiling(s.answers)
+	if left, signed := dns.signatures_lapse(resp, u32(time.time_to_unix(time.now()))); signed {
+		ceiling = min(ceiling, left)
+	}
+	dns.cap_ttls(resp, ceiling)
 
 	/*
 	Decoded once for the three things below that read it: the rebinding check
