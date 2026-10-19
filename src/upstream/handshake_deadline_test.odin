@@ -56,10 +56,9 @@ reset_then_stall :: proc(m: ^Stall_Mock) {
 fresh `timeout` for each dial and each handshake (#346).
 
 The peer resets the first handshake just short of the budget and never answers
-the second. Each step given the whole of `timeout`, the retry started a new
-second-long handshake with the first one's time already spent, and the caller was
-held for nearly twice its budget - four times, with a dial slow to connect in
-front of each.
+the second. A retry given a fresh `timeout` would start a new second-long
+handshake with the first one's time already spent and hold the caller for nearly
+twice its budget - four times, with a dial slow to connect in front of each.
 */
 @(test)
 test_open_stream_spends_one_deadline_across_the_retry :: proc(t: ^testing.T) {
@@ -106,4 +105,39 @@ test_open_stream_spends_one_deadline_across_the_retry :: proc(t: ^testing.T) {
 	// `timeout` for the retry comes to.
 	testing.expectf(t, spent < 1400 * time.Millisecond, "a %v open_stream was held for %v", time.Duration(BUDGET), spent)
 	free_all(context.temp_allocator)
+}
+
+// One retry, from the first attempt, while the deadline has time left; with no
+// deadline at all, always.
+@(test)
+test_open_stream_retries_only_inside_its_deadline :: proc(t: ^testing.T) {
+	now := time.tick_now()
+	ahead := time.tick_add(now, time.Second)
+	behind := time.tick_add(now, -time.Second)
+	testing.expect(t, retry_due(time.Second, ahead, now, 0), "no retry with a second left")
+	testing.expect(t, !retry_due(time.Second, behind, now, 0), "a retry after the deadline")
+	testing.expect(t, !retry_due(time.Second, ahead, now, 1), "a second retry")
+	testing.expect(t, retry_due(0, behind, now, 0), "no retry under no deadline")
+}
+
+/*
+A deadline already gone reaches the socket as a millisecond, not as a negative
+`timeval` that reads back as zero - which the socket, and `tlsx` after it, take
+as no timeout at all.
+*/
+@(test)
+test_an_expired_deadline_is_a_millisecond_on_the_socket :: proc(t: ^testing.T) {
+	socket, err := net.create_socket(.IP4, .TCP)
+	if !testing.expectf(t, err == nil, "cannot make a socket: %v", err) {
+		return
+	}
+	defer net.close(socket)
+	set_socket_timeouts(socket, -5 * time.Millisecond)
+	for option in ([]posix.Sock_Option{.RCVTIMEO, .SNDTIMEO}) {
+		tv: posix.timeval
+		length := posix.socklen_t(size_of(tv))
+		got := posix.getsockopt(posix.FD(net.any_socket_to_socket(socket)), posix.SOL_SOCKET, option, &tv, &length)
+		testing.expect_value(t, got, posix.result.OK)
+		testing.expectf(t, tv.tv_sec == 0 && tv.tv_usec == 1000, "%v reads %ds %dus", option, tv.tv_sec, tv.tv_usec)
+	}
 }

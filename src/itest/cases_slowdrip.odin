@@ -180,9 +180,9 @@ run_slow_drip_cases :: proc(r: ^Runner) {
 /*
 The other side of the same trust boundary: an upstream that trickles its
 ServerHello is given up on at the query's timeout, not held for as long as it
-keeps trickling (#346). The handshake ran on a blocking socket bounded per read,
-so a DoT upstream - or anything on the path to it - sending a byte inside every
-wait held the worker that dialled it, and the client got nothing.
+keeps trickling (#346). SO_RCVTIMEO bounds one read and restarts with every byte,
+so a handshake bounded per read would let a DoT upstream - or anything on the
+path to it - sending a byte inside every wait hold the worker that dialled it.
 */
 @(private = "file")
 run_upstream_drip_case :: proc(r: ^Runner) {

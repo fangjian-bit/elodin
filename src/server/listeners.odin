@@ -2004,7 +2004,7 @@ which is not what shortening an idle timeout asks for.
 So the handshake has a floor under it and the connection's figure is put back
 once the handshake is done. Five seconds is many times over what a handshake
 costs on any path worth serving, and it is still a bound - which is the whole
-point, the trickle being what `accept_loop` is there to end.
+point, the trickle being what `tlsx.handshake_loop` is there to end.
 
 A non-positive `client_timeout` is no receive timeout at all and stays that way:
 the operator asked for no bound, and a floor is not a bound they asked to add.
