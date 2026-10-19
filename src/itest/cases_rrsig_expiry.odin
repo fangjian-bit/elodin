@@ -9,7 +9,7 @@ Issue #165: a cached answer is not served past its signatures, fresh or stale.
 
 RFC 4034 section 3.1.5: an RRSIG "MUST NOT be used for authentication after the
 expiration date". The mock answers with an A record and an RRSIG over it that
-expires two seconds from now. Validation is off, so nothing here has checked the
+expires three seconds from now. Validation is off, so nothing here has checked the
 signature and the cache is the only thing that can hold to it. The answer must
 go out telling the client no more than the signature has left. Once the clock is
 past the expiration, with the upstream silent, `serve_stale` must not hand the
@@ -80,7 +80,7 @@ run_rrsig_expiry_cases :: proc(r: ^Runner) {
 
 	// The clock is read once the server is up, so a slow start cannot spend the
 	// signature before the first query and leave both cases nothing to test.
-	expiration := u32(time.time_to_unix(time.now())) + 2
+	expiration := u32(time.time_to_unix(time.now())) + 3
 	mock := mock_make("rrsig-expiry", upstream_port)
 	mock_reply(mock, RX_QNAME, u16(dns.Type.A), rx_answer(expiration))
 	if !mock_start(mock) {
@@ -91,11 +91,22 @@ run_rrsig_expiry_cases :: proc(r: ^Runner) {
 
 	start_case(r, "cache: a signed answer is told no more ttl than its rrsig has left")
 	{
+		before := u32(time.time_to_unix(time.now()))
 		res := query_udp(udp_port, build_query(RX_QNAME, u16(dns.Type.A), id = 1, edns_size = 1232, dnssec_ok = true))
+		after := u32(time.time_to_unix(time.now()))
 		if check(r, res.ok, "no response to the query that filled the cache") {
 			ttl, has := min_answer_ttl(r, res.wire)
-			// At least one: the signature was live, so the answer was cached.
-			check(r, has && ttl >= 1 && ttl <= 2, "the answer went out with ttl %d; its rrsig has 2 s left", ttl)
+			// Exactly what the signature had left when elodin read the clock,
+			// somewhere between `before` and `after`; and at least one, so the
+			// answer was live enough to be cached for the case below.
+			check(
+				r,
+				has && ttl >= 1 && ttl + after >= expiration && ttl + before <= expiration,
+				"the answer went out with ttl %d; its rrsig had %d-%d s left",
+				ttl,
+				expiration - min(after, expiration),
+				expiration - before,
+			)
 		}
 	}
 	end_case(r)

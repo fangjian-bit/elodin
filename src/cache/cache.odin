@@ -463,7 +463,7 @@ get :: proc(
 		// And no longer than its signatures have left: `deadline` keeps the
 		// stale window inside them, and the figure a copy carries stays there
 		// too (RFC 4034 section 3.1.5).
-		stale_ttl = min(stale_ttl, signature_left(e, now))
+		stale_ttl = min(stale_ttl, signature_left(e.signed_until, now))
 		for off in e.ttl_offsets {
 			dns.write_ttl_at(out, off, stale_ttl)
 		}
@@ -482,7 +482,7 @@ get :: proc(
 	} else {
 		// `min_ttl` floors what records claim, not what their signatures allow
 		// (RFC 4034 section 3.1.5): no copy is told to hold one past it.
-		dns.patch_ttls(out, e.ttl_offsets, e.ttls, elapsed, min(c.min_ttl, signature_left(e, now)))
+		dns.patch_ttls(out, e.ttl_offsets, e.ttls, elapsed, min(c.min_ttl, signature_left(e.signed_until, now)))
 		if !probe {
 			c.stats.hits += 1
 		}
@@ -1254,14 +1254,13 @@ stats :: proc(c: ^Cache) -> Stats {
 	return c.stats
 }
 
-// Whole seconds before the entry's first RRSIG expires, or no bound for an
-// entry that carries none.
-@(private)
-signature_left :: proc(e: ^Entry, now: time.Time) -> u32 {
-	if e.signed_until == {} {
+// Whole seconds before `signed_until` - an entry's, or a hit's - or no bound
+// for one that is zero, an entry that carries no RRSIG.
+signature_left :: proc(signed_until, now: time.Time) -> u32 {
+	if signed_until == {} {
 		return max(u32)
 	}
-	return u32(max(0, time.duration_seconds(time.diff(now, e.signed_until))))
+	return u32(max(0, time.duration_seconds(time.diff(now, signed_until))))
 }
 
 /*

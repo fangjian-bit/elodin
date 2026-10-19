@@ -107,8 +107,10 @@ got:
 
 - The query goes upstream as a miss would. If nothing has come back after
   `stale_timeout` (RFC 8767 section 5's client response timer), the expired copy
-  goes out with a 30-second TTL, and the refresh carries on in the background and
-  caches whatever it gets.
+  goes out with a 30-second TTL, or what its RRSIGs have left if that is less,
+  and the refresh carries on in the background and caches whatever it gets. A
+  copy whose RRSIGs expired during the wait is not served: the client waits for
+  the refresh, up to the upstream budget, and gets SERVFAIL if that fails too.
 - One refresh per name runs at a time; clients arriving meanwhile get the expired
   copy at once.
 - Keep `stale_timeout` under the client's own timeout (glibc gives up at five

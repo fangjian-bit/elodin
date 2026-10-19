@@ -2643,11 +2643,9 @@ resolve_query :: proc(
 	answer is already held to this by `present_response` while one nothing
 	validated - CD, or validation off - is held to it only here.
 	*/
-	ceiling := cache.ttl_ceiling(s.answers)
-	if left, signed := dns.signatures_lapse(resp, u32(time.time_to_unix(time.now()))); signed {
-		ceiling = min(ceiling, left)
-	}
-	dns.cap_ttls(resp, ceiling)
+	// `signatures_lapse` reads no bound at all for a message that carries none.
+	signed_left, _ := dns.signatures_lapse(resp, u32(time.time_to_unix(time.now())))
+	dns.cap_ttls(resp, min(cache.ttl_ceiling(s.answers), signed_left))
 
 	/*
 	Decoded once for the three things below that read it: the rebinding check
@@ -3050,7 +3048,7 @@ upstream_failed :: proc(
 ) {
 	if stale_hit.wire != nil && stale_usable(stale_hit) {
 		if stale_hit.signed_until != {} {
-			dns.cap_ttls(stale_hit.wire, u32(time.duration_seconds(time.diff(time.now(), stale_hit.signed_until))))
+			dns.cap_ttls(stale_hit.wire, cache.signature_left(stale_hit.signed_until, time.now()))
 		}
 		return serve_from_cache(s, stale_hit, query, msg, q, proto, client, limit, validating, started, spent, allocator, ede)
 	}
