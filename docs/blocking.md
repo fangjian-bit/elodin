@@ -130,11 +130,14 @@ digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share o
   client asked for, for the question and for every name a CNAME in the answer
   leads to. A block only `$dnstype` rules make is answered NODATA where
   `response` is `nxdomain`: NXDOMAIN would say the name has no other types
-  either (RFC 8020), and a client caching it would lose them. Every rule for a name applies, so `||x^$dnstype=A` and
-  `||x^$dnstype=AAAA` block both, and a rule without `$dnstype` blocks every
+  either (RFC 8020), and a client caching it would lose them. Every rule for a
+  name applies, so `||x^$dnstype=A` and `||x^$dnstype=AAAA` block both, rules
+  that add up to every type (`$dnstype=~A` and `$dnstype=~AAAA`) block the name
+  as one without `$dnstype` does, and a rule without `$dnstype` blocks every
   type. A rule naming an unknown type, nothing, or more than 64 types (with the
   name's other `$dnstype` rules), is skipped; so is one that excludes every
-  type it names (`$dnstype=A|~A`). `$badfilter` cancels a rule whatever either one's `$dnstype`.
+  type it names (`$dnstype=A|~A`). `$badfilter` cancels a rule whatever either
+  one's `$dnstype`.
 - Skipped, without failing the list: any other modifier (`$client`, `$ctag`,
   `$denyallow`, `$dnsrewrite`, `$domain`, `$elemhide`, `$removeparam`, ...),
   cosmetic rules (`##`, `$$`), and

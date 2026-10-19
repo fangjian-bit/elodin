@@ -34,6 +34,11 @@ Type_Filter :: struct {
 // What a rule with no `$dnstype` matches. The zero filter matches nothing.
 ANY_TYPE :: Type_Filter{nil, true}
 
+// Whether `f` matches every type, as a rule without `$dnstype` does.
+type_is_any :: proc(f: Type_Filter) -> bool {
+	return f.negated && len(f.types) == 0
+}
+
 type_matches :: proc(f: Type_Filter, qtype: dns.Type) -> bool {
 	_, found := slice.binary_search(f.types, u16(qtype))
 	return found != f.negated
@@ -52,12 +57,9 @@ parse_dnstype :: proc(value: string, buf: []u16) -> (f: Type_Filter, ok: bool) {
 	np, ne := 0, 0
 	rest := value
 	for {
-		bar := len(rest)
-		for i in 0 ..< len(rest) {
-			if rest[i] == '|' {
-				bar = i
-				break
-			}
+		bar := strings.index_byte(rest, '|')
+		if bar < 0 {
+			bar = len(rest)
 		}
 		item := rest[:bar]
 		negated := len(item) > 0 && item[0] == '~'

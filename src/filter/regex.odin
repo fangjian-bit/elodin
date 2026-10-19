@@ -170,8 +170,7 @@ regex_add :: proc(s: ^Set, pattern: string, types := ANY_TYPE) -> (stored: bool)
 	re := regex_copy(trial, s.allocator)
 	shortcut := strings.clone(regex_shortcut(pattern, temp), s.allocator)
 	held := new(Type_Filter, s.allocator)
-	first := type_union({}, types, merge_buf[:]) or_return
-	id := type_intern(s, first)
+	id := type_intern(s, types)
 	held^ = s.filters[id]
 	kept := Regex_Rule{strings.clone(pattern, s.allocator), re, cost, shortcut, held}
 	append(&s.regexes, kept)
@@ -305,7 +304,7 @@ regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type) -> (best: Cov
 	copy(url_buf[len(URL_PREFIX):], subject)
 	url := string(url_buf[:len(URL_PREFIX) + len(subject)])
 	for r in s.regexes {
-		any_type := r.types.negated && len(r.types.types) == 0
+		any_type := type_is_any(r.types^)
 		if (best == .Typed && !any_type) || !type_matches(r.types^, qtype) || !strings.contains(url, r.shortcut) {
 			continue
 		}

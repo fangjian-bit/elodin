@@ -317,6 +317,10 @@ test_a_block_says_when_only_a_dnstype_rule_made_it :: proc(t: ^testing.T) {
 		{"||a.v6.example^$dnstype=AAAA\n||v6.example^", "a.v6.example.", false},
 		{"||v6.example^$dnstype=AAAA\n/^v6\\./", "v6.example.", false},
 		{"/^v6\\.example$/$dnstype=AAAA\n/example$/", "v6.example.", false},
+		// Rules that add up to every type are a rule for every type.
+		{"||v6.example^$dnstype=~A\n||v6.example^$dnstype=~AAAA", "v6.example.", false},
+		{"||v6.example^$dnstype=A\n||v6.example^$dnstype=~A", "a.v6.example.", false},
+		{"/^v6\\.example$/$dnstype=~A\n/^v6\\.example$/$dnstype=~AAAA", "v6.example.", false},
 	}
 	for c in cases {
 		block, allow := set_make(), set_make()

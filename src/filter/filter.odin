@@ -162,16 +162,16 @@ set_add :: proc(s: ^Set, domain: string, flags: Rule_Flags, types := ANY_TYPE) -
 	if add == {} {
 		return false
 	}
-	held := name_held(s, key)
-	if types.negated && len(types.types) == 0 {
-		if existing := table_entry(&s.names, key); existing != nil {
-			existing^ += add
-			stored = true
-		} else {
-			stored = table_insert(&s.names, key, add)
-		}
-	} else {
-		stored = typed_add(s, key, add, types)
+	existing := table_entry(&s.names, key)
+	held := entry_held(existing, len(key))
+	switch {
+	case type_is_any(types) && existing != nil:
+		existing^ += add
+		stored = true
+	case type_is_any(types):
+		stored = table_insert(&s.names, key, add)
+	case:
+		stored = typed_add(s, key, existing, add, types)
 	}
 	if stored && !held {
 		s.count += 1
@@ -202,8 +202,8 @@ set_cancel :: proc(s: ^Set, domain: string, flags: Rule_Flags) {
 	} else {
 		s.cancelled[strings.clone(key, s.allocator)] = flags
 	}
-	held := name_held(s, key)
 	if existing := table_entry(&s.names, key); existing != nil {
+		held := entry_held(existing, len(key))
 		existing^ -= flags
 		if .Typed in existing^ {
 			ids := typed_ids(existing, len(key))
@@ -212,20 +212,22 @@ set_cancel :: proc(s: ^Set, domain: string, flags: Rule_Flags) {
 			}
 			typed_ids_store(existing, len(key), ids)
 		}
-	}
-	if held && !name_held(s, key) {
-		s.count -= 1
+		if held && !entry_held(existing, len(key)) {
+			s.count -= 1
+		}
 	}
 }
 
 /*
 `set_add` for a rule covering only some types: merged into what the name's other
 such rules cover, one filter for its apex and one for below it. An anchor the
-table covers for every type already takes nothing more.
+table covers for every type already takes nothing more, and one whose rules add
+up to every type (`~A` and `~AAAA`) is covered for every type, as a plain rule
+covers it. `entry` is `key`'s, or nil.
 */
 @(private)
-typed_add :: proc(s: ^Set, key: string, flags: Rule_Flags, types: Type_Filter) -> bool {
-	entry := table_entry(&s.names, key)
+typed_add :: proc(s: ^Set, key: string, entry: ^Rule_Flags, flags: Rule_Flags, types: Type_Filter) -> bool {
+	entry := entry
 	add := flags - (entry^ if entry != nil else {})
 	if add == {} {
 		return true
@@ -235,9 +237,15 @@ typed_add :: proc(s: ^Set, key: string, flags: Rule_Flags, types: Type_Filter) -
 		ids = typed_ids(entry, len(key))
 	}
 	buf: [2 * MAX_RULE_TYPES]u16
+	every: Rule_Flags
 	for flag in add {
 		merged := type_union(s.filters[ids[int(flag)]], types, buf[:]) or_return
-		ids[int(flag)] = type_intern(s, merged)
+		if type_is_any(merged) {
+			every += {flag}
+			ids[int(flag)] = 0
+		} else {
+			ids[int(flag)] = type_intern(s, merged)
+		}
 	}
 	switch {
 	case entry == nil:
@@ -249,18 +257,19 @@ typed_add :: proc(s: ^Set, key: string, flags: Rule_Flags, types: Type_Filter) -
 			return false
 		}
 	}
+	entry^ += every
 	typed_ids_store(entry, len(key), ids)
 	return true
 }
 
-// Whether any rule covers `key`, for any type: what `count` counts.
+// Whether any rule covers the name of `entry` (nil for none), for any type:
+// what `count` counts.
 @(private)
-name_held :: proc(s: ^Set, key: string) -> bool {
-	entry := table_entry(&s.names, key)
+entry_held :: proc(entry: ^Rule_Flags, key_len: int) -> bool {
 	if entry == nil {
 		return false
 	}
-	return entry^ & {.Apex, .Subdomains} != {} || (.Typed in entry^ && typed_ids(entry, len(key)) != {})
+	return entry^ & {.Apex, .Subdomains} != {} || (.Typed in entry^ && typed_ids(entry, key_len) != {})
 }
 
 // What covers `name` for `qtype` as `flag` says: the table, for every type, or
