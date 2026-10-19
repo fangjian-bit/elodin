@@ -210,6 +210,9 @@ test_an_nsec3_name_error_on_unknown_flags_is_bogus :: proc(t: ^testing.T) {
 	budget := query_budget(v)
 	result := validate_denial(v, &budget, msg, N3_QNAME, .A, .IN, u32(FIXTURE_TIME), time.unix(FIXTURE_TIME, 0), context.temp_allocator)
 	testing.expectf(t, result.status == .Bogus, "a denial resting on ignored records should be bogus, got %v (%q)", result.status, result.reason)
+	// "no denial of existence" would be Bogus too, but for records that did not
+	// verify: this reason says they verified and were then ignored.
+	testing.expect_value(t, result.reason, "denial of existence not proven")
 	free_all(context.temp_allocator)
 }
 

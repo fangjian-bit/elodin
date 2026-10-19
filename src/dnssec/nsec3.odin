@@ -397,7 +397,6 @@ give up is the one that has been sat on longest.
 @(private)
 Nsec3_Hash :: struct {
 	name:       string,
-	algorithm:  u8,
 	salt:       []u8,
 	iterations: u16,
 	hash:       [20]u8,
@@ -411,13 +410,12 @@ Nsec3_Hashes :: struct {
 }
 
 /*
-A kept hash belongs to the name and to all three of the parameters that produced
-it, and the algorithm is in the key for the same reason as the rest. Only SHA-1
-is ever computed, so a record naming another hash has to miss here and be
-refused by `nsec3_hash_with` - reusing a neighbour's digest for it would read a
-record this package cannot check as one it had. The flags are not in the key,
-because they do not change the hash, so a record with unknown flags is turned
-away before the lookup rather than by it.
+A kept hash belongs to the name and to the salt and iteration count that
+produced it. A record `nsec3_readable` turns away - another hash, or flags other
+than opt-out - is turned away before the lookup: reusing a neighbour's digest
+for it would read a record this package cannot check as one it had. Neither the
+algorithm nor the flags are in the key, because every record that reaches the
+lookup is SHA-1 and the flags do not change the hash.
 */
 @(private)
 nsec3_hash_of :: proc(name: string, rr: Nsec3, budget: ^Nsec3_Budget) -> (hash: []u8, ok: bool) {
@@ -427,7 +425,6 @@ nsec3_hash_of :: proc(name: string, rr: Nsec3, budget: ^Nsec3_Budget) -> (hash: 
 	for &kept in budget.hashed.kept {
 		if kept.have &&
 		   kept.name == name &&
-		   kept.algorithm == rr.hash_algorithm &&
 		   kept.iterations == rr.iterations &&
 		   len(kept.salt) == len(rr.salt) &&
 		   mem.compare(kept.salt, rr.salt) == 0 {
@@ -441,7 +438,7 @@ nsec3_hash_of :: proc(name: string, rr: Nsec3, budget: ^Nsec3_Budget) -> (hash: 
 		// a record this one could not be computed for leaves them alone.
 		return nil, false
 	}
-	c.name, c.algorithm, c.salt, c.iterations, c.have = name, rr.hash_algorithm, rr.salt, rr.iterations, true
+	c.name, c.salt, c.iterations, c.have = name, rr.salt, rr.iterations, true
 	budget.hashed.next = (budget.hashed.next + 1) % len(budget.hashed.kept)
 	return c.hash[:], true
 }

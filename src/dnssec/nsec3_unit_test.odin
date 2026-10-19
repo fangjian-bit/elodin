@@ -252,8 +252,8 @@ test_nsec3_unknown_hash_algorithm_is_refused :: proc(t: ^testing.T) {
 
 	/*
 	And it must survive the reuse a scan does. The hash of a name is kept across
-	the records so that a chain sharing one NSEC3PARAM is hashed once, and the
-	parameters it is kept under have to include the algorithm: below, the first
+	the records so that a chain sharing one NSEC3PARAM is hashed once, and a
+	record naming another hash must not reach that lookup: below, the first
 	record puts the SHA-1 hash of `a.example.` in hand and the second claims an
 	algorithm nobody defined while carrying that very hash as its owner. Reusing
 	the digest across the two reads the second record as matching the name,
