@@ -52,6 +52,9 @@ run_blocking_cases :: proc(r: ^Runner) {
 ||third-party.test^$third-party
 ||first-party.test^$~third-party
 /third-party-regex/$third-party
+||v6only.test^$dnstype=AAAA
+||not-a.test^$dnstype=~A
+/^v6only\.regex\.test$/$dnstype=AAAA
 @@||good.evil.test^
 |http://exact.test^
 address=/dnsmasq.test/0.0.0.0
@@ -243,6 +246,45 @@ blocking:
 				if check(r, res.ok, "no response for %s", name) {
 					h := parse_header(r, res.wire)
 					check(r, h.rcode == int(dns.Rcode.No_Error), "%s was blocked by a rule with a third-party modifier", name)
+				}
+			}
+		}
+		end_case(r)
+
+		/*
+		`$dnstype` narrows a rule to the query types it names (#406). The name
+		keeps its other types, so the block is NODATA where `blocking.response`
+		says nxdomain (RFC 8020 section 2), and it never reaches the upstream.
+		*/
+		start_case(r, "blocking: a $dnstype rule blocks only its types, as NODATA")
+		{
+			Typed :: struct {
+				name:    string,
+				qtype:   dns.Type,
+				blocked: bool,
+			}
+			typed := []Typed {
+				{"v6only.test.", .AAAA, true},
+				{"sub.v6only.test.", .AAAA, true},
+				{"v6only.test.", .A, false},
+				{"v6only.test.", .TXT, false},
+				{"not-a.test.", .A, false},
+				{"not-a.test.", .AAAA, true},
+				{"not-a.test.", .TXT, true},
+				{"v6only.regex.test.", .AAAA, true},
+				{"v6only.regex.test.", .A, false},
+			}
+			for c in typed {
+				before := mock_total(mock)
+				res := query_udp(udp_port, build_query(c.name, u16(c.qtype)))
+				if check(r, res.ok, "no response for %s %v", c.name, c.qtype) {
+					h := parse_header(r, res.wire)
+					asked := mock_total(mock) > before
+					check(r, h.rcode == int(dns.Rcode.No_Error), "%s %v: rcode %d, want NOERROR", c.name, c.qtype, h.rcode)
+					check(r, asked != c.blocked, "%s %v: blocked %v, want %v", c.name, c.qtype, !asked, c.blocked)
+					if c.blocked {
+						check(r, h.ancount == 0 && h.nscount == 1, "%s %v: %d answers, %d authority, want NODATA with its SOA", c.name, c.qtype, h.ancount, h.nscount)
+					}
 				}
 			}
 		}

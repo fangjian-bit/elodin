@@ -307,7 +307,10 @@ pm_cname_chain :: proc(
 	base: int,
 	allocator: mem.Allocator,
 ) -> u16 {
-	alias := pm_name("alias." + PM_ZONE, allocator)
+	// Half the chains end at a name a `$dnstype` rule lists, so the walk is
+	// judged on the question's type (PARITY_BLOCKED_TYPED). Picked by where the
+	// record lands rather than drawn, so a seed replays the stream it found.
+	alias := pm_name("typed-alias." + PM_ZONE if base & 1 == 1 else "alias." + PM_ZONE, allocator)
 	pm_rr(body, PM_PTR_Q, 5, 1, 600, alias, allocator)
 	if qtype == 5 {
 		return 1

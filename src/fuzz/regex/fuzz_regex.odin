@@ -34,7 +34,7 @@ fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
 		name = text[:i]
 	}
 	for n in ([]string{name, "ads.example.com.", "a\\046b(c).x\\032y.", "0-_9.z."}) {
-		_ = filter.engine_match(e, n)
+		_ = filter.engine_match(e, n, .A)
 	}
 	// The sets are the deferred destroys' to free, not the engine's.
 	filter.engine_swap(e, nil, nil)

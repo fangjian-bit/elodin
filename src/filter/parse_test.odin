@@ -34,7 +34,7 @@ matches :: proc(text: string, format: Format, name: string) -> Decision {
 	e := engine_make()
 	defer engine_destroy(e)
 	engine_swap(e, block, allow)
-	return engine_match(e, name)
+	return engine_match(e, name, .A)
 }
 
 @(test)
@@ -65,9 +65,9 @@ ff02::3 ip6-allhosts
 	defer set_destroy(block)
 	defer set_destroy(allow)
 	testing.expectf(t, block.count == 1, "only the one real rule should be kept, got %d", block.count)
-	testing.expect(t, set_lookup(block, "ads.example"), "the real rule should be there")
+	testing.expect(t, set_lookup(block, "ads.example", .A), "the real rule should be there")
 	for name in LOCALHOST_NAMES {
-		testing.expectf(t, !set_lookup(block, name), "%q must not be sunk", name)
+		testing.expectf(t, !set_lookup(block, name, .A), "%q must not be sunk", name)
 	}
 
 	// And the check does not care about case, because hosts files do not.
@@ -85,7 +85,7 @@ test_a_hosts_line_sinks_every_name_after_the_address :: proc(t: ^testing.T) {
 	defer set_destroy(allow)
 	testing.expect_value(t, block.count, 3)
 	for name in ([]string{"a.example", "b.example", "c.example"}) {
-		testing.expectf(t, set_lookup(block, name), "%q should be blocked", name)
+		testing.expectf(t, set_lookup(block, name, .A), "%q should be blocked", name)
 	}
 }
 
@@ -177,8 +177,8 @@ test_a_hosts_line_needs_an_address_first :: proc(t: ^testing.T) {
 	defer set_destroy(block)
 	defer set_destroy(allow)
 	testing.expect_value(t, block.count, 1)
-	testing.expect(t, set_lookup(block, "ads.example"))
-	testing.expect(t, !set_lookup(block, "requests"), "a word of an error page was sunk")
+	testing.expect(t, set_lookup(block, "ads.example", .A))
+	testing.expect(t, !set_lookup(block, "requests", .A), "a word of an error page was sunk")
 }
 
 @(test)
@@ -456,19 +456,19 @@ test_set_lookup_walks_the_parents_for_subdomain_rules :: proc(t: ^testing.T) {
 	set_add(s, "ads.example", {.Subdomains})
 	set_add(s, "apex.example", {.Apex})
 
-	testing.expect(t, set_lookup(s, "a.b.c.d.e.ads.example"), "a deep name is still under the rule")
-	testing.expect(t, !set_lookup(s, "ads.example"), "a subdomains-only rule does not cover the name itself")
-	testing.expect(t, set_lookup(s, "apex.example"), "an apex rule covers the name")
-	testing.expect(t, !set_lookup(s, "sub.apex.example"), "and nothing below it")
-	testing.expect(t, !set_lookup(s, "example"), "the walk does not match a bare parent label")
-	testing.expect(t, !set_lookup(s, "unrelated.example"), "nor an unrelated name")
-	testing.expect(t, !set_lookup(s, ""), "nor an empty one")
+	testing.expect(t, set_lookup(s, "a.b.c.d.e.ads.example", .A), "a deep name is still under the rule")
+	testing.expect(t, !set_lookup(s, "ads.example", .A), "a subdomains-only rule does not cover the name itself")
+	testing.expect(t, set_lookup(s, "apex.example", .A), "an apex rule covers the name")
+	testing.expect(t, !set_lookup(s, "sub.apex.example", .A), "and nothing below it")
+	testing.expect(t, !set_lookup(s, "example", .A), "the walk does not match a bare parent label")
+	testing.expect(t, !set_lookup(s, "unrelated.example", .A), "nor an unrelated name")
+	testing.expect(t, !set_lookup(s, "", .A), "nor an empty one")
 
 	// An empty set answers nothing, and neither does a nil one.
 	empty := set_make()
 	defer set_destroy(empty)
-	testing.expect(t, !set_lookup(empty, "ads.example"), "an empty set matches nothing")
-	testing.expect(t, !set_lookup(nil, "ads.example"), "and a missing one does not crash")
+	testing.expect(t, !set_lookup(empty, "ads.example", .A), "an empty set matches nothing")
+	testing.expect(t, !set_lookup(nil, "ads.example", .A), "and a missing one does not crash")
 }
 
 @(test)
@@ -484,8 +484,8 @@ test_set_add_merges_the_flags_of_a_repeated_name :: proc(t: ^testing.T) {
 	set_add(s, "ads.example", {.Apex})
 	set_add(s, "ads.example", {.Subdomains})
 	testing.expect_value(t, s.count, 1)
-	testing.expect(t, set_lookup(s, "ads.example"), "the apex is covered")
-	testing.expect(t, set_lookup(s, "sub.ads.example"), "and so is the subtree")
+	testing.expect(t, set_lookup(s, "ads.example", .A), "the apex is covered")
+	testing.expect(t, set_lookup(s, "sub.ads.example", .A), "and so is the subtree")
 
 	// A name that will not normalise is not a rule, and must not be counted.
 	set_add(s, "not a domain", {.Apex})
@@ -509,11 +509,11 @@ test_a_badfilter_rule_cancels_the_rule_it_names :: proc(t: ^testing.T) {
 	parse_list(block, allow, "||pl.ua^\n||kept.example^\n||linksprf.com^$badfilter\n@@||ok.example^\n", .Adblock)
 	testing.expect_value(t, block.count, 1)
 	testing.expect_value(t, allow.count, 0)
-	testing.expect(t, !set_lookup(block, "www.pl.ua"), "a cancelled rule blocks nothing under it")
-	testing.expect(t, !set_lookup(block, "pl.ua"), "nor the name itself")
-	testing.expect(t, !set_lookup(block, "linksprf.com"), "cancelled when the rule came first, too")
-	testing.expect(t, !set_lookup(allow, "ok.example"), "an allow rule can be cancelled as well")
-	testing.expect(t, set_lookup(block, "kept.example"), "a rule nobody cancelled still blocks")
+	testing.expect(t, !set_lookup(block, "www.pl.ua", .A), "a cancelled rule blocks nothing under it")
+	testing.expect(t, !set_lookup(block, "pl.ua", .A), "nor the name itself")
+	testing.expect(t, !set_lookup(block, "linksprf.com", .A), "cancelled when the rule came first, too")
+	testing.expect(t, !set_lookup(allow, "ok.example", .A), "an allow rule can be cancelled as well")
+	testing.expect(t, set_lookup(block, "kept.example", .A), "a rule nobody cancelled still blocks")
 
 	// On its own, with nothing to cancel, it blocks nothing either.
 	testing.expect_value(t, matches("wykop.pl$badfilter\n", .Adblock, "wykop.pl."), Decision.None)
@@ -522,14 +522,13 @@ test_a_badfilter_rule_cancels_the_rule_it_names :: proc(t: ^testing.T) {
 @(test)
 test_a_rule_narrowed_by_a_modifier_is_not_widened :: proc(t: ^testing.T) {
 	/*
-	These modifiers narrow a rule to one query type, one client, or turn it into
-	something that is not a block at all. Dropping the modifier and keeping the
-	rule would block every type for every client, so the rule is skipped - what
-	AdGuard Home does with a modifier its DNS engine cannot honour.
+	These modifiers narrow a rule to one client, or turn it into something that
+	is not a block at all. Dropping the modifier and keeping the rule would block
+	every query from every client, so the rule is skipped - what AdGuard Home
+	does with a modifier its DNS engine cannot honour. `$dnstype` is honoured;
+	see dnstype_test.odin.
 	*/
 	narrowed := []string {
-		"||narrow.example^$dnstype=AAAA",
-		"||narrow.example^$dnstype=~A",
 		"||narrow.example^$important,client=192.168.1.5",
 		"||narrow.example^$ctag=device_phone",
 		"||narrow.example^$denyallow=ok.narrow.example",

@@ -46,7 +46,7 @@ main :: proc() {
 			e := filter.engine_make()
 			filter.engine_swap(e, block, allow)
 			for name in names {
-				strings.write_byte(&out, '1' if filter.engine_match(e, name) == .Blocked else '0')
+				strings.write_byte(&out, '1' if filter.engine_match(e, name, .A) == .Blocked else '0')
 			}
 			filter.engine_swap(e, nil, nil)
 			filter.engine_destroy(e)

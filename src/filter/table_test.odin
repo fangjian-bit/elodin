@@ -24,10 +24,10 @@ test_table_holds_every_name_through_growth_and_trim :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(block.names.blob), cap(block.names.blob))
 
 	for i in 0 ..< N {
-		if !testing.expectf(t, engine_match(e, fmt.tprintf("sink-%d.bench.invalid.", i)) == .Blocked, "sink-%d lost", i) {
+		if !testing.expectf(t, engine_match(e, fmt.tprintf("sink-%d.bench.invalid.", i), .A) == .Blocked, "sink-%d lost", i) {
 			return
 		}
-		if !testing.expectf(t, engine_match(e, fmt.tprintf("sink-%d.bench.valid.", i)) == .None, "sink-%d.bench.valid matched", i) {
+		if !testing.expectf(t, engine_match(e, fmt.tprintf("sink-%d.bench.valid.", i), .A) == .None, "sink-%d.bench.valid matched", i) {
 			return
 		}
 	}
@@ -55,7 +55,7 @@ test_table_hash_match_is_not_a_name_match :: proc(t: ^testing.T) {
 	}
 	table_resize(&s.names, len(s.names.slots))
 	testing.expect(t, table_entry(&s.names, "ad") == nil)
-	testing.expect(t, !set_lookup(s, "ad"))
+	testing.expect(t, !set_lookup(s, "ad", .A))
 }
 
 @(test)
@@ -65,8 +65,8 @@ test_table_cancelled_name_reads_as_absent :: proc(t: ^testing.T) {
 	set_add(s, "ads.example", {.Apex, .Subdomains})
 	set_cancel(s, "ads.example", {.Apex, .Subdomains})
 	testing.expect_value(t, s.count, 0)
-	testing.expect(t, !set_lookup(s, "ads.example"))
-	testing.expect(t, !set_lookup(s, "x.ads.example"))
+	testing.expect(t, !set_lookup(s, "ads.example", .A))
+	testing.expect(t, !set_lookup(s, "x.ads.example", .A))
 	// Cancelling it again counts nothing twice.
 	set_cancel(s, "ads.example", {.Apex})
 	testing.expect_value(t, s.count, 0)
@@ -77,8 +77,8 @@ test_table_cancelled_name_reads_as_absent :: proc(t: ^testing.T) {
 	testing.expect(t, set_add(s, "ads.example", {.Apex}))
 	testing.expect_value(t, s.count, 1)
 	testing.expect_value(t, s.names.used, 1)
-	testing.expect(t, set_lookup(s, "ads.example"))
-	testing.expect(t, !set_lookup(s, "x.ads.example"))
+	testing.expect(t, set_lookup(s, "ads.example", .A))
+	testing.expect(t, !set_lookup(s, "x.ads.example", .A))
 }
 
 @(test)

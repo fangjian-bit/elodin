@@ -9,6 +9,7 @@ import "core:text/regex/common"
 import "core:text/regex/compiler"
 import "core:text/regex/parser"
 import "core:text/regex/virtual_machine"
+import "elodin:dns"
 
 /*
 Adblock regex rules: `/ads[0-9]+\.example\./`.
@@ -91,6 +92,9 @@ Regex_Rule :: struct {
 	cost:     int,
 	// `regex_shortcut(pattern)`: a name not holding it is not matched.
 	shortcut: string,
+	// The query types it matches: what any rule naming the pattern does
+	// (dnstype.odin). The one `regex_held` maps the pattern to.
+	types:    ^Type_Filter,
 }
 
 /*
@@ -99,15 +103,20 @@ Add `/pattern/`, reporting whether the set now holds it.
 A pattern outside the RE2 subset `re2_parse` reads, or that would cost more than
 the limits above allow, is refused; one that no longer fits in the set's budget,
 and every one after it, is counted in `regex_refused` so the loader can say so.
+A pattern already held is not compiled again: `types` is added to the types it
+matches, which `type_union` may refuse.
 */
-regex_add :: proc(s: ^Set, pattern: string) -> (stored: bool) {
+regex_add :: proc(s: ^Set, pattern: string, types := ANY_TYPE) -> (stored: bool) {
 	key_buf: [MAX_REGEX_PATTERN + 2]u8
 	// Empty is refused too: urlfilter would match every name with it, which
 	// no list author means by `//`.
 	if len(pattern) == 0 || len(pattern) > MAX_REGEX_PATTERN || regex_key(pattern, key_buf[:]) in s.cancelled {
 		return false
 	}
-	if pattern in s.regex_held {
+	merge_buf: [2 * MAX_RULE_TYPES]u16
+	if held, found := s.regex_held[pattern]; found {
+		merged := type_union(held^, types, merge_buf[:]) or_return
+		held^ = type_keep(s, merged) or_return
 		return true
 	}
 	if s.regex_scratch.curr_block == nil && virtual.arena_init_growing(&s.regex_scratch) != nil {
@@ -157,11 +166,14 @@ regex_add :: proc(s: ^Set, pattern: string) -> (stored: bool) {
 		s.regex_refused += 1
 		return false
 	}
+	kept_types := type_keep(s, types) or_return
 	re := regex_copy(trial, s.allocator)
 	shortcut := strings.clone(regex_shortcut(pattern, temp), s.allocator)
-	kept := Regex_Rule{strings.clone(pattern, s.allocator), re, cost, shortcut}
+	held := new(Type_Filter, s.allocator)
+	held^ = kept_types
+	kept := Regex_Rule{strings.clone(pattern, s.allocator), re, cost, shortcut, held}
 	append(&s.regexes, kept)
-	s.regex_held[kept.pattern] = {}
+	s.regex_held[kept.pattern] = held
 	s.regex_bytes += kept.cost
 	s.count += 1
 	return true
@@ -265,15 +277,21 @@ regex_cost :: proc(re: regex.Regular_Expression) -> int {
 	return cost
 }
 
-// Whether any of the set's patterns matches `normalised`.
-regex_lookup :: proc(s: ^Set, normalised: string) -> bool {
+/*
+What pattern matches `normalised` for `qtype`: none, only ones with a
+`$dnstype`, or one for every type, which is looked for past the others so a
+block can say which it was. With `some_type`, only patterns with a `$dnstype`
+are asked, whatever types they name. With `first`, or `some_type`, the first
+match answers, for a caller asking only whether any pattern matches.
+*/
+regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type, some_type := false, first := false) -> (best: Coverage) {
 	if s == nil || len(s.regexes) == 0 {
-		return false
+		return .None
 	}
 	subject_buf: [MAX_REGEX_NAME]u8
 	subject, fits := regex_subject(normalised, subject_buf[:])
 	if !fits {
-		return false
+		return .None
 	}
 	// Left uninitialised: the arena zeroes what it hands out, and zeroing all
 	// 33 KiB here would be a memset on every lookup.
@@ -287,16 +305,24 @@ regex_lookup :: proc(s: ^Set, normalised: string) -> bool {
 	copy(url_buf[len(URL_PREFIX):], subject)
 	url := string(url_buf[:len(URL_PREFIX) + len(subject)])
 	for r in s.regexes {
-		if !strings.contains(url, r.shortcut) {
+		any_type := type_is_any(r.types^)
+		wanted := !any_type if some_type else type_matches(r.types^, qtype)
+		if !wanted || (best == .Typed && !any_type) || !strings.contains(url, r.shortcut) {
 			continue
 		}
 		mem.arena_free_all(&arena)
 		_, matched := regex.match_and_allocate_capture(r.re, subject, scratch, scratch)
 		if matched {
-			return true
+			if any_type {
+				return .Any
+			}
+			if first || some_type {
+				return .Typed
+			}
+			best = .Typed
 		}
 	}
-	return false
+	return
 }
 
 /*

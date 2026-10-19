@@ -289,11 +289,12 @@ parse_adblock_line :: proc(block, allow: ^Set, raw: string) -> (added: int) {
 	}
 	/*
 	`$important` does not change which name is matched and is dropped;
-	`$badfilter` cancels the rule it names. Any other modifier narrows the rule -
-	to a query type, a client, a site it is loaded from - or makes it something
-	other than a block (`$elemhide`, `$removeparam`, `$csp`, ...), and dropping it
-	would widen the rule to every query, so the rule is skipped. That is what
-	AdGuard Home does with a modifier its DNS engine cannot honour.
+	`$badfilter` cancels the rule it names; `$dnstype` narrows it to some query
+	types (dnstype.odin). Any other modifier narrows the rule - to a client, a
+	site it is loaded from - or makes it something other than a block
+	(`$elemhide`, `$removeparam`, `$csp`, ...), and dropping it would widen the
+	rule to every query, so the rule is skipped. That is what AdGuard Home does
+	with a modifier its DNS engine cannot honour.
 
 	`$third-party` and `$~third-party` (`$~first-party`, `$first-party`) are
 	skipped too, as AdGuard Home skips them (#464): urlfilter's `NewDNSEngine`
@@ -318,6 +319,8 @@ parse_adblock_line :: proc(block, allow: ^Set, raw: string) -> (added: int) {
 	whole := is_regex && strings.has_suffix(line, "/") && len(line) > 1 && !strings.contains(line, "replace=")
 	options_at := -1 if whole else last_options_delimiter(line)
 	badfilter := false
+	types := ANY_TYPE
+	types_buf: [MAX_RULE_TYPES]u16
 	if idx := options_at; idx >= 0 {
 		modifiers := line[idx + 1:]
 		line = line[:idx]
@@ -332,13 +335,19 @@ parse_adblock_line :: proc(block, allow: ^Set, raw: string) -> (added: int) {
 			modifiers = modifiers[min(end + 1, len(modifiers)):]
 			// As urlfilter's `loadOptions`: a name is not trimmed, so ` important`
 			// is unknown, and `=x` has no name, so it is unknown too.
-			name := m
+			name, value := m, ""
 			if eq := strings.index_byte(name, '='); eq > 0 {
-				name = name[:eq]
+				name, value = name[:eq], name[eq + 1:]
 			}
 			switch name {
 			case "badfilter":
 				badfilter = true
+			case "dnstype":
+				// A second one replaces the first, as urlfilter's handler does.
+				ok: bool
+				if types, ok = parse_dnstype(value, types_buf[:]); !ok {
+					return 0
+				}
 			case "important", "":
 			case:
 				return 0
@@ -355,7 +364,7 @@ parse_adblock_line :: proc(block, allow: ^Set, raw: string) -> (added: int) {
 			regex_cancel(target, pattern)
 			return 0
 		}
-		return int(regex_add(target, pattern))
+		return int(regex_add(target, pattern, types))
 	}
 	// `##`, `#@#`, `#$#`, `#?#`: cosmetic rules, naming the site they apply on.
 	// A `$` left in the pattern is never in a name either.
@@ -393,7 +402,7 @@ parse_adblock_line :: proc(block, allow: ^Set, raw: string) -> (added: int) {
 		set_cancel(target, line, flags)
 		return 0
 	}
-	return int(set_add(target, line, flags))
+	return int(set_add(target, line, flags, types))
 }
 
 /*

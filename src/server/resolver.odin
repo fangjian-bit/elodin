@@ -1234,9 +1234,10 @@ resolve_query :: proc(
 	}
 
 	if s.cfg.blocking.enabled && s.filters != nil {
-		if filter.engine_match(s.filters, q.name) == .Blocked {
+		typed_only: bool
+		if filter.engine_match(s.filters, q.name, q.type, &typed_only) == .Blocked {
 			count_answer(&s.stats.blocked)
-			out := build_block_response(s, msg, q, allocator, limit)
+			out := build_block_response(s, msg, q, allocator, limit, typed_only)
 			log_query(s, client, proto, q, .Blocked, "list", started)
 			return out, .Blocked, true
 		}
@@ -2740,7 +2741,7 @@ resolve_query :: proc(
 	failure says so in the query log rather than passing something through
 	unchecked.
 	*/
-	if walking && !walkable && filter.engine_match(s.filters, q.name) != .Allowed {
+	if walking && !walkable && filter.engine_match(s.filters, q.name, q.type) != .Allowed {
 		/*
 		No stale fallback, deliberately, and it had one for a round.
 
@@ -3907,6 +3908,7 @@ build_block_response :: proc(
 	q: dns.Question,
 	allocator: mem.Allocator,
 	limit: int,
+	typed_only := false,
 ) -> []u8 {
 	ttl := s.cfg.blocking.block_ttl
 
@@ -3915,7 +3917,15 @@ build_block_response :: proc(
 
 	switch s.cfg.blocking.response {
 	case .NX_Domain:
-		rcode = .NX_Domain
+		/*
+		Unless only a `$dnstype` rule blocked it (`typed_only`): NXDOMAIN says the
+		name has no records of any type, nor anything below it (RFC 8020 section
+		2, RFC 2308 section 5), and a cache would answer the types left open
+		with it. NODATA withholds the one type asked for.
+		*/
+		if !typed_only {
+			rcode = .NX_Domain
+		}
 	case .Refused:
 		rcode = .Refused
 	case .No_Data:

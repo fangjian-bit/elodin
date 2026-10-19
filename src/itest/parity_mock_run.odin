@@ -188,8 +188,8 @@ parity_settle :: proc(run: ^Parity_Mock_Run, q: Parity_Query, index: int) {
 	so a blocked name is blocked however it was asked.
 	*/
 	refused_first := q.local && (q.version != 0 || q.qclass != 1)
-	if run.s.blocking && !refused_first && parity_blocked_name(q.name) {
-		parity_check_blocked(run.r, q, answer, asked, false, stats)
+	if blocked, typed_only := parity_blocked_name(q.name, q.qtype); run.s.blocking && !refused_first && blocked {
+		parity_check_blocked(run.r, q, answer, asked, false, typed_only, stats)
 		return
 	}
 
@@ -219,8 +219,8 @@ parity_settle :: proc(run: ^Parity_Mock_Run, q: Parity_Query, index: int) {
 	allow rule does): a CNAME from an allowed name into a blocked one is
 	served.
 	*/
-	if run.s.blocking && !parity_name_under(q.name, PARITY_ALLOWED) && parity_cloaked(reference) {
-		parity_check_blocked(run.r, q, answer, true, true, stats)
+	if cloaked, typed_only := parity_cloaked(reference, q.qtype); run.s.blocking && !parity_name_under(q.name, PARITY_ALLOWED) && cloaked {
+		parity_check_blocked(run.r, q, answer, true, true, typed_only, stats)
 		return
 	}
 

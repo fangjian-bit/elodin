@@ -385,7 +385,8 @@ cache:
 blocking:
   enabled: true
 
-  # nxdomain | nodata | zeroip | custom | refused
+  # nxdomain | nodata | zeroip | custom | refused. A name blocked only for
+  # some types ($dnstype) is answered nodata for nxdomain.
   response: nxdomain
   custom_ipv4: 0.0.0.0
   custom_ipv6: "::"
