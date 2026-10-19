@@ -847,3 +847,62 @@ test_a_parents_delegation_nsec_cannot_deny_a_name_inside_the_child :: proc(t: ^t
 	)
 	free_all(context.temp_allocator)
 }
+
+/*
+Issue #337, for the memo: a non-cut is remembered on the word of the NSEC
+records that proved it, so no longer than their signatures hold (RFC 4035
+section 5.3.3), whatever the floor says. The denial names no SOA, so it is
+offered `MIN_ZONE_TTL`; walked thirty seconds before the first signature in
+the set lapses, the signature is what has to end it.
+*/
+@(test)
+test_a_non_cut_is_not_remembered_past_its_signature :: proc(t: ^testing.T) {
+	last := max(u32)
+	for f in DR_FIXTURES {
+		msg, _ := dns.decode_message(dr_fixture(f.key), context.temp_allocator)
+		for section in ([][]dns.Record{msg.answer, msg.authority}) {
+			for rec in section {
+				rdata, is_raw := raw_rdata(rec)
+				if rec.type != .RRSIG || !is_raw {
+					continue
+				}
+				if sig, err := parse_rrsig(rdata, context.temp_allocator); err == .None {
+					last = min(last, sig.expiration)
+				}
+			}
+		}
+	}
+	calls := Dr_Calls{}
+	v := dr_validator(&calls)
+	testing.expect(t, v != nil, "the anchor should parse")
+	defer destroy_validator(v)
+
+	now := time.unix(i64(last) - 30, 0)
+	result := validate(v, DR_QNAME, .A, dr_fixture("dr_nodata"), now)
+	testing.expectf(t, result.status == .Secure, "the minted denial got %v (%q)", result.status, result.reason)
+	testing.expect(t, dr_remembered(v, "l8.drtest.", now), "the walk remembered nothing")
+	past := time.unix(i64(last) + 1, 0)
+	testing.expect(t, !dr_remembered(v, "l8.drtest.", past), "a non-cut is remembered past the signature that proved it")
+	free_all(context.temp_allocator)
+}
+
+// And for an entry settled on a denial: the signatures' expiration beats the
+// floor, and an Original TTL under the floor does not.
+@(test)
+test_a_zone_entry_does_not_outlive_its_signature_ceiling :: proc(t: ^testing.T) {
+	v := make_validator(dr_query, nil, Options{})
+	defer destroy_validator(v)
+	now := time.unix(FIXTURE_TIME, 0)
+	cache_put(v, "unsigned.drtest.", .Insecure, nil, MAX_ZONE_TTL, now, 10)
+	_, found, _ := cache_get(v, "unsigned.drtest.", time.unix(FIXTURE_TIME + 9, 0), context.temp_allocator)
+	testing.expect(t, found, "the entry went before its ceiling")
+	_, found, _ = cache_get(v, "unsigned.drtest.", time.unix(FIXTURE_TIME + 11, 0), context.temp_allocator)
+	testing.expect(t, !found, "the entry outlived its signatures, below MIN_ZONE_TTL")
+
+	// A zone whose owner signed its records with an Original TTL of zero, an
+	// hour before they lapse: held for the floor, or every question walks it.
+	cache_put(v, "zero.drtest.", .Insecure, nil, 0, now, 3600)
+	_, found, _ = cache_get(v, "zero.drtest.", time.unix(FIXTURE_TIME + MIN_ZONE_TTL - 1, 0), context.temp_allocator)
+	testing.expect(t, found, "an Original TTL of zero beat the floor")
+	free_all(context.temp_allocator)
+}

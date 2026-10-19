@@ -786,7 +786,7 @@ fetch_forged :: proc(wire: string) -> Status {
 	defer destroy_validator(v)
 
 	budget := query_budget(v)
-	_, status := fetch_keys(
+	_, status, _ := fetch_keys(
 		v,
 		&budget,
 		FORGED_ZONE,

@@ -124,6 +124,7 @@ secure_verdict :: proc() -> dnssec.Result {
 		type   = .A,
 		class  = .IN,
 		signer = TEST_SIGNER,
+		ttl    = 86400,
 	}
 	authority := make([]dnssec.Authenticated_Set, 1, context.temp_allocator)
 	authority[0] = dnssec.Authenticated_Set {
@@ -131,6 +132,7 @@ secure_verdict :: proc() -> dnssec.Result {
 		type   = .NSEC,
 		class  = .IN,
 		signer = TEST_SIGNER,
+		ttl    = 86400,
 	}
 	return dnssec.Result{status = .Secure, answer = answer, authority = authority}
 }
@@ -528,6 +530,7 @@ test_a_pruned_denial_after_a_cname_is_not_cached :: proc(t: ^testing.T) {
 			type   = .CNAME,
 			class  = .IN,
 			signer = TEST_SIGNER,
+			ttl    = 86400,
 		}
 		verdict := dnssec.Result {
 			status = .Secure,
@@ -586,12 +589,14 @@ test_a_pruned_answer_is_still_cached_and_served :: proc(t: ^testing.T) {
 		type   = .CNAME,
 		class  = .IN,
 		signer = TEST_SIGNER,
+		ttl    = 86400,
 	}
 	covered[1] = dnssec.Authenticated_Set {
 		name   = "cdn.example.net.",
 		type   = .AAAA,
 		class  = .IN,
 		signer = TEST_SIGNER,
+		ttl    = 86400,
 	}
 	verdict := dnssec.Result {
 		status = .Secure,
@@ -1005,5 +1010,28 @@ test_settle_header_states_this_servers_rd_ra_aa_z :: proc(t: ^testing.T) {
 	short := []u8{0, 0, 0x04}
 	settle_header(short, client_query(false), false)
 	testing.expect(t, short[2] == 0x04, "a buffer shorter than a header is left alone")
+	free_all(context.temp_allocator)
+}
+
+/*
+RFC 4035 section 5.3.3, at the point the answer leaves for the client and the
+cache: an A record whose unsigned TTL was raised on the path goes out under AD
+with no more than the verified signature's ceiling (#337).
+*/
+@(test)
+test_a_served_ttl_is_held_to_the_signature :: proc(t: ^testing.T) {
+	msg := signed_response()
+	msg.answer[0].ttl = 604800
+	msg.answer[1].ttl = 604800
+	wire, _, _ := dns.encode_message(msg, context.temp_allocator)
+	verdict := secure_verdict()
+	verdict.answer[0].ttl = 300
+	out := present_response(wire, client_query(true), .A, verdict, nil, context.temp_allocator)
+	served, _ := dns.decode_message(out, context.temp_allocator)
+	testing.expect(t, served.flags.ad, "a secure verdict lost its AD bit")
+	testing.expect_value(t, len(served.answer), 2)
+	for rec in served.answer {
+		testing.expectf(t, rec.ttl == 300, "%v went out with TTL %d, ceiling 300", rec.type, rec.ttl)
+	}
 	free_all(context.temp_allocator)
 }

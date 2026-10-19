@@ -41,6 +41,8 @@ keys are cached, so the cost falls on the first query into a zone.
 | a DS set naming nothing we can check | an insecure delegation, whether the algorithm is unimplemented here or refused by the host's crypto policy (RFC 6840 section 5.2) |
 | a DS set naming something we can check | that path has to hold up: a DNSKEY set it does not lead to is bogus, however many uncheckable DS records sit beside it |
 | bad signature, broken chain, missing proof | SERVFAIL, with an extended DNS error saying which |
+| signature validity | inception up to 1 hour in this server's future is accepted, for a signer whose clock runs ahead; expiration is exact (RFC 4035 section 5.3.1) |
+| TTLs | a validated RRset and its RRSIGs are served with no more than the RRSIG's original TTL or the time left before it expires, whichever is less (RFC 4035 section 5.3.3); zone keys and unsigned-delegation facts are kept no longer than the original TTL (with a 60 s floor) and never past the expiration of the signatures that proved them |
 
 An answer that gets AD is first cut down to the records that earned it (RFC 4035
 section 3.2.3). Address hints beside an HTTPS, SVCB, SRV or MX answer (RFC 9460

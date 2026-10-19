@@ -330,8 +330,9 @@ test_signature_validity_is_compared_in_the_wrapping_space :: proc(t: ^testing.T)
 	}
 	testing.expect(t, signature_current(sig, 1500), "the middle of the window is current")
 	testing.expect(t, signature_current(sig, 1000), "the inception second itself is current")
+	testing.expect(t, signature_current(sig, sig.inception - SIG_INCEPTION_SKEW), "the skew's first second is current")
 	testing.expect(t, signature_current(sig, 2000), "the expiration second itself is current")
-	testing.expect(t, !signature_current(sig, 999), "a second before inception is not yet current")
+	testing.expect(t, !signature_current(sig, sig.inception - SIG_INCEPTION_SKEW - 1), "a second before the skew is not yet current")
 	testing.expect(t, !signature_current(sig, 2001), "a second after expiration has lapsed")
 
 	// A window that straddles the wrap: inception near the top of the counter,
@@ -344,7 +345,7 @@ test_signature_validity_is_compared_in_the_wrapping_space :: proc(t: ^testing.T)
 	testing.expect(t, signature_current(wrapping, 0), "the wrap itself is inside the window")
 	testing.expect(t, signature_current(wrapping, 50), "after the wrap is inside the window")
 	testing.expect(t, !signature_current(wrapping, 200), "past the expiration is outside it")
-	testing.expect(t, !signature_current(wrapping, 0xffff_fe00), "before the inception is outside it")
+	testing.expect(t, !signature_current(wrapping, 0xffff_ff00 - SIG_INCEPTION_SKEW - 1), "before the inception's skew is outside it")
 
 	testing.expect(t, serial_ge(5, 5), "a serial is not less than itself")
 	testing.expect(t, serial_ge(0, 0xffff_ffff), "zero comes after the top of the space")

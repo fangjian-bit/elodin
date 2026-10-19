@@ -309,7 +309,41 @@ serial_ge :: proc "contextless" (a, b: u32) -> bool {
 	return i32(a - b) >= 0
 }
 
-// Is `now` inside the signature's validity period?
+/*
+How far ahead of this server's clock a signature's inception may be.
+
+RFC 4035 section 5.3.1 judges both ends against "the validator's notion of the
+current time", and a signer whose clock runs ahead of ours mints signatures
+whose inception is in our future. Unbound allows an hour or more either side,
+PowerDNS Recursor a minute on the inception only, BIND and Knot Resolver none.
+Only the inception gets it here: a signature accepted before it starts is one
+its signer published early, while one accepted after it lapses is a replay
+window for a signature the zone has withdrawn. An hour is Unbound's floor.
+*/
+SIG_INCEPTION_SKEW :: 3600
+
+// Is `now` inside the signature's validity period, inception skew allowed?
 signature_current :: proc "contextless" (sig: Rrsig, now: u32) -> bool {
-	return serial_ge(now, sig.inception) && serial_ge(sig.expiration, now)
+	return(
+		serial_ge(now + SIG_INCEPTION_SKEW, sig.inception) &&
+		serial_ge(sig.expiration, now) &&
+		// The skew must not admit a window that ends before it starts.
+		serial_ge(sig.expiration, sig.inception) \
+	)
+}
+
+/*
+The longest an RRset this signature verified may be served or kept for.
+
+RFC 4035 section 5.3.3: no longer than the Original TTL the signer set, nor past
+the signature's expiration. The TTL fields beside the records are unsigned, so
+these two are the only ones a forger cannot raise. Assumes `signature_current`.
+*/
+signed_ttl_ceiling :: proc "contextless" (sig: Rrsig, now: u32) -> u32 {
+	return min(sig.original_ttl, sig_lapses(sig, now))
+}
+
+// Seconds before a signature `signature_current` accepted stops verifying.
+sig_lapses :: proc "contextless" (sig: Rrsig, now: u32) -> u32 {
+	return sig.expiration - now
 }
