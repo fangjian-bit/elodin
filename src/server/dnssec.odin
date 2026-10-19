@@ -561,7 +561,7 @@ answers, so which client happened to warm an entry cannot change what a later
 one is told.
 */
 /*
-Decide what the AD bit on the way out is allowed to say.
+Settle the header bits that are this server's to state: AA, RA, RD, Z, CD and AD.
 
 Every answer goes through here, whether it came from the cache or from an
 upstream a moment ago. Where we validated, `apply_ad_policy` narrows the stored

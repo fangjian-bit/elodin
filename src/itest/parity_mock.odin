@@ -153,7 +153,7 @@ pm_assemble :: proc(
 	// forwarder passes on (RFC 1035 section 4.1.1).
 	flags := u16(0x8000) // QR
 	if aa {
-		flags |= 0x0040 // Z
+		flags |= 0x0400 | 0x0040 // AA, Z
 	} else {
 		flags |= 0x0080 // RA
 	}
@@ -162,9 +162,6 @@ pm_assemble :: proc(
 	}
 	if query[3] & 0x10 != 0 {
 		flags |= 0x0010 // CD, echoed
-	}
-	if aa {
-		flags |= 0x0400 // AA
 	}
 	flags |= rcode & 0xf
 

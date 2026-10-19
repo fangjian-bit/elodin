@@ -981,7 +981,7 @@ test_cd_bit_echoes_the_client_not_the_upstream :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_settle_header_states_this_servers_rd_ra_aa :: proc(t: ^testing.T) {
+test_settle_header_states_this_servers_rd_ra_aa_z :: proc(t: ^testing.T) {
 	// RFC 1035 section 4.1.1. An authoritative-only upstream's answer - AA set,
 	// RA clear, and Z set by a careless one - stored for a client that set RD,
 	// then served to one that did not.
