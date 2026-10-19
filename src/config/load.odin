@@ -170,23 +170,34 @@ opt_int :: proc(l: ^Loader, n: ^yaml.Node, key: string, dst: ^int, path: string)
 	}
 }
 
+/*
+A TTL, which RFC 2181 section 8 makes 0 to 2^31-1 seconds: a receiver treats one
+with the top bit set as zero, so a figure past it is not the long TTL it was
+written as but none at all.
+*/
+MAX_TTL :: 1 << 31 - 1
+
 @(private)
-opt_u32 :: proc(l: ^Loader, n: ^yaml.Node, key: string, dst: ^u32, path: string) {
+opt_ttl :: proc(l: ^Loader, n: ^yaml.Node, key: string, dst: ^u32, path: string) {
 	child := yaml.get(n, key)
 	if yaml.is_null(child) {
 		return
 	}
-	// Accept both a bare number of seconds and a duration such as "5m".
-	if d, ok := yaml.as_duration(child); ok {
-		secs := i64(d / time.Second)
-		if secs < 0 || secs > i64(max(u32)) {
-			errorf(l, "%s.%s: value out of range", path, key)
-			return
-		}
-		dst^ = u32(secs)
+	// A YAML integer of seconds ("3_600" and "0x12c" included), or a duration
+	// such as "5m" that comes to whole seconds: a fraction has no TTL to be, and
+	// cut off it sends "500ms" as 0.
+	secs, ok := yaml.as_int(child)
+	if !ok {
+		d: time.Duration
+		d, ok = yaml.as_duration(child)
+		ok = ok && d % time.Second == 0
+		secs = i64(d / time.Second)
+	}
+	if !ok || secs < 0 || secs > MAX_TTL {
+		errorf(l, "%s.%s: expected a TTL of whole seconds from 0 to %d, or a duration such as 5m (RFC 2181 section 8)", path, key, MAX_TTL)
 		return
 	}
-	errorf(l, "%s.%s: expected a duration or a number of seconds", path, key)
+	dst^ = u32(secs)
 }
 
 @(private)
@@ -227,6 +238,11 @@ query fails at once. A day is far above any upstream worth waiting on and far
 below either edge.
 */
 MAX_UPSTREAM_TIMEOUT :: 24 * time.Hour
+
+// The most `server.client_timeout` may be: far above any idle period worth
+// holding, and far below the wrap of a deadline added to the clock. See
+// `load_server`.
+MAX_CLIENT_TIMEOUT :: 24 * time.Hour
 
 @(private)
 opt_upstream_timeout :: proc(l: ^Loader, n: ^yaml.Node, dst: ^time.Duration, path: string) {
@@ -316,7 +332,23 @@ load_server :: proc(l: ^Loader, cfg: ^Config) {
 	// A size, so "1232" and "1232B" and "4KiB" all read, the same as the cache
 	// sizes do.
 	opt_bytes(l, n, "max_udp_response", &cfg.server.max_udp_response, "server")
-	opt_duration(l, n, "client_timeout", &cfg.server.client_timeout, "server")
+	// How long an idle client connection is held. RFC 7766 section 6.2.3 wants
+	// it "on the order of seconds" and section 6.1.2 says why: an idle period
+	// with no end is the TCP denial of service it describes. Zero there is
+	// closing at once, not never, while SO_RCVTIMEO reads zero as no timeout, as
+	// it does anything under a microsecond once truncated to a timeval. So the
+	// floor is `upstream.timeout`'s, the least the sockets and `poll` express.
+	// The ceiling is the other edge: a message's deadline is `tick_add(now,
+	// client_timeout)`, which wraps for a figure near the largest duration into
+	// one already past, and every TCP and DoT message is then refused.
+	if opt_duration(l, n, "client_timeout", &cfg.server.client_timeout, "server") &&
+	   (cfg.server.client_timeout < time.Millisecond || cfg.server.client_timeout > MAX_CLIENT_TIMEOUT) {
+		errorf(
+			l,
+			"server.client_timeout must be from 1ms to %dh: it is how long an idle client connection is held",
+			int(MAX_CLIENT_TIMEOUT / time.Hour),
+		)
+	}
 	opt_string(l, n, "user", &cfg.server.user, "server")
 	opt_string(l, n, "group", &cfg.server.group, "server")
 	load_allow_from(l, n, cfg)
@@ -727,8 +759,10 @@ load_listener :: proc(l: ^Loader, parent: ^yaml.Node, key: string, dst: ^Listene
 	if dst.enabled && netx.parse_address(dst.address) == nil {
 		errorf(l, "%s.address: %q is not an IP address%s", path, dst.address, address_hint(dst.address))
 	}
-	if dst.port < 0 || dst.port > 65535 {
-		errorf(l, "%s.port: must be between 0 and 65535", path)
+	// Port 0 binds whichever port the kernel picks, which no client can be told:
+	// refused on a listener that binds, as it is on the metrics endpoint.
+	if dst.port < 0 || dst.port > 65535 || (dst.enabled && dst.port == 0) {
+		errorf(l, "%s.port: must be between 1 and 65535", path)
 	}
 	if needs_tls {
 		opt_string(l, n, "cert_file", &dst.cert_file, path)
@@ -1564,13 +1598,13 @@ load_cache :: proc(l: ^Loader, cfg: ^Config) {
 	opt_bool(l, n, "enabled", &cfg.cache.enabled, "cache")
 	opt_int(l, n, "max_entries", &cfg.cache.max_entries, "cache")
 	opt_bytes(l, n, "max_bytes", &cfg.cache.max_bytes, "cache")
-	opt_u32(l, n, "min_ttl", &cfg.cache.min_ttl, "cache")
-	opt_u32(l, n, "max_ttl", &cfg.cache.max_ttl, "cache")
-	opt_u32(l, n, "negative_ttl", &cfg.cache.negative_ttl, "cache")
+	opt_ttl(l, n, "min_ttl", &cfg.cache.min_ttl, "cache")
+	opt_ttl(l, n, "max_ttl", &cfg.cache.max_ttl, "cache")
+	opt_ttl(l, n, "negative_ttl", &cfg.cache.negative_ttl, "cache")
 	opt_bool(l, n, "serve_stale", &cfg.cache.serve_stale, "cache")
 	opt_duration(l, n, "stale_timeout", &cfg.cache.stale_timeout, "cache")
 	opt_bool(l, n, "prefetch", &cfg.cache.prefetch, "cache")
-	opt_u32(l, n, "prefetch_min_ttl", &cfg.cache.prefetch_min_ttl, "cache")
+	opt_ttl(l, n, "prefetch_min_ttl", &cfg.cache.prefetch_min_ttl, "cache")
 	/*
 	No entry lives longer than `max_ttl`, so a threshold above it switches
 	prefetching off while the file says it is on. Only a threshold the file
@@ -1719,7 +1753,7 @@ load_blocking :: proc(l: ^Loader, cfg: ^Config) {
 		"allow",
 	)
 	opt_bool(l, n, "enabled", &cfg.blocking.enabled, "blocking")
-	opt_u32(l, n, "block_ttl", &cfg.blocking.block_ttl, "blocking")
+	opt_ttl(l, n, "block_ttl", &cfg.blocking.block_ttl, "blocking")
 	opt_duration(l, n, "refresh", &cfg.blocking.refresh, "blocking")
 	opt_string(l, n, "cache_dir", &cfg.blocking.cache_dir, "blocking")
 
@@ -1918,9 +1952,7 @@ load_rewrites :: proc(l: ^Loader, cfg: ^Config) {
 			errorf(l, "%s: missing domain", path)
 			continue
 		}
-		ttl_i := int(rw.ttl)
-		opt_int(l, e, "ttl", &ttl_i, path)
-		rw.ttl = u32(ttl_i)
+		opt_ttl(l, e, "ttl", &rw.ttl, path)
 		opt_bool(l, e, "ptr", &rw.ptr, path)
 
 		if strings.has_prefix(domain, "*.") {

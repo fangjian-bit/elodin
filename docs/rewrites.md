@@ -14,7 +14,8 @@ rewrites:
 
 - Rewrites are matched before everything else, the block lists included.
 - Wildcards match subdomains only: `*.lan` covers `host.lan`, not `lan`.
-- `ttl` sets the answer's TTL; the default is 300 seconds.
+- `ttl` sets the answer's TTL: 0 to 2147483647 seconds (RFC 2181 §8), as a
+  number or a duration such as `5m`; the default is 300 seconds.
 
 **CNAMEs are followed.** The answer carries the target's records after the
 alias, looked up as if the client had asked for the target: another rewrite, the

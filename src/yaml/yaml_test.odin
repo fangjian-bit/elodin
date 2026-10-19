@@ -176,6 +176,39 @@ test_an_overflowing_duration_saturates :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
+// An integer past what an i64 holds is refused rather than wrapped into a small
+// one that a caller's range check would let through (#316).
+@(test)
+test_an_overflowing_integer_is_refused :: proc(t: ^testing.T) {
+	root, err := parse(
+		"a: 18446744073709551617\nb: -18446744073709551615\nc: 9223372036854775808\nd: 0x10000000000000000\ne: ++5\nf: 9223372036854775807\ng: -9223372036854775808\n",
+		context.temp_allocator,
+	)
+	testing.expectf(t, err == nil, "parse failed: %v", err)
+	for key in ([]string{"a", "b", "c", "d", "e"}) {
+		v, ok := as_int(get(root, key))
+		testing.expectf(t, !ok, "%s read as %d", key, v)
+	}
+	f, fok := as_int(get(root, "f"))
+	testing.expectf(t, fok && f == max(i64), "f read %d, %v", f, fok)
+	g, gok := as_int(get(root, "g"))
+	testing.expectf(t, gok && g == min(i64), "g read %d, %v", g, gok)
+	free_all(context.temp_allocator)
+}
+
+// A fraction is rounded to the nanosecond, so "2.3h" is 8280s on the dot and not
+// a nanosecond short of it (#316).
+@(test)
+test_a_fractional_duration_is_rounded :: proc(t: ^testing.T) {
+	root, err := parse("a: 2.3h\nb: 0.7m\n", context.temp_allocator)
+	testing.expectf(t, err == nil, "parse failed: %v", err)
+	a, _ := as_duration(get(root, "a"))
+	testing.expect_value(t, a, 8280 * time.Second)
+	b, _ := as_duration(get(root, "b"))
+	testing.expect_value(t, b, 42 * time.Second)
+	free_all(context.temp_allocator)
+}
+
 @(test)
 test_byte_size_forms :: proc(t: ^testing.T) {
 	Case :: struct {

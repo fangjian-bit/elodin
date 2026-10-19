@@ -1,5 +1,6 @@
 package yaml
 
+import "core:math"
 import "core:strconv"
 import "core:strings"
 import "core:time"
@@ -103,9 +104,30 @@ as_int :: proc(n: ^Node) -> (i64, bool) {
 	if strings.contains(s, "_") {
 		s, _ = strings.remove_all(s, "_", context.temp_allocator)
 	}
-	v, vok := strconv.parse_u64_of_base(s, base)
-	if !vok {
+	// Guarded before each step, as `as_bytes` is: strconv wraps silently, which
+	// reads "18446744073709551617" as 1 and lets it past any range a caller
+	// checks.
+	if s == "" {
 		return 0, false
+	}
+	limit := u64(max(i64)) + (1 if neg else 0)
+	v: u64
+	for c in transmute([]u8)s {
+		d: u64
+		switch c {
+		case '0' ..= '9':
+			d = u64(c - '0')
+		case 'a' ..= 'f':
+			d = u64(c - 'a' + 10)
+		case 'A' ..= 'F':
+			d = u64(c - 'A' + 10)
+		case:
+			return 0, false
+		}
+		if d >= u64(base) || v > (limit - d) / u64(base) {
+			return 0, false
+		}
+		v = v * u64(base) + d
 	}
 	return -i64(v) if neg else i64(v), true
 }
@@ -234,10 +256,13 @@ as_duration :: proc(n: ^Node) -> (time.Duration, bool) {
 		case:
 			return 0, false
 		}
+		// Rounded to the nanosecond, not cut: "2.3h" multiplies out a hair under
+		// 8280s, and a figure that must come to whole seconds, a TTL, would be
+		// refused for it.
+		part := math.round(value * scale)
 		// Saturating, so a figure too large to hold reads as the largest there is
 		// and fails a caller's ceiling, rather than wrapping round into a small
 		// one that passes it.
-		part := value * scale
 		if part >= f64(max(time.Duration)) || time.Duration(part) > max(time.Duration) - total {
 			total = max(time.Duration)
 		} else {

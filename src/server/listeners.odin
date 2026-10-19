@@ -472,8 +472,9 @@ start_udp :: proc(s: ^Server, l: ^Listeners) -> bool {
 	}
 
 	// The port that was bound rather than the one that was asked for. They are
-	// the same figure everywhere but `port: 0`, where the file names no port at
-	// all and this line is the only place the one the kernel chose is said.
+	// the same figure everywhere but port 0, which the loader refuses in a file
+	// and a `Config` built elsewhere (the tests) uses to have the kernel choose:
+	// this line is then the only place the chosen one is said.
 	logx.infof(
 		"listening for DNS on %s:%d/udp (%s)",
 		cfg.address,
@@ -2006,8 +2007,9 @@ once the handshake is done. Five seconds is many times over what a handshake
 costs on any path worth serving, and it is still a bound - which is the whole
 point, the trickle being what `tlsx.handshake_loop` is there to end.
 
-A non-positive `client_timeout` is no receive timeout at all and stays that way:
-the operator asked for no bound, and a floor is not a bound they asked to add.
+The loader refuses a `client_timeout` under a millisecond. A non-positive one in a
+`Config` built elsewhere is no receive timeout at all and stays that way, rather
+than gaining a floor nothing asked for.
 */
 @(private)
 HANDSHAKE_FLOOR :: 5 * time.Second

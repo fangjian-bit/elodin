@@ -162,6 +162,29 @@ run_cli_cases :: proc(r: ^Runner) {
 	}
 	end_case(r)
 
+	// The file from #316: each figure the server cannot honour is named, rather
+	// than a port picked by the kernel and a TTL cast to 4294967295.
+	start_case(r, "cli: --check rejects ports, TTLs and timeouts out of range")
+	{
+		path := filepath.join({r.work_dir, "out-of-range.yaml"}, context.temp_allocator) or_else ""
+		_ = os.write_entire_file(
+			path,
+			transmute([]u8)string(
+				"listeners:\n  udp: {enabled: true, address: 127.0.0.1, port: 106837}\n  tcp: {enabled: true, address: 127.0.0.1, port: 0}\n" +
+				"server:\n  client_timeout: 0s\nupstream:\n  timeout: 0s\n  servers:\n    - {name: none, type: udp, address: 127.0.0.1, port: 41302}\n" +
+				"blocking:\n  enabled: false\nrewrites:\n  - domain: nas.home\n    answer: 192.168.1.50\n    ttl: -1\n",
+			),
+		)
+		res := run_binary(r, []string{"--config", path, "--check"}, "check-out-of-range")
+		if check(r, res.ok, "could not run the binary") {
+			check(r, res.exit_code != 0, "an out-of-range config exited 0")
+			for key in ([]string{"listeners.udp.port", "listeners.tcp.port", "server.client_timeout", "upstream.timeout", "rewrites[0].ttl"}) {
+				check(r, strings.contains(res.output, key), "%s was not reported: %q", key, res.output)
+			}
+		}
+	}
+	end_case(r)
+
 	start_case(r, "cli: --check reports every problem at once, with line numbers")
 	{
 		path := filepath.join({r.work_dir, "bad.yaml"}, context.temp_allocator) or_else ""
