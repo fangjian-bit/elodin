@@ -48,3 +48,9 @@
 # A compressed RRSIG signer or NSEC next name in a truncated answer (#300):
 # kept as a pointer, it named whatever the cut-down re-encode put at its offset.
 300
+
+# A `$dnstype` rule (#406): skipped, it left a name answered for the types it
+# blocks; and a CNAME target judged on the record's type rather than the
+# question's let a typed rule's name through the chain.
+1792438861547891112
+1792438917195719448

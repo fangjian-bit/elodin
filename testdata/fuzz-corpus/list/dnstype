@@ -1,0 +1,8 @@
+sv6.example
+||v6.example^$dnstype=AAAA
+||v6.example^$dnstype=~A|~TYPE65|aaaa
+||v6.example^$dnstype=A,dnstype=nsap-ptr|TYPE65535
+@@||ok.v6.example^$important,dnstype=AAAA|~AAAA
+/^v6\.ex/$dnstype=TYPE28
+/^v6\.ex/$dnstype=A
+||v6.example^$dnstype=CNAME,badfilter

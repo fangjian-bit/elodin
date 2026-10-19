@@ -32,9 +32,9 @@ test_a_list_badfilter_does_not_cancel_the_operators_own_rules :: proc(t: ^testin
 	defer filter.set_destroy(block)
 	defer filter.set_destroy(allow)
 
-	testing.expect(t, filter.set_lookup(block, "www.pl.ua"), "the operator's block survives a list's badfilter")
-	testing.expect(t, filter.set_lookup(allow, "ok.example"), "and so does the operator's allow")
-	testing.expect(t, !filter.set_lookup(block, "listed.example"), "and the operator's badfilter cancels a list's rule")
+	testing.expect(t, filter.set_lookup(block, "www.pl.ua", .A), "the operator's block survives a list's badfilter")
+	testing.expect(t, filter.set_lookup(allow, "ok.example", .A), "and so does the operator's allow")
+	testing.expect(t, !filter.set_lookup(block, "listed.example", .A), "and the operator's badfilter cancels a list's rule")
 }
 
 @(test)
@@ -76,7 +76,7 @@ test_a_query_with_a_slash_in_a_label_is_matched_against_the_lists :: proc(t: ^te
 		}
 		// The premise: what the resolver matches is the name with its slash.
 		testing.expect_value(t, msg.question[0].name, name)
-		testing.expectf(t, filter.engine_match(engine, msg.question[0].name) == .Blocked, "%s was not blocked", name)
+		testing.expectf(t, filter.engine_match(engine, msg.question[0].name, .A) == .Blocked, "%s was not blocked", name)
 	}
 	free_all(context.temp_allocator)
 }
@@ -112,19 +112,19 @@ test_a_refresh_that_loses_a_list_keeps_the_rules_in_effect :: proc(t: ^testing.T
 	defer delete(s.lists_loaded)
 
 	testing.expect(t, reload_filters(&s, false), "the first load was not current")
-	testing.expect(t, filter.engine_match(engine, "kept.example") == .Blocked)
+	testing.expect(t, filter.engine_match(engine, "kept.example", .A) == .Blocked)
 
 	os.remove(path)
 	generation := filter.engine_generation(engine)
 	testing.expect(t, !reload_filters(&s, false), "a refresh that lost a list was reported current")
 	testing.expect_value(t, filter.engine_generation(engine), generation)
-	testing.expect(t, filter.engine_match(engine, "kept.example") == .Blocked, "the lost list's rules were swapped out")
+	testing.expect(t, filter.engine_match(engine, "kept.example", .A) == .Blocked, "the lost list's rules were swapped out")
 
 	// Once the list is back, the refresh goes through again.
 	testing.expect(t, os.write_entire_file(path, "||back.example^\n") == nil)
 	testing.expect(t, reload_filters(&s, false))
-	testing.expect(t, filter.engine_match(engine, "back.example") == .Blocked)
-	testing.expect(t, filter.engine_match(engine, "kept.example") != .Blocked)
+	testing.expect(t, filter.engine_match(engine, "back.example", .A) == .Blocked)
+	testing.expect(t, filter.engine_match(engine, "kept.example", .A) != .Blocked)
 }
 
 @(test)
@@ -152,11 +152,11 @@ test_a_list_that_never_loaded_does_not_hold_the_others_back :: proc(t: ^testing.
 	defer delete(s.lists_loaded)
 
 	testing.expect(t, !reload_filters(&s, false), "a load missing a list was reported current")
-	testing.expect(t, filter.engine_match(engine, "first.example") == .Blocked)
+	testing.expect(t, filter.engine_match(engine, "first.example", .A) == .Blocked)
 
 	testing.expect(t, os.write_entire_file(path, "||second.example^\n") == nil)
 	testing.expect(t, !reload_filters(&s, false))
-	testing.expect(t, filter.engine_match(engine, "second.example") == .Blocked, "the refresh was held back")
+	testing.expect(t, filter.engine_match(engine, "second.example", .A) == .Blocked, "the refresh was held back")
 }
 
 @(test)
@@ -287,11 +287,11 @@ test_a_deleted_file_list_is_lifted :: proc(t: ^testing.T) {
 	defer delete(s.lists_loaded)
 
 	testing.expect(t, reload_filters(&s, false))
-	testing.expect(t, filter.engine_match(engine, "lifted.example") == .Blocked)
+	testing.expect(t, filter.engine_match(engine, "lifted.example", .A) == .Blocked)
 	os.remove(path)
 	// Nor is it retried: no retry brings a local file back.
 	testing.expect(t, reload_filters(&s, false), "a deleted file list was retried")
-	testing.expect(t, filter.engine_match(engine, "lifted.example") != .Blocked, "a deleted file list kept its blocks")
+	testing.expect(t, filter.engine_match(engine, "lifted.example", .A) != .Blocked, "a deleted file list kept its blocks")
 }
 
 @(test)
@@ -366,16 +366,16 @@ test_a_cache_named_by_a_query_moves :: proc(t: ^testing.T) {
 	block, allow := build_filter_sets(&cfg, false)
 	defer filter.set_destroy(block)
 	defer filter.set_destroy(allow)
-	testing.expect(t, filter.set_lookup(block, "moved.example"), "the old copy did not stand in offline")
-	testing.expect(t, filter.set_lookup(block, "current.example"), "the current copy was replaced")
+	testing.expect(t, filter.set_lookup(block, "moved.example", .A), "the old copy did not stand in offline")
+	testing.expect(t, filter.set_lookup(block, "current.example", .A), "the current copy was replaced")
 	testing.expect(t, !os.exists(files[0]), "the old copy is still under its url")
 	testing.expect(t, os.exists(list_cache_path(&cfg, moved)), "the old copy did not move to the list's name")
 	testing.expect(t, !os.exists(files[1]), "the old copy beside a current one was kept")
 	testing.expect(t, os.exists(files[3]), "another list's own cache was touched")
-	testing.expect(t, !filter.set_lookup(block, "off.example"), "a disabled list's old copy loaded as another list")
+	testing.expect(t, !filter.set_lookup(block, "off.example", .A), "a disabled list's old copy loaded as another list")
 	testing.expect(t, os.exists(files[4]), "a disabled list's old copy moved")
-	testing.expect(t, filter.set_lookup(block, "over.example"), "the old copy was removed for another url's")
-	testing.expect(t, !filter.set_lookup(block, "bare.example"), "the url with no query's copy loaded as the list")
+	testing.expect(t, filter.set_lookup(block, "over.example", .A), "the old copy was removed for another url's")
+	testing.expect(t, !filter.set_lookup(block, "bare.example", .A), "the url with no query's copy loaded as the list")
 	testing.expect(t, !os.exists(files[5]), "the old copy is still under its url")
 }
 

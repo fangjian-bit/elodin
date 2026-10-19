@@ -1234,7 +1234,7 @@ resolve_query :: proc(
 	}
 
 	if s.cfg.blocking.enabled && s.filters != nil {
-		if filter.engine_match(s.filters, q.name) == .Blocked {
+		if filter.engine_match(s.filters, q.name, q.type) == .Blocked {
 			count_answer(&s.stats.blocked)
 			out := build_block_response(s, msg, q, allocator, limit)
 			log_query(s, client, proto, q, .Blocked, "list", started)
@@ -2740,7 +2740,7 @@ resolve_query :: proc(
 	failure says so in the query log rather than passing something through
 	unchecked.
 	*/
-	if walking && !walkable && filter.engine_match(s.filters, q.name) != .Allowed {
+	if walking && !walkable && filter.engine_match(s.filters, q.name, q.type) != .Allowed {
 		/*
 		No stale fallback, deliberately, and it had one for a round.
 

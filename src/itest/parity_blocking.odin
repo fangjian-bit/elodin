@@ -42,9 +42,10 @@ parity_name_below :: proc(name: []u8, zone: string) -> bool {
 	return parity_name_under(name, zone) && !pw_names_equal_fold(name, pm_name(zone, context.temp_allocator))
 }
 
-// Whether the blocking scenario's rules cover `name`: under a blocked zone, or
-// below the subtree-only one, and not under the allowed one inside them.
-parity_blocked_name :: proc(name: []u8) -> bool {
+// Whether the blocking scenario's rules cover `name` for a query of `qtype`:
+// under a blocked zone, below the subtree-only one, or under a typed one for a
+// type it blocks, and not under the allowed one inside them.
+parity_blocked_name :: proc(name: []u8, qtype: u16) -> bool {
 	if parity_name_under(name, PARITY_ALLOWED) {
 		return false
 	}
@@ -56,24 +57,37 @@ parity_blocked_name :: proc(name: []u8) -> bool {
 			return true
 		}
 	}
+	for typed in PARITY_BLOCKED_TYPED {
+		if !parity_name_under(name, typed.zone) {
+			continue
+		}
+		listed := false
+		for t in typed.types {
+			listed ||= t == qtype
+		}
+		if listed != typed.negated {
+			return true
+		}
+	}
 	return false
 }
 
 /*
 Whether the upstream's answer leads into a blocked name.
 
-Any CNAME in the answer section whose target the rules cover. The mock's chains
-start at the question and are one link long (`pm_cname_chain`), so "any CNAME"
-and "the chain from the question" are the same set here, and the looser reading
-is the one that cannot miss a link.
+Any CNAME in the answer section whose target the rules cover for the question's
+type, which is what a `$dnstype` rule is judged on along the chain too. The
+mock's chains start at the question and are one link long (`pm_cname_chain`), so
+"any CNAME" and "the chain from the question" are the same set here, and the
+looser reading is the one that cannot miss a link.
 */
-parity_cloaked :: proc(reference: []u8) -> bool {
+parity_cloaked :: proc(reference: []u8, qtype: u16) -> bool {
 	m := pw_parse(reference, context.temp_allocator)
 	if !m.ok {
 		return false
 	}
 	for rec in m.answer {
-		if rec.type == 5 && parity_blocked_name(rec.rdata) {
+		if rec.type == 5 && parity_blocked_name(rec.rdata, qtype) {
 			return true
 		}
 	}

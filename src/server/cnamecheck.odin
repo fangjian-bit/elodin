@@ -185,6 +185,7 @@ cloaked_chain_target :: proc(
 	s: ^Server,
 	answer: []dns.Record,
 	qname: string,
+	qtype: dns.Type,
 ) -> (
 	target: string,
 	verdict: Cloak_Verdict,
@@ -204,7 +205,7 @@ cloaked_chain_target :: proc(
 		return "", .Clear
 	}
 
-	if filter.engine_match(s.filters, qname) == .Allowed {
+	if filter.engine_match(s.filters, qname, qtype) == .Allowed {
 		return "", .Clear
 	}
 
@@ -308,7 +309,7 @@ cloaked_chain_target :: proc(
 			pending[tail] = v.name
 			tail += 1
 
-			switch filter.engine_match(s.filters, v.name) {
+			switch filter.engine_match(s.filters, v.name, qtype) {
 			case .Blocked:
 				if target == "" {
 					target = v.name
@@ -362,7 +363,7 @@ block_cloaked_answer :: proc(
 	response: []u8,
 	verdict: Cloak_Verdict,
 ) {
-	target, reached := cloaked_chain_target(s, answer, q.name)
+	target, reached := cloaked_chain_target(s, answer, q.name, q.type)
 	if reached == .Clear {
 		return nil, .Clear
 	}

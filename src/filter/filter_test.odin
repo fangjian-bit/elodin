@@ -23,13 +23,13 @@ test_hosts_format_is_exact :: proc(t: ^testing.T) {
 	defer engine_destroy(e)
 	engine_swap(e, block, allow)
 
-	testing.expect_value(t, engine_match(e, "ads.example.com."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "metrics.example.com"), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ads.example.com.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "metrics.example.com", .A), Decision.Blocked)
 	// Hosts entries are exact: a subdomain is not implied.
-	testing.expect_value(t, engine_match(e, "deep.ads.example.com."), Decision.None)
-	testing.expect_value(t, engine_match(e, "example.com."), Decision.None)
+	testing.expect_value(t, engine_match(e, "deep.ads.example.com.", .A), Decision.None)
+	testing.expect_value(t, engine_match(e, "example.com.", .A), Decision.None)
 	// The file's own localhost bookkeeping must not become a rule.
-	testing.expect_value(t, engine_match(e, "localhost."), Decision.None)
+	testing.expect_value(t, engine_match(e, "localhost.", .A), Decision.None)
 }
 
 @(test)
@@ -40,13 +40,13 @@ test_domains_format_covers_subdomains :: proc(t: ^testing.T) {
 	defer engine_destroy(e)
 	engine_swap(e, block, allow)
 
-	testing.expect_value(t, engine_match(e, "doubleclick.net."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "ad.g.doubleclick.net."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "notdoubleclick.net."), Decision.None)
+	testing.expect_value(t, engine_match(e, "doubleclick.net.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ad.g.doubleclick.net.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "notdoubleclick.net.", .A), Decision.None)
 
 	// "*.tracking.example" covers subdomains only, not the apex.
-	testing.expect_value(t, engine_match(e, "a.tracking.example."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "tracking.example."), Decision.None)
+	testing.expect_value(t, engine_match(e, "a.tracking.example.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "tracking.example.", .A), Decision.None)
 }
 
 @(test)
@@ -67,20 +67,20 @@ address=/dnsmasq.example/0.0.0.0
 	defer engine_destroy(e)
 	engine_swap(e, block, allow)
 
-	testing.expect_value(t, engine_match(e, "ads.example."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "sub.ads.example."), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ads.example.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "sub.ads.example.", .A), Decision.Blocked)
 	// Modifiers are stripped, the rule still applies.
-	testing.expect_value(t, engine_match(e, "analytics.example."), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "analytics.example.", .A), Decision.Blocked)
 	// An allow rule wins over the broader block rule above it.
-	testing.expect_value(t, engine_match(e, "allowed.ads.example."), Decision.Allowed)
-	testing.expect_value(t, engine_match(e, "exactly.example."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "sub.exactly.example."), Decision.None)
-	testing.expect_value(t, engine_match(e, "dnsmasq.example."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "deep.dnsmasq.example."), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "allowed.ads.example.", .A), Decision.Allowed)
+	testing.expect_value(t, engine_match(e, "exactly.example.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "sub.exactly.example.", .A), Decision.None)
+	testing.expect_value(t, engine_match(e, "dnsmasq.example.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "deep.dnsmasq.example.", .A), Decision.Blocked)
 	// A regex rule is matched against the name, as AdGuard Home does (#405).
-	testing.expect_value(t, engine_match(e, "regex-rule.example."), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "regex-rule.example.", .A), Decision.Blocked)
 	// A path rule still needs more than a name, and is skipped, not fatal.
-	testing.expect_value(t, engine_match(e, "has."), Decision.None)
+	testing.expect_value(t, engine_match(e, "has.", .A), Decision.None)
 }
 
 @(test)
@@ -99,8 +99,8 @@ test_case_and_trailing_dot_insensitive :: proc(t: ^testing.T) {
 	defer engine_destroy(e)
 	engine_swap(e, block, allow)
 
-	testing.expect_value(t, engine_match(e, "ADS.example.com."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "ads.example.com"), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ADS.example.com.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ads.example.com", .A), Decision.Blocked)
 }
 
 @(test)
@@ -113,9 +113,9 @@ test_allow_beats_block :: proc(t: ^testing.T) {
 	defer engine_destroy(e)
 	engine_swap(e, block, allow)
 
-	testing.expect_value(t, engine_match(e, "example.com."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "safe.example.com."), Decision.Allowed)
-	testing.expect_value(t, engine_match(e, "deep.safe.example.com."), Decision.Allowed)
+	testing.expect_value(t, engine_match(e, "example.com.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "safe.example.com.", .A), Decision.Allowed)
+	testing.expect_value(t, engine_match(e, "deep.safe.example.com.", .A), Decision.Allowed)
 }
 
 @(test)
@@ -127,14 +127,14 @@ test_swap_returns_old_sets :: proc(t: ^testing.T) {
 	old_b, old_a := engine_swap(e, b1, a1)
 	set_destroy(old_b)
 	set_destroy(old_a)
-	testing.expect_value(t, engine_match(e, "first.example."), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "first.example.", .A), Decision.Blocked)
 
 	b2, a2 := build("second.example\n", .Domains)
 	old_b2, old_a2 := engine_swap(e, b2, a2)
 	set_destroy(old_b2)
 	set_destroy(old_a2)
-	testing.expect_value(t, engine_match(e, "first.example."), Decision.None)
-	testing.expect_value(t, engine_match(e, "second.example."), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "first.example.", .A), Decision.None)
+	testing.expect_value(t, engine_match(e, "second.example.", .A), Decision.Blocked)
 
 	s := engine_stats(e)
 	testing.expect_value(t, s.block_rules, 1)
@@ -147,9 +147,9 @@ test_stats_counted :: proc(t: ^testing.T) {
 	defer engine_destroy(e)
 	engine_swap(e, block, allow)
 
-	engine_match(e, "blocked.example.")
-	engine_match(e, "fine.example.")
-	engine_match(e, "blocked.example.")
+	engine_match(e, "blocked.example.", .A)
+	engine_match(e, "fine.example.", .A)
+	engine_match(e, "blocked.example.", .A)
 
 	s := engine_stats(e)
 	testing.expect_value(t, s.queries, u64(3))

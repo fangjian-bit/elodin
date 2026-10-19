@@ -9,6 +9,7 @@ import "core:text/regex/common"
 import "core:text/regex/compiler"
 import "core:text/regex/parser"
 import "core:text/regex/virtual_machine"
+import "elodin:dns"
 
 /*
 Adblock regex rules: `/ads[0-9]+\.example\./`.
@@ -91,6 +92,9 @@ Regex_Rule :: struct {
 	cost:     int,
 	// `regex_shortcut(pattern)`: a name not holding it is not matched.
 	shortcut: string,
+	// The query types it matches: what any rule naming the pattern does
+	// (dnstype.odin). The one `regex_held` maps the pattern to.
+	types:    ^Type_Filter,
 }
 
 /*
@@ -99,15 +103,18 @@ Add `/pattern/`, reporting whether the set now holds it.
 A pattern outside the RE2 subset `re2_parse` reads, or that would cost more than
 the limits above allow, is refused; one that no longer fits in the set's budget,
 and every one after it, is counted in `regex_refused` so the loader can say so.
+A pattern already held is not compiled again: `types` is added to the types it
+matches, which `type_union` may refuse.
 */
-regex_add :: proc(s: ^Set, pattern: string) -> (stored: bool) {
+regex_add :: proc(s: ^Set, pattern: string, types := ANY_TYPE) -> (stored: bool) {
 	key_buf: [MAX_REGEX_PATTERN + 2]u8
 	// Empty is refused too: urlfilter would match every name with it, which
 	// no list author means by `//`.
 	if len(pattern) == 0 || len(pattern) > MAX_REGEX_PATTERN || regex_key(pattern, key_buf[:]) in s.cancelled {
 		return false
 	}
-	if pattern in s.regex_held {
+	if held, found := s.regex_held[pattern]; found {
+		held^ = type_union(held^, types, s.allocator) or_return
 		return true
 	}
 	if s.regex_scratch.curr_block == nil && virtual.arena_init_growing(&s.regex_scratch) != nil {
@@ -159,9 +166,11 @@ regex_add :: proc(s: ^Set, pattern: string) -> (stored: bool) {
 	}
 	re := regex_copy(trial, s.allocator)
 	shortcut := strings.clone(regex_shortcut(pattern, temp), s.allocator)
-	kept := Regex_Rule{strings.clone(pattern, s.allocator), re, cost, shortcut}
+	held := new(Type_Filter, s.allocator)
+	held^ = type_union({}, types, s.allocator) or_return
+	kept := Regex_Rule{strings.clone(pattern, s.allocator), re, cost, shortcut, held}
 	append(&s.regexes, kept)
-	s.regex_held[kept.pattern] = {}
+	s.regex_held[kept.pattern] = held
 	s.regex_bytes += kept.cost
 	s.count += 1
 	return true
@@ -265,8 +274,8 @@ regex_cost :: proc(re: regex.Regular_Expression) -> int {
 	return cost
 }
 
-// Whether any of the set's patterns matches `normalised`.
-regex_lookup :: proc(s: ^Set, normalised: string) -> bool {
+// Whether any of the set's patterns matches `normalised`, for `qtype`.
+regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type) -> bool {
 	if s == nil || len(s.regexes) == 0 {
 		return false
 	}
@@ -287,7 +296,7 @@ regex_lookup :: proc(s: ^Set, normalised: string) -> bool {
 	copy(url_buf[len(URL_PREFIX):], subject)
 	url := string(url_buf[:len(URL_PREFIX) + len(subject)])
 	for r in s.regexes {
-		if !strings.contains(url, r.shortcut) {
+		if !type_matches(r.types^, qtype) || !strings.contains(url, r.shortcut) {
 			continue
 		}
 		mem.arena_free_all(&arena)

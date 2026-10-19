@@ -1,6 +1,7 @@
 package fuzz_list
 
 import "core:strings"
+import "elodin:dns"
 import "elodin:filter"
 import "elodin:fuzz/harness"
 
@@ -39,7 +40,9 @@ fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
 	if i := strings.index_byte(text, '\n'); i >= 0 {
 		name = text[:i]
 	}
-	_ = filter.engine_match(e, name)
+	// The format byte's spare bits pick the query type, so a `$dnstype` rule is
+	// matched for types it names and types it does not.
+	_ = filter.engine_match(e, name, dns.Type(data[0] >> 2))
 	// The sets are the deferred destroys' to free, not the engine's.
 	filter.engine_swap(e, nil, nil)
 	return 0

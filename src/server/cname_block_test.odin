@@ -125,7 +125,7 @@ test_a_blocked_name_reached_through_a_cname_is_still_blocked :: proc(t: ^testing
 	s := Server{cfg = &cfg, group = group, filters = engine}
 
 	// The tracker is on the list: asked for directly, it is blocked.
-	testing.expect_value(t, filter.engine_match(engine, "tracker.evil.example."), filter.Decision.Blocked)
+	testing.expect_value(t, filter.engine_match(engine, "tracker.evil.example.", .A), filter.Decision.Blocked)
 
 	x := Cloak_Mock{socket = socket, reply = cloak_reply("www.brand.example.", "tracker.evil.example.")}
 	mock := thread.create_and_start_with_poly_data(&x, serve_cloak)
@@ -145,7 +145,7 @@ test_a_blocked_name_reached_through_a_cname_is_still_blocked :: proc(t: ^testing
 		if cname, is_cname := rec.data.(dns.Rdata_Name); is_cname {
 			testing.expectf(
 				t,
-				filter.engine_match(engine, cname.name) != .Blocked,
+				filter.engine_match(engine, cname.name, .A) != .Blocked,
 				"the answer carries a CNAME to %s, which is on the block list",
 				cname.name,
 			)
@@ -218,6 +218,7 @@ serve_cached_answer :: proc(
 	wire: []u8,
 	block, allow: []string,
 	stamped := false,
+	rules: []string = nil,
 ) -> Outcome {
 	cfg := config.default_config()
 	cfg.log.queries = false
@@ -237,6 +238,9 @@ serve_cached_answer :: proc(
 	}
 	for d in allow {
 		filter.set_add(allow_set, d, {.Apex, .Subdomains})
+	}
+	for r in rules {
+		filter.parse_rule(block_set, allow_set, r)
 	}
 	filter.engine_swap(engine, block_set, allow_set)
 
@@ -1437,4 +1441,41 @@ test_an_entry_that_turns_unreadable_on_a_later_walk_is_dropped :: proc(t: ^testi
 	testing.expect(t, y.asked, "the upstream was never re-asked: the parse failure was pinned onto the entry")
 	testing.expectf(t, third != .Failed, "the name stayed broken after a good answer was available (outcome=%v)", third)
 	free_all(context.temp_allocator)
+}
+
+/*
+A `$dnstype` rule is judged on the type the client asked for (#406), for the
+question and for every name its answer's chain reaches: an A query whose chain
+ends at a name listed for A gets that name's addresses, which is what the rule is
+there to stop. AdGuard Home matches a chain's targets as type CNAME instead,
+which would let one CNAME carry any typed rule past the check.
+*/
+@(test)
+test_a_dnstype_rule_is_judged_on_the_question_type :: proc(t: ^testing.T) {
+	hops := []string{"www.brand.example.", "tracker.evil.example."}
+	Case :: struct {
+		rule:    string,
+		blocked: bool,
+	}
+	cases := []Case {
+		{"||www.brand.example^$dnstype=A", true},
+		{"||www.brand.example^$dnstype=AAAA", false},
+		{"||tracker.evil.example^$dnstype=A", true},
+		{"||tracker.evil.example^$dnstype=AAAA", false},
+		{"||tracker.evil.example^$dnstype=~AAAA", true},
+		{"||tracker.evil.example^$dnstype=~A", false},
+		{"||tracker.evil.example^$dnstype=CNAME", false},
+		{"/^tracker\\.evil\\.example$/$dnstype=A", true},
+		{"/^tracker\\.evil\\.example$/$dnstype=AAAA", false},
+	}
+	for c in cases {
+		rules := []string{c.rule}
+		outcome := serve_cached_answer(t, hops[0], chain_reply(hops), nil, nil, rules = rules)
+		testing.expectf(t, (outcome == .Blocked) == c.blocked, "%q on an A query: %v", c.rule, outcome)
+	}
+	// An allow rule for the question's type is the escape hatch, as untyped.
+	allowed := []string{"||tracker.evil.example^", "@@||www.brand.example^$dnstype=A"}
+	testing.expect(t, serve_cached_answer(t, hops[0], chain_reply(hops), nil, nil, rules = allowed) != .Blocked)
+	not_allowed := []string{"||tracker.evil.example^", "@@||www.brand.example^$dnstype=AAAA"}
+	testing.expect_value(t, serve_cached_answer(t, hops[0], chain_reply(hops), nil, nil, rules = not_allowed), Outcome.Blocked)
 }

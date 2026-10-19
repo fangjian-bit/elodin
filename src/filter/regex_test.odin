@@ -25,18 +25,18 @@ test_regex_rule_matches_the_name :: proc(t: ^testing.T) {
 	e := engine_of("/^ads[0-9]+\\.example\\.com$/\n/tracker/\n")
 	defer engine_destroy(e)
 
-	testing.expect_value(t, engine_match(e, "ads12.example.com."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "ads12.example.com"), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ads12.example.com.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ads12.example.com", .A), Decision.Blocked)
 	// The name is lowercased before it is matched.
-	testing.expect_value(t, engine_match(e, "ADS3.Example.COM."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "ads.example.com."), Decision.None)
+	testing.expect_value(t, engine_match(e, "ADS3.Example.COM.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ads.example.com.", .A), Decision.None)
 	// The anchors hold at the ends of the name, not of a label.
-	testing.expect_value(t, engine_match(e, "xads1.example.com."), Decision.None)
-	testing.expect_value(t, engine_match(e, "ads1.example.com.evil."), Decision.None)
+	testing.expect_value(t, engine_match(e, "xads1.example.com.", .A), Decision.None)
+	testing.expect_value(t, engine_match(e, "ads1.example.com.evil.", .A), Decision.None)
 	// Unanchored, it matches anywhere in the name.
-	testing.expect_value(t, engine_match(e, "a.tracker.example."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "trackers.example"), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "track.example"), Decision.None)
+	testing.expect_value(t, engine_match(e, "a.tracker.example.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "trackers.example", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "track.example", .A), Decision.None)
 }
 
 // urlfilter compiles a rule without `$match-case` as `(?i)` + pattern, so an
@@ -45,8 +45,8 @@ test_regex_rule_matches_the_name :: proc(t: ^testing.T) {
 test_regex_rule_is_case_insensitive :: proc(t: ^testing.T) {
 	e := engine_of("/^ADS[A-Z]\\.example$/\n")
 	defer engine_destroy(e)
-	testing.expect_value(t, engine_match(e, "adsq.example."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "ads1.example."), Decision.None)
+	testing.expect_value(t, engine_match(e, "adsq.example.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ads1.example.", .A), Decision.None)
 }
 
 // A `$` inside the slashes is the regex's; the options start at the last `$`
@@ -67,22 +67,23 @@ test_regex_rule_dollar_and_modifiers :: proc(t: ^testing.T) {
 	e := engine_of(src)
 	defer engine_destroy(e)
 
-	testing.expect_value(t, engine_match(e, "a.example."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "b.example."), Decision.Blocked)
-	// A modifier DNS cannot honour skips the rule, as for any other rule.
-	testing.expect_value(t, engine_match(e, "c.example."), Decision.None)
+	testing.expect_value(t, engine_match(e, "a.example.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "b.example.", .A), Decision.Blocked)
+	// `$dnstype` narrows it to its types, as for any other rule.
+	testing.expect_value(t, engine_match(e, "c.example.", .A), Decision.None)
+	testing.expect_value(t, engine_match(e, "c.example.", .AAAA), Decision.Blocked)
 	// `$badfilter` takes the rule back whichever side of it the rule sits.
-	testing.expect_value(t, engine_match(e, "d.example."), Decision.None)
-	testing.expect_value(t, engine_match(e, "e.example."), Decision.None)
-	testing.expect_value(t, engine_match(e, "g.example."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "h.example."), Decision.None)
+	testing.expect_value(t, engine_match(e, "d.example.", .A), Decision.None)
+	testing.expect_value(t, engine_match(e, "e.example.", .A), Decision.None)
+	testing.expect_value(t, engine_match(e, "g.example.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "h.example.", .A), Decision.None)
 	// urlfilter's `findOptionsDelimiter` starts at the last byte, so a
 	// trailing `$` opens an empty options list and `/re/$` is the regex.
-	testing.expect_value(t, engine_match(e, "i.example."), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "i.example.", .A), Decision.Blocked)
 	// A rule holding `replace=` is split at its last `$` even when it ends in
 	// `/` (urlfilter's `isRegexRuleWithoutOptions`), so it is a `$replace`
 	// rule and skipped, not a regex taking in everything up to the end.
-	testing.expect_value(t, engine_match(e, "j.eample."), Decision.None)
+	testing.expect_value(t, engine_match(e, "j.eample.", .A), Decision.None)
 }
 
 @(test)
@@ -91,14 +92,14 @@ test_regex_allow_rule :: proc(t: ^testing.T) {
 	defer engine_destroy(e)
 
 	// An allow regex outranks a hash-set block ...
-	testing.expect_value(t, engine_match(e, "keep.example.org."), Decision.Allowed)
-	testing.expect_value(t, engine_match(e, "other.example.org."), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "keep.example.org.", .A), Decision.Allowed)
+	testing.expect_value(t, engine_match(e, "other.example.org.", .A), Decision.Blocked)
 	// ... and a regex block.
-	testing.expect_value(t, engine_match(e, "blocked.but-allowed.test."), Decision.Allowed)
-	testing.expect_value(t, engine_match(e, "blocked.test."), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "blocked.but-allowed.test.", .A), Decision.Allowed)
+	testing.expect_value(t, engine_match(e, "blocked.test.", .A), Decision.Blocked)
 	// With nothing blocking the name it is still Allowed, not None: an allow
 	// rule on the question is what exempts an answer from the CNAME walk.
-	testing.expect_value(t, engine_match(e, "free.test."), Decision.Allowed)
+	testing.expect_value(t, engine_match(e, "free.test.", .A), Decision.Allowed)
 }
 
 @(test)
@@ -128,19 +129,19 @@ test_regex_rules_are_counted :: proc(t: ^testing.T) {
 test_regex_rule_in_a_domains_list :: proc(t: ^testing.T) {
 	e := engine_of("plain.example\n/^ads[0-9]\\./\n-/^ads1\\./\n", .Domains)
 	defer engine_destroy(e)
-	testing.expect_value(t, engine_match(e, "plain.example."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "ads7.example."), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "plain.example.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ads7.example.", .A), Decision.Blocked)
 	// `-` makes it an allow rule, as it does a domain.
-	testing.expect_value(t, engine_match(e, "ads1.example."), Decision.Allowed)
+	testing.expect_value(t, engine_match(e, "ads1.example.", .A), Decision.Allowed)
 
 	// A `!` or `#` opens a comment in such a list; one inside the slashes
 	// would leave a shorter pattern that matches far more.
 	f := engine_of("/q/!x/\n/^kept\\./ # a comment\nwide.example\n@@/w/!x/\n@@/i/#x/\n", .Domains)
 	defer engine_destroy(f)
-	testing.expect_value(t, engine_match(f, "q.example."), Decision.None)
-	testing.expect_value(t, engine_match(f, "kept.example."), Decision.Blocked)
+	testing.expect_value(t, engine_match(f, "q.example.", .A), Decision.None)
+	testing.expect_value(t, engine_match(f, "kept.example.", .A), Decision.Blocked)
 	// `@@` takes its own road to the adblock parser, and is held to the same.
-	testing.expect_value(t, engine_match(f, "wide.example."), Decision.Blocked)
+	testing.expect_value(t, engine_match(f, "wide.example.", .A), Decision.Blocked)
 	testing.expect_value(t, len(f.allow.regexes), 0)
 }
 
@@ -154,11 +155,11 @@ glues its letter to the literal after it, and a `?` turns the test off.
 test_regex_rule_needs_its_shortcut :: proc(t: ^testing.T) {
 	e := engine_of("/ads|tracker/\n/\\bpixel\\b/\n/^beacon\\d?\\./\n")
 	defer engine_destroy(e)
-	testing.expect_value(t, engine_match(e, "ads.example."), Decision.None)
-	testing.expect_value(t, engine_match(e, "tracker.example."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "pixel.example."), Decision.None)
-	testing.expect_value(t, engine_match(e, "beacon.example."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "beacon7.example."), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ads.example.", .A), Decision.None)
+	testing.expect_value(t, engine_match(e, "tracker.example.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "pixel.example.", .A), Decision.None)
+	testing.expect_value(t, engine_match(e, "beacon.example.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "beacon7.example.", .A), Decision.Blocked)
 
 	testing.expect_value(t, regex_shortcut(`^(a|c)\.[0-9a-f]{56}\.com$`, context.temp_allocator), "com")
 	testing.expect_value(t, regex_shortcut(`^ADS\d+`, context.temp_allocator), "ads")
@@ -249,7 +250,7 @@ test_regex_rules_that_are_refused :: proc(t: ^testing.T) {
 	e := engine_make()
 	defer free(e)
 	engine_swap(e, block, allow)
-	testing.expect_value(t, engine_match(e, "a.example."), Decision.None)
+	testing.expect_value(t, engine_match(e, "a.example.", .A), Decision.None)
 	engine_swap(e, nil, nil)
 
 	// What RE2 reads the same way is still kept.
@@ -355,7 +356,7 @@ test_regex_reads_as_re2 :: proc(t: ^testing.T) {
 		}
 		e := engine_make()
 		engine_swap(e, block, allow)
-		got := engine_match(e, c.name) == .Blocked
+		got := engine_match(e, c.name, .A) == .Blocked
 		testing.expectf(t, got == c.want, "%s on %q: blocked %v, want %v", c.rule, c.name, got, c.want)
 		engine_swap(e, nil, nil)
 		free(e)
@@ -373,10 +374,10 @@ test_regex_subject_fits_a_hostname :: proc(t: ^testing.T) {
 		return strings.repeat("(", n, context.temp_allocator)
 	}
 	// 125 of them, each spelled `\(`, and a dot: 251 characters.
-	testing.expect_value(t, engine_match(e, fmt.tprintf("%s.%s", parens(62), parens(63))), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, fmt.tprintf("%s.%s", parens(62), parens(63)), .A), Decision.Blocked)
 	// 126 and two dots: 254.
-	testing.expect_value(t, engine_match(e, fmt.tprintf("%s.%s.(", parens(62), parens(63))), Decision.None)
-	testing.expect_value(t, engine_match(e, fmt.tprintf("%s.%s.%s.%s", parens(62), parens(62), parens(62), parens(62))), Decision.None)
+	testing.expect_value(t, engine_match(e, fmt.tprintf("%s.%s.(", parens(62), parens(63)), .A), Decision.None)
+	testing.expect_value(t, engine_match(e, fmt.tprintf("%s.%s.%s.%s", parens(62), parens(62), parens(62), parens(62)), .A), Decision.None)
 }
 
 // Go's `repeatIsValid`: counts nested in one another multiply to 1000 at most.
@@ -411,14 +412,14 @@ test_regex_nested_counts_multiply :: proc(t: ^testing.T) {
 test_regex_negated_class_in_an_alternation :: proc(t: ^testing.T) {
 	e := engine_of("/^(z|\\W)$/\n/^(\\S|0)$/\n")
 	defer engine_destroy(e)
-	testing.expect_value(t, engine_match(e, "a"), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "z"), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "-"), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "ab"), Decision.None)
+	testing.expect_value(t, engine_match(e, "a", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "z", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "-", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "ab", .A), Decision.None)
 	e2 := engine_of("/^(z|\\W)$/\n")
 	defer engine_destroy(e2)
-	testing.expect_value(t, engine_match(e2, "a"), Decision.None)
-	testing.expect_value(t, engine_match(e2, "-"), Decision.Blocked)
+	testing.expect_value(t, engine_match(e2, "a", .A), Decision.None)
+	testing.expect_value(t, engine_match(e2, "-", .A), Decision.Blocked)
 }
 
 // The AdGuard DNS filter's one allow regex needs a `#` in the name, which none
@@ -427,8 +428,8 @@ test_regex_negated_class_in_an_alternation :: proc(t: ^testing.T) {
 test_regex_hash_is_no_comment :: proc(t: ^testing.T) {
 	e := engine_of("||gdfp.gifshow.com^\n@@/\\.(gif|jpe?g|png|webp)#(\\/?.+)?(\\/(ad)s?\\/|\\/ad-)/\n")
 	defer engine_destroy(e)
-	testing.expect_value(t, engine_match(e, "gdfp.gifshow.com."), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, "img.png.example."), Decision.None)
+	testing.expect_value(t, engine_match(e, "gdfp.gifshow.com.", .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, "img.png.example.", .A), Decision.None)
 }
 
 // What RE2 and Odin read the same way is kept, and means what RE2 means. The
@@ -459,7 +460,7 @@ test_regex_syntax_both_engines_share :: proc(t: ^testing.T) {
 			{"amidst.test", .Blocked},
 			{"mid.test", .None},
 		}) {
-		testing.expectf(t, engine_match(e, w.name) == w.want, "%s: got %v, want %v", w.name, engine_match(e, w.name), w.want)
+		testing.expectf(t, engine_match(e, w.name, .A) == w.want, "%s: got %v, want %v", w.name, engine_match(e, w.name, .A), w.want)
 	}
 }
 
@@ -552,13 +553,13 @@ test_regex_pattern_and_program_limits :: proc(t: ^testing.T) {
 		append(&labels, strings.repeat("a", 62, context.temp_allocator))
 	}
 	name := strings.join(labels[:], ".", context.temp_allocator)
-	testing.expect_value(t, engine_match(e, name), Decision.None)
+	testing.expect_value(t, engine_match(e, name, .A), Decision.None)
 	a := strings.repeat("a", MAX_REGEX_NAME - 1, context.temp_allocator)
-	testing.expect_value(t, engine_match(e, fmt.tprintf("%sz", a)), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, fmt.tprintf("%sz", a), .A), Decision.Blocked)
 	// Past a hostname's length the name spells bytes as `\DDD`, which only
 	// makes a scan longer: no regex is asked about it.
-	testing.expect_value(t, engine_match(e, fmt.tprintf("%saz", a)), Decision.None)
-	testing.expect_value(t, engine_match(e, fmt.tprintf("%s\\001z", a)), Decision.None)
+	testing.expect_value(t, engine_match(e, fmt.tprintf("%saz", a), .A), Decision.None)
+	testing.expect_value(t, engine_match(e, fmt.tprintf("%s\\001z", a), .A), Decision.None)
 	engine_swap(e, nil, nil)
 }
 
@@ -586,8 +587,8 @@ test_regex_budget_per_set :: proc(t: ^testing.T) {
 	defer free(e)
 	engine_swap(e, block, nil)
 	hex := strings.repeat("0", 60, context.temp_allocator)
-	testing.expect_value(t, engine_match(e, fmt.tprintf("r0%s", hex)), Decision.Blocked)
-	testing.expect_value(t, engine_match(e, fmt.tprintf("r%d%s", i - 1, hex)), Decision.None)
+	testing.expect_value(t, engine_match(e, fmt.tprintf("r0%s", hex), .A), Decision.Blocked)
+	testing.expect_value(t, engine_match(e, fmt.tprintf("r%d%s", i - 1, hex), .A), Decision.None)
 	engine_swap(e, nil, nil)
 }
 

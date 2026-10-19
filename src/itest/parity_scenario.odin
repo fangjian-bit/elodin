@@ -263,8 +263,8 @@ The names a blocking scenario refuses, and the one it lets through.
 
 `www.parity.test.` is in the generator's pool, so it and the subdomains the
 generator makes under it are blocked by name. `alias.parity.test.` is in nobody's
-pool: it is the target of every CNAME the mock serves (`pm_cname_chain`), so it is
-only ever reached through an answer - which is the path `block_cloaked_answer`
+pool: it is the target of half the CNAMEs the mock serves (`pm_cname_chain`), so it
+is only ever reached through an answer - which is the path `block_cloaked_answer`
 exists for, and the one a name-only check would never walk. The allow rule sits
 inside the first, so the exception has to beat the rule it is an exception to.
 */
@@ -282,14 +282,35 @@ PARITY_BLOCKED_SUBTREE :: "subtree.parity.test."
 /*
 Rules on pool names that must block nothing, so their answers are held to the
 upstream's like any other. Each names a rule a list really carries - one
-cancelled by `$badfilter`, one narrowed to a type or a client - which read as a
-plain block used to take the name off the air (#319).
+cancelled by `$badfilter`, one narrowed to a client - which read as a plain block
+used to take the name off the air (#319).
 */
 PARITY_NOT_BLOCKING :: []string {
 	"||deep.nested.parity.test^",
 	"||deep.nested.parity.test^$badfilter",
-	"||a.parity.test^$dnstype=AAAA",
 	"||xn--bcher-kva.parity.test^$client=192.0.2.1",
+}
+
+/*
+`$dnstype` rules on pool names (#406): the name and below are blocked for the
+query types `types` names, or with `negated` for every other, and held to the
+upstream's answer for the rest. Written out apart from `rule` so the judge does
+not read the rule the way the engine does.
+*/
+Parity_Typed_Rule :: struct {
+	rule:    string,
+	zone:    string,
+	types:   []u16,
+	negated: bool,
+}
+
+PARITY_BLOCKED_TYPED := []Parity_Typed_Rule {
+	{"||a.parity.test^$dnstype=AAAA", "a.parity.test.", {28}, false},
+	// Only ever reached through an answer: `pm_cname_chain` ends half its
+	// chains here. Blocked for most question types, and for none were the walk
+	// judged on the record's type (CNAME), as AdGuard Home judges it, or on A.
+	{"||typed-alias.parity.test^$dnstype=~A|~CNAME", "typed-alias.parity.test.", {1, 5}, true},
+	{"||one.two.three.four.five.parity.test^$dnstype=~A|~AAAA", "one.two.three.four.five.parity.test.", {1, 28}, true},
 }
 
 // The blocking scenario's pool: the usual one, the allowed name inside the
@@ -431,6 +452,9 @@ parity_scenario_config :: proc(
 		fmt.sbprintf(&sb, "    - \"||*.%s^\"\n", strings.trim_suffix(PARITY_BLOCKED_SUBTREE, "."))
 		for rule in PARITY_NOT_BLOCKING {
 			fmt.sbprintf(&sb, "    - \"%s\"\n", rule)
+		}
+		for typed in PARITY_BLOCKED_TYPED {
+			fmt.sbprintf(&sb, "    - \"%s\"\n", typed.rule)
 		}
 		fmt.sbprintf(&sb, "  allow:\n    - \"||%s^\"\n", strings.trim_suffix(PARITY_ALLOWED, "."))
 	} else {

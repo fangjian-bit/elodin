@@ -123,8 +123,19 @@ digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share o
 - `$badfilter` cancels what the named rule covers in any list, whichever rule
   gave it: `||*.x^$badfilter` narrows a `||x^` to blocking only `x`. A list's
   `$badfilter` cannot cancel `blocking.rules` or `blocking.allow`.
-- Skipped, without failing the list: any other modifier (`$dnstype`, `$client`,
-  `$domain`, `$elemhide`, `$removeparam`, ...), cosmetic rules (`##`, `$$`), and
+- `$dnstype` narrows a rule to query types, as in AdGuard Home:
+  `||x^$dnstype=AAAA` blocks only AAAA queries for `x` and below,
+  `$dnstype=A|AAAA` either, and `$dnstype=~A` every type but A. A type is a
+  mnemonic in any case or `TYPEnnn` (RFC 3597). The type checked is the one the
+  client asked for, for the question and for every name a CNAME in the answer
+  leads to. Every rule for a name applies, so `||x^$dnstype=A` and
+  `||x^$dnstype=AAAA` block both, and a rule without `$dnstype` blocks every
+  type. A rule naming an unknown type, nothing, or more than 64 types (with the
+  name's other `$dnstype` rules), is skipped; so is one that excludes every
+  type it names (`$dnstype=A|~A`). `$badfilter` cancels a rule whatever either one's `$dnstype`.
+- Skipped, without failing the list: any other modifier (`$client`, `$ctag`,
+  `$denyallow`, `$dnsrewrite`, `$domain`, `$elemhide`, `$removeparam`, ...),
+  cosmetic rules (`##`, `$$`), and
   any rule that is not expressible as a domain or a regex. A modifier is read
   as written, as urlfilter reads it: `$ important`, `$important, badfilter` and
   `$IMPORTANT` are unknown, so the rule is skipped.
