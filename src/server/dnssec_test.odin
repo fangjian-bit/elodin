@@ -508,20 +508,17 @@ cname_nodata_response :: proc() -> dns.Message {
 /*
 A denial after a CNAME, pruned, is not cached.
 
-The prune takes the SOA out with the rest of the authority section - it belongs
-to the target's zone, which the validator never established - and what is left
+The prune takes the SOA out with the rest of the authority section when the
+verdict does not name it, and what is left
 is a CNAME that never reaches the type asked for, under NOERROR or NXDOMAIN.
 Either way that is a denial (RFC 2308 section 2.2), and a denial without a SOA
 is not kept at all (RFC 2308 section 5), whatever `cache.negative_ttl` says.
 
-The verdict here is built by hand, and it is one the validator will not reach on
-its own: `chain_shape` plus `denial_claimed` report a chain ending without the
-type asked for, with a SOA beside it, as `Insecure`, so nothing is pruned and the
-SOA reaches the cache, which holds the entry for that figure. What this pins is
-the prune's own behaviour when it *is* handed such a verdict - worth keeping,
-because the shape becomes reachable again the moment #186 lands and the denial
-at the target's zone is genuinely checked, at which point the SOA is among the
-records the verdict names and survives the prune.
+The verdict here is built by hand. The validator reaches this shape when the
+denial at the chain's end is proven and the SOA beside it is not - an SOA whose
+signature fails, or one the verification budget ran out before - since
+`proved_denial` names the proof and leaves the SOA out. What this pins is the
+prune's behaviour over that verdict.
 */
 @(test)
 test_a_pruned_denial_after_a_cname_is_not_cached :: proc(t: ^testing.T) {

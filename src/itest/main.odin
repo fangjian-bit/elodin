@@ -286,6 +286,7 @@ main :: proc() {
 	run_dnssec_cases(&r)
 	run_dnssec_reverse_cases(&r)
 	run_dnssec_ttl_cases(&r)
+	run_dnssec_cname_denial_cases(&r)
 
 	section(&r, "dns cookies")
 	run_cookie_cases(&r)

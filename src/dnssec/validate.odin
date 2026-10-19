@@ -1231,31 +1231,25 @@ address nobody verified is the exact harm this procedure exists to prevent.
 
 A CNAME chain that ends in a denial - a dual-stack client asking AAAA for an
 IPv4-only name is the everyday version of it, and a CNAME pointing at a name
-that does not exist is the same shape with NXDOMAIN on it - never reaches this
-prune: `validate_answer` reports it `Insecure` (`denial_claimed`), so nothing is
-pruned and the SOA reaches the client and our cache intact. Handed a `Secure`
-verdict over that shape anyway, the prune takes the SOA with the rest, since it
-belongs to the target's zone, which nothing here established; `cache.put` then
-reads the result as the denial it is (RFC 2308 section 2.2), finds no SOA, and
-keeps none of it (section 5). Validating the denial at the target is #186.
+that does not exist is the same shape with NXDOMAIN on it - reaches `Secure`
+only once `validate_answer` has proven the denial in the zone holding the
+chain's end, so the NSEC or NSEC3 records and the SOA are among what the verdict
+names and survive. An SOA that did not verify is the one thing dropped from
+that shape (see `proved_denial`); `cache.put` then reads the result as the
+denial it is (RFC 2308 section 2.2), finds no SOA, and keeps none of it
+(section 5).
 
 The rcode is the part of this no prune can reach. AD covers the records in those
 two sections, and this makes it honest about them; it says nothing about the
 header. That is why `validate_answer` reads the rcode itself: an on-path
-attacker who flips a signed CNAME answer to NXDOMAIN gets `Insecure` out of it
-(`denial_claimed`), not `Secure`, so the denial goes out without the AD bit
-rather than as one this server proved. Proving it is the same missing chain
-walk, and the same issue.
+attacker who flips a signed CNAME answer to NXDOMAIN has to bring a name error
+proof from the target's zone along with it, and without one the answer is
+`Bogus`.
 
-Two ways not to lose it, and neither belongs here. Keeping the records and
-clearing AD instead is the one that looks free: it is not, because AD is a
-property of the message and not of a section, so the commonest answer shape
-there is would go out unauthenticated - and the copy that lands in the cache
-would be AD-less for every later client too. A negative-caching hint is not
-worth the bit on the common path. The other way is the correct one, which is to
-establish the target's zone and validate the denial there; that is a second
-chain walk on a hot path, it widens what gets checked rather than narrowing what
-gets claimed, and it is filed as its own issue rather than smuggled in here.
+Keeping the records and clearing AD instead is the way out of that which looks
+free, and is not: AD is a property of the message and not of a section, so the
+commonest answer shape there is would go out unauthenticated - and the copy
+that lands in the cache would be AD-less for every later client too.
 
 The OPT record survives on its own account. It is transport rather than data -
 no owner name to authenticate - and taking it out would drop the upper bits of
@@ -1321,10 +1315,10 @@ chain, a referral - asserts nothing, and a sender asserting nothing has made no
 claim for this server to put its name to.
 
 This is the one place on this path that reads fields the sender writes, and it
-is the right place for it: what is guarded against is a false denial reaching a
-client under our AD bit, so deleting the claim removes the harm rather than
-hiding it. The client then sees a redirection and goes and asks the target
-itself.
+is the right place for it: what it decides is whether a denial has to be
+proven, and a sender that deletes the claim to avoid the proof has removed the
+harm rather than hidden it. The client then sees a redirection and goes and
+asks the target itself.
 */
 @(private)
 denial_claimed :: proc(msg: dns.Message) -> bool {
@@ -1345,9 +1339,9 @@ What the answer section does with the question, as the chain sees it.
 `answers_question` folds two different outcomes into one `true`: a record of
 the type asked for, and a CNAME chain that stopped short of it. The second is
 not an answer - it is a redirection, and whatever explains the missing type
-lives in the authority section at a zone this path never walked to. Keeping them
-apart is what lets the caller stamp AD on the first and decline to on the
-second.
+lives in the authority section, signed by the zone at the chain's end. Keeping
+them apart is what lets the caller demand that proof of the second and not of
+the first.
 */
 @(private)
 Answer_Shape :: enum u8 {
@@ -1360,7 +1354,9 @@ Answer_Shape :: enum u8 {
 }
 
 /*
-Follow the chain from `qname` and report where it ended up.
+Follow the chain from `qname` and report where it ended up: the shape, and the
+name the walk stopped at, which for `.Chain_Only` is the name a denial beside
+the chain is about (RFC 6604 section 3).
 
 The walk is the only thing consulted, and that is the point. Scanning the whole
 section for any record of the type is not the same test and was a way to get
@@ -1375,6 +1371,20 @@ chain_shape :: proc(
 	qtype: dns.Type,
 	class: dns.Class,
 ) -> Answer_Shape {
+	shape, _ := chain_walk(records, qname, qtype, class)
+	return shape
+}
+
+@(private)
+chain_walk :: proc(
+	records: []dns.Record,
+	qname: string,
+	qtype: dns.Type,
+	class: dns.Class,
+) -> (
+	shape: Answer_Shape,
+	end: string,
+) {
 	name := qname
 	hops := 0
 	for hops < MAX_CNAME_CHAIN {
@@ -1384,7 +1394,7 @@ chain_shape :: proc(
 				continue
 			}
 			if r.type == qtype || qtype == .ANY {
-				return .Direct
+				return .Direct, name
 			}
 			if r.type == .CNAME {
 				if v, is_name := r.data.(dns.Rdata_Name); is_name {
@@ -1395,13 +1405,13 @@ chain_shape :: proc(
 		if target == "" {
 			// Nothing further to follow. Whether this concerns the question at
 			// all comes down to having got here by a CNAME the queried name owns.
-			return .Chain_Only if hops > 0 else .None
+			return .Chain_Only if hops > 0 else .None, name
 		}
 		name = target
 		hops += 1
 	}
 	// A chain this long is a loop or a stall, and either way proves nothing.
-	return .None
+	return .None, name
 }
 
 /*
@@ -2071,7 +2081,7 @@ validate_answer :: proc(
 	and a stub would read an authenticated answer holding nothing for the name
 	it asked about - a denial of existence that was never proven.
 	*/
-	shape := chain_shape(msg.answer, qname, qtype, class)
+	shape, end := chain_walk(msg.answer, qname, qtype, class)
 	/*
 	Not gated on `worst`, for the same reason the rcode guard below is not, and
 	this one is the load-bearing half of the pair.
@@ -2134,9 +2144,8 @@ validate_answer :: proc(
 	Which name the rcode is about is the whole of the rest. In a CNAME chain it
 	is the last name in it and not the one asked about (RFC 6604 section 3), so
 	a chain that stops short is the ordinary NXDOMAIN-after-a-CNAME and no
-	contradiction at all: the denial is of a target this path never walked to,
-	and it is `denial_claimed` below that declines to vouch for it - `Insecure`,
-	for want of a proof, rather than because the message disagrees with itself.
+	contradiction at all: the denial is of the chain's target, and it is the
+	check below, against that target's zone, that proves it or refuses it.
 	`denial_contradicted` follows the chain to that name and asks only whether
 	an authenticated record is sitting at it.
 
@@ -2206,36 +2215,51 @@ validate_answer :: proc(
 
 	/*
 	A chain that ends without the type asked for, where the sender is claiming
-	there is nothing more, is a denial this path did not check.
+	there is nothing more, is a denial, and it is checked as one.
 
 	The everyday shape is an AAAA lookup for a name whose CNAME leads somewhere
-	with only an A record: the CNAME verifies, the chain concerns the question,
-	and the verdict is `Secure` - reached entirely from the answer section. What
-	says the target really has no AAAA lives in the *authority* section, at the
-	target's zone, which nothing here walked to. The prune keeps only what the
-	verdict names, so that proof was stripped, and the AD bit went out over what
-	was left: a downstream resolver validating for itself gets an authenticated
-	denial with nothing behind it and refuses it.
+	with only an A record: the CNAME verifies and the chain concerns the
+	question, but what says the target has no AAAA is the NSEC or NSEC3 and the
+	SOA in the *authority* section, signed by the target's zone. RFC 6840
+	section 5.8 has the AD bit cover "any relevant negative response RRs in the
+	Authority section" as well as the answer, and the prune keeps only what the
+	verdict names - so without this the proof was either stripped from under the
+	AD bit or the bit withheld from the commonest answer there is.
 
-	Both halves are needed. A chain stopping short is not enough on its own -
-	a DNAME redirection is exactly that shape and is not a denial, so refusing
-	on the shape alone would take the AD bit off every one of them.
-	`denial_claimed` is the other half.
+	`validate_denial` is asked about `end`, the last name in the chain, because
+	that is the name the rcode and the proof are about (RFC 6604 section 3), and
+	it establishes the zone from that name rather than from any signer in the
+	message - so a genuine proof lifted from the source zone, or from anywhere
+	else, is read against keys that did not sign it and fails. Its verdict is
+	the message's: a proof that does not hold is `Bogus` as the same denial
+	asked for directly would be, an unsigned or opt-out target is `Insecure`, a
+	walk that did not finish is `Indeterminate`.
+
+	The cost is one more walk, to the zone holding `end`, and one per response
+	however many CNAMEs it carries: a chain has one end, and the CNAMEs before it
+	have each paid for their own zone above. It comes out of the same
+	`MAX_LOOKUPS_PER_QUERY` and `MAX_VERIFICATIONS_PER_QUERY` as everything else
+	the question spends, so a response full of CNAMEs to distinct zones costs no
+	more than the budget it already had - and running that out here is
+	`Indeterminate`, not a forgery.
+
+	Both halves of the condition are needed. A chain stopping short is not
+	enough on its own - a DNAME redirection or a bare chain an upstream did not
+	follow is exactly that shape and claims no denial, so demanding a proof on
+	the shape alone would refuse every one of them. `denial_claimed` is the
+	other half.
 
 	*After* the wildcard proof, and that ordering is load-bearing. Put before it,
-	this would be a way to skip that proof: an attacker replays a genuine wildcard
-	record as the answer for a name that has its own records, adds one SOA, and
-	what is `Bogus` - refused, SERVFAIL - would come back `Insecure`, which
-	`resolve_query` forwards to the client. A guard meant to withhold an answer
-	must not be reachable before the check that would have withheld it outright.
-
-	`Insecure` is the honest verdict: this server has no opinion on the denial.
-	Nothing is pruned, so the proof reaches the client intact and it can check
-	it, and no AD bit claims otherwise. Checking it here means walking to the
-	target's zone, which is #186.
+	this would be a way to skip that proof: an attacker replays a genuine
+	wildcard record as the answer for a name that has its own records, adds a
+	proven denial for the target, and the expansion is never asked about.
 	*/
 	if worst == .Secure && shape == .Chain_Only && denial_claimed(msg) {
-		return {status = .Insecure, reason = "denial after a cname was not checked"}
+		denied := validate_denial(v, budget, msg, end, qtype, class, unix, now, allocator)
+		if denied.status != .Secure {
+			return denied
+		}
+		append(&proved, ..denied.authority)
 	}
 	/*
 	The RRsets are named only when the verdict is `Secure`, which is what
