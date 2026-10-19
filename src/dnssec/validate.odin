@@ -2216,7 +2216,7 @@ validate_answer :: proc(
 				proof_detail = budget.broken if why == BROKEN_CHAIN else ""
 			}
 			worst = worse(worst, proof)
-			append(&proved, ..records)
+			name_once(&proved, records)
 		}
 		if worst != before {
 			reason, detail = proof_reason, proof_detail
@@ -2282,13 +2282,7 @@ validate_answer :: proc(
 		denied := validate_denial(v, budget, msg, end, qtype, class, unix, now, allocator, &denials)
 		switch {
 		case denied.status == .Secure:
-			// A wildcard proof read against the same zone has named these
-			// already, from the same memo.
-			for s in denied.authority {
-				if _, named := authenticated_rrset(proved[:], s.name, s.type, s.class); !named {
-					append(&proved, s)
-				}
-			}
+			name_once(&proved, denied.authority)
 		case denied.status == .Insecure && worst == .Insecure:
 		// Insecure already, and the reason that made it so stands.
 		case:
@@ -2319,6 +2313,18 @@ validate_answer :: proc(
 		answer = authenticated[:],
 		authority = proved[:],
 		additional = hints,
+	}
+}
+
+// Add the sets `proved` does not name yet. Proofs read against one zone come
+// from the same `Verified_Denial` memo, so each expansion, and a denial at the
+// chain's end, hands back the same sets.
+@(private)
+name_once :: proc(proved: ^[dynamic]Authenticated_Set, sets: []Authenticated_Set) {
+	for s in sets {
+		if _, named := authenticated_rrset(proved[:], s.name, s.type, s.class); !named {
+			append(proved, s)
+		}
 	}
 }
 
@@ -3081,7 +3087,11 @@ validate_wildcard_proof :: proc(
 			return trust, nil, walk_reason(budget)
 		case .Bogus:
 			return trust, nil, BROKEN_CHAIN
-		case .Insecure, .Secure:
+		case .Insecure:
+			// The expanded name's zone is unsigned, or sits in an opt-out span:
+			// nothing to prove, and nothing forged.
+			return trust, nil, "unsigned zone"
+		case .Secure:
 		}
 		return trust, nil, "wildcard expansion not proven"
 	}

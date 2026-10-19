@@ -256,6 +256,31 @@ CD_FIXTURES := []Fixture{
 			"686f73746d6173746572046364756e000000000100000e100000038400093a800000012c",
 	},
 	{
+		key   = "cd_unsigned_hop",
+		name  = "un.cdun.",
+		type  = .AAAA,
+		rcode = 0,
+		wire  = "12348580000100010002000002756e046364756e00001c000102756e046364756e000005000100000e10000c04686f73" +
+			"7405636474677400056364746774000006000100000e100030026e73056364746774000a686f73746d61737465720563" +
+			"64746774000000000100000e100000038400093a800000012c05636474677400002e000100000e10005900060f010000" +
+			"0e107d3b18206a478820e8d4056364746774008789049a1cfeb4ec45cb0bc96ff3dc697754698cb57b56c3901c25aefe" +
+			"d09d583cd245571437d2a79239e89a28c889c47c87eb18c5839af4ec02b6f1fd2eaf0f",
+	},
+	{
+		key   = "cd_unsigned_hop_proven",
+		name  = "un.cdun.",
+		type  = .AAAA,
+		rcode = 0,
+		wire  = "12348580000100010004000002756e046364756e00001c000102756e046364756e000005000100000e10000c04686f73" +
+			"7405636474677400056364746774000006000100000e100030026e73056364746774000a686f73746d61737465720563" +
+			"64746774000000000100000e100000038400093a800000012c05636474677400002e000100000e10005900060f010000" +
+			"0e107d3b18206a478820e8d4056364746774008789049a1cfeb4ec45cb0bc96ff3dc697754698cb57b56c3901c25aefe" +
+			"d09d583cd245571437d2a79239e89a28c889c47c87eb18c5839af4ec02b6f1fd2eaf0f04686f73740563647467740000" +
+			"2f000100000e10000f05636474677400000640000000000304686f737405636474677400002e000100000e100059002f" +
+			"0f0200000e107d3b18206a478820e8d4056364746774006dd73b449a2b883b61fa0848b7fb313c902a11884d65d381b7" +
+			"1fbfd72b14999a440d535ad43f81cc25c24a53b0d84d3aae327413977c6f9a435d0544eba5b207",
+	},
+	{
 		key   = "cd_no_proof",
 		name  = "bare.cdsrc.",
 		type  = .AAAA,
@@ -506,6 +531,20 @@ test_a_denial_after_a_cname_into_an_unsigned_zone_is_insecure :: proc(t: ^testin
 }
 
 /*
+An unsigned CNAME into a signed zone: the denial is in the signed zone, and RFC
+4035 section 5.4 has it proven there however the chain arrived. Unproven, it is
+refused; proven, the answer is insecure for the unsigned hop.
+*/
+@(test)
+test_a_denial_after_an_unsigned_cname_is_proven_at_the_signed_target :: proc(t: ^testing.T) {
+	unproven := cd_validate("cd_unsigned_hop")
+	testing.expectf(t, unproven.status == .Bogus, "unproven: got %v (%q)", unproven.status, unproven.reason)
+	proven := cd_validate("cd_unsigned_hop_proven")
+	testing.expectf(t, proven.status == .Insecure, "proven: got %v (%q)", proven.status, proven.reason)
+	free_all(context.temp_allocator)
+}
+
+/*
 A denial the target's zone does not back is refused, as the same denial asked
 for directly would be. The lifted proof is genuine and verifies against the
 source zone, but it speaks for `swap.cdsrc.` - the name asked about, not the
@@ -584,6 +623,10 @@ span, has an expansion proof that is merely `Insecure` (RFC 5155 section 9.2).
 That lowers the verdict the way an unsigned RRset does, and it does not excuse
 the denial at the chain's end from its own proof: unproven, it is refused;
 proven, the answer stays insecure, for the expansion's reason.
+
+The span reaches the proof through the walk: the DS question for `x.cdoo.`
+lands in it, so the expanded name's zone is insecure before any cover is read,
+and the reason is the one an unsigned zone gets.
 */
 @(test)
 test_an_opt_out_wildcard_does_not_buy_past_the_denial_after_a_cname :: proc(t: ^testing.T) {
@@ -591,6 +634,6 @@ test_an_opt_out_wildcard_does_not_buy_past_the_denial_after_a_cname :: proc(t: ^
 	testing.expectf(t, unproven.status == .Bogus, "an unproven denial behind an opt-out wildcard: got %v (%q)", unproven.status, unproven.reason)
 	proven := cd_validate("cd_opt_out_wildcard_proven")
 	testing.expectf(t, proven.status == .Insecure, "a proven denial behind an opt-out wildcard: got %v (%q)", proven.status, proven.reason)
-	testing.expectf(t, proven.reason == "wildcard expansion not proven", "the reason is %q", proven.reason)
+	testing.expectf(t, proven.reason == "unsigned zone", "the reason is %q", proven.reason)
 	free_all(context.temp_allocator)
 }

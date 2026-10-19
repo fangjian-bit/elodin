@@ -1436,6 +1436,11 @@ def cname_denial():
     # forged either.
     soa = [soa_rr("cdun.")]
     answer("cd_unsigned_target", "un.cdsrc.", AAAA, cname("un.cdsrc.", "host.cdun."), soa)
+    # The other way round: an unsigned CNAME into the signed target. The denial
+    # is still in a signed zone, and is still proven or refused there.
+    hop = [RR("un.cdun.", CNAME, wire_name("host.cdtgt."))]
+    answer("cd_unsigned_hop", "un.cdun.", AAAA, hop, signed_soa(tgt))
+    answer("cd_unsigned_hop_proven", "un.cdun.", AAAA, hop, nodata)
 
     # A denial claimed and not proven: the SOA alone.
     answer("cd_no_proof", "bare.cdsrc.", AAAA, cname("bare.cdsrc.", "host.cdtgt."), signed_soa(tgt))
