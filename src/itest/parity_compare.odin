@@ -4,6 +4,7 @@ import "core:encoding/hex"
 import "core:fmt"
 import "core:mem"
 import "core:time"
+import "elodin:dns"
 
 /*
 Hold elodin's answer against the upstream's and say where they differ.
@@ -1261,6 +1262,9 @@ pc_ttl :: proc(
 		reason = pc_signed_ttl(u, e, up_recs, el_recs, policy)
 	}
 	if reason == "" {
+		reason = pc_lapsing_ttl(c, u, e, policy)
+	}
+	if reason == "" {
 		if policy.cache {
 			reason = pc_cached_ttl(u, e, policy)
 		} else if !policy.ttl_exact {
@@ -1364,6 +1368,36 @@ pc_signed_ttl :: proc(u, e: Pw_RR, up_recs, el_recs: []Pw_RR, policy: Parity_Pol
 		return ""
 	}
 	return "a validated rrset and its rrsig go out with one ttl, no more than any received, the rrsig's original ttl or the time left before it expires (RFC 4035 section 5.3.3)"
+}
+
+/*
+Why a ttl may come back lower because an RRSIG in the message expires sooner,
+or empty where it may not.
+
+RFC 4034 section 3.1.5: an RRSIG "MUST NOT be used for authentication after
+the expiration date", and no copy elodin hands out - forwarded, cached or stale
+- tells a client to hold the message past its first RRSIG's (issue #165;
+`dns.signatures_lapse`, read here off the reference's own bytes). Validated or
+not: the generator's signatures carry whatever expiration their RDATA happens
+to, which is often one already behind the clock and so a ttl of zero.
+
+Bounded like the cache's allowance. The ceiling is the upstream's ttl under the
+time the signatures have left - elodin read that a moment before this did, so
+the answer may sit up to two seconds above - and below it by no more than the
+cache has held it.
+*/
+@(private = "file")
+pc_lapsing_ttl :: proc(c: ^Parity_Compare, u, e: Pw_RR, policy: Parity_Policy) -> string {
+	left, signed := dns.signatures_lapse(c.reference, u32(time.time_to_unix(time.now())))
+	if !signed || left >= u.ttl {
+		return ""
+	}
+	ceiling := min(u.ttl, PARITY_CACHE_MAX_TTL) if policy.cache else u.ttl
+	ceiling = min(ceiling, left)
+	if e.ttl > ceiling + 2 || e.ttl + policy.cache_age + 1 < ceiling {
+		return ""
+	}
+	return "an rrsig in the message expires sooner, and no copy is told to hold it past that (RFC 4034 section 3.1.5)"
 }
 
 // --- edns ------------------------------------------------------------------

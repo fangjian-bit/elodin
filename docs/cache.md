@@ -33,6 +33,10 @@ rewritten in place on each hit.
   cache's does.
 - A TTL with its top bit set is read as zero (RFC 2181 section 8), forwarded
   answers included, so it is uncacheable unless `min_ttl` raises it.
+- **Signed answers.** An entry carrying RRSIGs, in any section, is kept no longer
+  than the first of them stays valid, and no copy, fresh, stale or forwarded, is
+  told a longer TTL. `min_ttl` extends neither. One whose signature has already
+  expired is not kept (RFC 4034 section 3.1.5).
 
 ## Prefetching
 
@@ -97,13 +101,16 @@ go to the upstream once. The first forwards and the rest wait for it:
 
 ## Serving stale answers
 
-With `serve_stale`, an entry is kept for a day past its expiry and used when a
-fresh answer cannot be got:
+With `serve_stale`, an entry is kept for a day past its expiry, or until its
+first RRSIG expires if that is sooner, and used when a fresh answer cannot be
+got:
 
 - The query goes upstream as a miss would. If nothing has come back after
   `stale_timeout` (RFC 8767 section 5's client response timer), the expired copy
-  goes out with a 30-second TTL, and the refresh carries on in the background and
-  caches whatever it gets.
+  goes out with a 30-second TTL, or what its RRSIGs have left if that is less,
+  and the refresh carries on in the background and caches whatever it gets. A
+  copy whose RRSIGs expired during the wait is not served: the client waits for
+  the refresh, up to the upstream budget, and gets SERVFAIL if that fails too.
 - One refresh per name runs at a time; clients arriving meanwhile get the expired
   copy at once.
 - Keep `stale_timeout` under the client's own timeout (glibc gives up at five

@@ -1,6 +1,7 @@
 package cache
 
 import "core:testing"
+import "core:time"
 import "elodin:dns"
 
 /*
@@ -158,14 +159,17 @@ test_nxdomain_after_a_cname_is_cached_for_an_rrsig_question :: proc(t: ^testing.
 		ttl   = 300,
 		data  = dns.Rdata_Name{name = "target.example.net."},
 	}
-	// The signature's bytes are never read here - what matters is a record of
-	// type RRSIG sitting at the name that was asked about.
+	// What matters is a record of type RRSIG sitting at the name that was
+	// asked about. Its expiration, at offset 8, is read too - an entry is not
+	// kept past it - so it is set a day ahead.
+	sig := make([]u8, 24, context.temp_allocator)
+	dns.write_ttl_at(sig, 8, u32(time.time_to_unix(time.now())) + 86400)
 	answer[1] = dns.Record {
 		name  = "www.example.com.",
 		type  = .RRSIG,
 		class = .IN,
 		ttl   = 300,
-		data  = dns.Rdata_Raw{data = make([]u8, 24, context.temp_allocator)},
+		data  = dns.Rdata_Raw{data = sig},
 	}
 	m := dns.Message {
 		id       = 0x3334,

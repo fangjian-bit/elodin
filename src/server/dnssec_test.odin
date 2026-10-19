@@ -2,6 +2,7 @@ package server
 
 import "core:net"
 import "core:testing"
+import "core:time"
 import "core:thread"
 import "elodin:cache"
 import "elodin:config"
@@ -65,6 +66,12 @@ rrsig_over :: proc(covered: dns.Type) -> dns.Rdata_Raw {
 	rdata[1] = u8(u16(covered))
 	rdata[2] = 13 // ECDSA P-256, so the algorithm at least names something real
 	rdata[3] = 3 // labels
+	// A window around now, so a cache that will not keep an answer past its
+	// signatures (#165) keeps this one: expiration a day ahead, inception a day
+	// behind.
+	now := u32(time.time_to_unix(time.now()))
+	dns.write_ttl_at(rdata, 8, now + 86400)
+	dns.write_ttl_at(rdata, 12, now - 86400)
 	copy(rdata[18:], name_buf[:n])
 	return dns.Rdata_Raw{data = rdata}
 }

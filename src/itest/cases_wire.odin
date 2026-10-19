@@ -1,6 +1,7 @@
 package itest
 
 import "core:fmt"
+import "core:time"
 import "elodin:dns"
 
 /*
@@ -224,7 +225,10 @@ run_wire_cases :: proc(r: ^Runner) {
 			// Use a distinct ID so ID rewriting is exercised.
 			query[0], query[1] = 0x7a, 0x5c
 
+			// The clock either side of the exchange: elodin read it between the two.
+			before := u32(time.time_to_unix(time.now()))
 			res := use_tcp ? query_tcp(udp_port, query) : query_udp(udp_port, query)
+			after := u32(time.time_to_unix(time.now()))
 			if check(r, res.ok, "no response") {
 				h := parse_header(r, res.wire)
 				check(r, h.id == 0x7a5c, "transaction ID: got %04x, want 7a5c", h.id)
@@ -242,10 +246,24 @@ run_wire_cases :: proc(r: ^Runner) {
 				*/
 				want := expected
 				want[3] &~= 0x20
+				/*
+				And the TTLs a signed answer may not be told past its RRSIGs
+				(RFC 4034 section 3.1.5, issue #165). Elodin read the clock
+				somewhere between `before` and `after`, which can straddle a
+				second while a fixture's signatures have fewer seconds left than
+				its TTLs, so the payload matches the cap at one of the two.
+				*/
+				want_late := make([]u8, len(want), context.temp_allocator)
+				copy(want_late, want)
+				if left, signed := dns.signatures_lapse(want, before); signed {
+					dns.cap_ttls(want, left)
+					late, _ := dns.signatures_lapse(want_late, after)
+					dns.cap_ttls(want_late, late)
+				}
 				if check(r, len(res.wire) == len(expected), "length: got %d, want %d", len(res.wire), len(expected)) {
 					check(
 						r,
-						bytes_equal(res.wire[2:], want[2:]),
+						bytes_equal(res.wire[2:], want[2:]) || bytes_equal(res.wire[2:], want_late[2:]),
 						"payload differs from what the upstream sent",
 					)
 					check(
