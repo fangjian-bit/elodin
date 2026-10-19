@@ -101,6 +101,26 @@ N3_FIXTURES := []Fixture{
 			"3328b84ddd71852dad1eb59eaab2cb551d67286c2565b7a7aa28651e449d8763133f28d1cf54343ceef788f944c19f29" +
 			"4d395e12150d",
 	},
+	{
+		key   = "n3_nx_unknown_flags",
+		name  = "nx.deep.n3test.",
+		type  = .A,
+		rcode = 3,
+		wire  = "123485830001000000060000026e780464656570066e33746573740000010001066e3374657374000006000100000e10" +
+			"0032026e73066e3374657374000a686f73746d6173746572066e3374657374000000000100000e100000038400093a80" +
+			"0000012c066e337465737400002e000100000e10005a00060f0100000e107d3b18206a478820ce66066e337465737400" +
+			"a585b232f8fd3ebd3a5c8ed809f9813c10dc8138ca06ef1cf28cc16e6bf70ed177b11f1208762e8005c2927d699c6a10" +
+			"baa5d7e267b8d6967eb2994b3d61fa0d2071696b34373571323732657438357263686d646e686c6175336b396d626269" +
+			"66066e3374657374000032000100000e1000250102000c020e0f14e030d26bab04d815b54e606e8652fa125b62720e00" +
+			"07620000000002902071696b34373571323732657438357263686d646e686c6175336b396d62626966066e3374657374" +
+			"00002e000100000e10005a00320f0200000e107d3b18206a478820ce66066e3374657374003e54fc70bfb93e908c95a0" +
+			"d33b53cc46ed1a1314cb1a979c92b5b1283377040ab416a4bb47705911dcc4a8f1cbd51a07addfe34c09a312b5dba81b" +
+			"8f67059c022073306f6434717462306a63316264616563316e38636b6e713239646d34736765066e3374657374000032" +
+			"000100000e1000240102000c020e0f14d4a8439742389dd4176c8d9b78d55e1d1365ae4f00064000000000022073306f" +
+			"6434717462306a63316264616563316e38636b6e713239646d34736765066e337465737400002e000100000e10005a00" +
+			"320f0200000e107d3b18206a478820ce66066e337465737400ff735e70a1dd0feae24ac5f5a35d2f44ac8b4a19f83159" +
+			"90ce2b01d000edea42ad31e7624fa55a5566a3e4aba9a46891b0067c937a1dca13d9927a32b95bd606",
+	},
 }
 
 @(private = "file")
@@ -125,9 +145,9 @@ n3_validator :: proc() -> ^Validator {
 }
 
 @(private = "file")
-n3_reply :: proc() -> []u8 {
+n3_reply :: proc(key := "n3_nx") -> []u8 {
 	for f in N3_FIXTURES {
-		if f.key == "n3_nx" {
+		if f.key == key {
 			out, _ := decode_hex(f.wire, context.temp_allocator)
 			return out
 		}
@@ -160,6 +180,36 @@ test_an_nsec3_name_error_validates_and_says_what_it_hashed :: proc(t: ^testing.T
 		budget.nsec3.rounds,
 		MAX_NSEC3_ROUNDS_PER_QUERY,
 	)
+	free_all(context.temp_allocator)
+}
+
+@(test)
+test_an_nsec3_name_error_on_unknown_flags_is_bogus :: proc(t: ^testing.T) {
+	/*
+	The same signed name error, its chain carrying flag bit 0x02. RFC 5155
+	section 8.2 has the validator ignore every record in it, so the signatures
+	all verify and there is still nothing to prove the denial with. Issue #335.
+	*/
+	v := n3_validator()
+	testing.expect(t, v != nil, "the anchor should parse")
+	defer destroy_validator(v)
+
+	msg, err := dns.decode_message(n3_reply("n3_nx_unknown_flags"), context.temp_allocator)
+	testing.expect(t, err == .None, "the fixture should decode")
+
+	saw_flags := false
+	for rr in msg.authority {
+		if rr.type == .NSEC3 {
+			rdata, _ := raw_rdata(rr)
+			parsed, perr := parse_nsec3(rdata)
+			saw_flags ||= perr == .None && parsed.flags == 0x02
+		}
+	}
+	testing.expect(t, saw_flags, "the fixture should carry the unknown flag, or this proves nothing")
+
+	budget := query_budget(v)
+	result := validate_denial(v, &budget, msg, N3_QNAME, .A, .IN, u32(FIXTURE_TIME), time.unix(FIXTURE_TIME, 0), context.temp_allocator)
+	testing.expectf(t, result.status == .Bogus, "a denial resting on ignored records should be bogus, got %v (%q)", result.status, result.reason)
 	free_all(context.temp_allocator)
 }
 

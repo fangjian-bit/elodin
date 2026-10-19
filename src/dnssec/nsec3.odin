@@ -267,8 +267,8 @@ and it is what RFC 5155 section 10.3 asks of a zone that chose an iteration
 count nobody should.
 
 An NSEC record is readable too, so a denial carrying one is never this. A
-record naming a hash other than SHA-1 is neither: `nsec3_hash_with` ignores it
-before the ceiling is asked, so it cannot make a set refused.
+record `nsec3_readable` turns away is neither: it is ignored before the ceiling
+is asked, so it cannot make a set refused.
 */
 @(private)
 nsec3_all_over_ceiling :: proc(nsecs: []Nsec_Rr, n3s: []Nsec3_Rr, budget: ^Nsec3_Budget) -> bool {
@@ -277,7 +277,7 @@ nsec3_all_over_ceiling :: proc(nsecs: []Nsec_Rr, n3s: []Nsec3_Rr, budget: ^Nsec3
 	}
 	refused := false
 	for n in n3s {
-		if n.rr.hash_algorithm != NSEC3_HASH_SHA1 {
+		if !nsec3_readable(n.rr) {
 			continue
 		}
 		if int(n.rr.iterations) <= budget.max_iterations {
@@ -325,6 +325,20 @@ spend_nsec3_rounds :: proc(budget: ^Nsec3_Budget, rr: Nsec3, name: string) -> bo
 }
 
 /*
+Whether a record is one this package may read at all.
+
+SHA-1 is the only hash RFC 5155 defines, and opt-out the only flag: section 8.2
+says a validator MUST ignore an NSEC3 whose flags are other than zero or one,
+as Unbound does with `nsec3_unknown_flags`. Ignored, not refused - the record
+proves nothing, so a denial resting on it alone fails, and it is not a hash this
+server declined to compute.
+*/
+@(private)
+nsec3_readable :: proc(rr: Nsec3) -> bool {
+	return rr.hash_algorithm == NSEC3_HASH_SHA1 && rr.flags & ~u8(NSEC3_FLAG_OPT_OUT) == 0
+}
+
+/*
 Hash `name` with one record's parameters.
 
 Refusing an iteration count above the budget's ceiling is a denial-of-service
@@ -343,7 +357,7 @@ every record was over the ceiling, which `nsec3_all_over_ceiling` makes
 */
 @(private)
 nsec3_hash_with :: proc(rr: Nsec3, name: string, out: []u8, budget: ^Nsec3_Budget) -> bool {
-	if rr.hash_algorithm != NSEC3_HASH_SHA1 {
+	if !nsec3_readable(rr) {
 		return false
 	}
 	if int(rr.iterations) > budget.max_iterations {
@@ -401,10 +415,15 @@ A kept hash belongs to the name and to all three of the parameters that produced
 it, and the algorithm is in the key for the same reason as the rest. Only SHA-1
 is ever computed, so a record naming another hash has to miss here and be
 refused by `nsec3_hash_with` - reusing a neighbour's digest for it would read a
-record this package cannot check as one it had.
+record this package cannot check as one it had. The flags are not in the key,
+because they do not change the hash, so a record with unknown flags is turned
+away before the lookup rather than by it.
 */
 @(private)
 nsec3_hash_of :: proc(name: string, rr: Nsec3, budget: ^Nsec3_Budget) -> (hash: []u8, ok: bool) {
+	if !nsec3_readable(rr) {
+		return nil, false
+	}
 	for &kept in budget.hashed.kept {
 		if kept.have &&
 		   kept.name == name &&

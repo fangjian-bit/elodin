@@ -1073,6 +1073,26 @@ def nsec3_name_error():
     emit("n3_deep_ds", "deep.n3test.", "DS",
          message("deep.n3test.", DS, [], authority, rcode=3), rcode=3)
 
+    # The same name error with the chain re-signed under flag bit 0x02, which
+    # nothing defines. RFC 5155 section 8.2: a validator MUST ignore such a
+    # record, which leaves this reply nothing to prove the denial with. The walk
+    # still reads the DS denial above, so only the answer's own proof changes.
+    odd = nsec3_chain(
+        "n3test.",
+        [
+            ("n3test.", [A, NS, SOA, RRSIG, DNSKEY, NSEC3PARAM]),
+            ("a.n3test.", [A, RRSIG]),
+        ],
+        salt,
+        12,
+        flags=0x02,
+    )
+    odd_authority = []
+    for record in (odd["n3test."], odd["a.n3test."]):
+        odd_authority += [record, sign([record], zone)]
+    emit("n3_nx_unknown_flags", "nx.deep.n3test.", "A",
+         message("nx.deep.n3test.", A, [], soa + [sign(soa, zone)] + odd_authority, rcode=3), rcode=3)
+
 
 @scenario
 def deep_run_of_empty_non_terminals():

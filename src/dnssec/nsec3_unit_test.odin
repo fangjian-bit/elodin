@@ -286,6 +286,52 @@ test_nsec3_unknown_hash_algorithm_is_refused :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_nsec3_unknown_flags_are_ignored :: proc(t: ^testing.T) {
+	// RFC 5155 section 8.2: a validator MUST ignore an NSEC3 whose flags are
+	// other than zero or one. Bit 0 (opt-out) is the only one defined. Issue
+	// #335.
+	for flags in ([]u8{0x02, 0x80, 0x03}) {
+		rr := n3(H_EXAMPLE, H_NS1, {.NS, .SOA}).rr
+		rr.flags = flags
+		out: [20]u8
+		testing.expect(t, !nsec3_hash_with(rr, "example.", out[:], budget_at(A_ITERATIONS)), "a record with unknown flags is unusable")
+
+		zone := a_zone()
+		for &record in zone {
+			record.rr.flags = flags
+		}
+		testing.expect_value(t, nsec3_proves_name_error(zone, "nx.example.", "example.", budget_at(A_ITERATIONS)), Proof.Failed)
+
+		// The kept hash of a name must not carry over to a record with unknown
+		// flags: the first record below puts the hash of `a.example.` in hand,
+		// and the second owns that very hash.
+		mixed := make([dynamic]Nsec3_Rr, context.temp_allocator)
+		append(&mixed, n3(H_EXAMPLE, H_NS1, {.NS, .SOA}))
+		unknown := n3(H_A, H_XW, {.A})
+		unknown.rr.flags = flags
+		append(&mixed, unknown)
+		_, matched := nsec3_matching(mixed[:], "a.example.", budget_at(A_ITERATIONS))
+		testing.expect(t, !matched, "a record with unknown flags must not borrow the digest of the one before it")
+
+		// Ignored records were never refused by the ceiling, so they cannot
+		// make a denial insecure.
+		for &record in zone {
+			record.rr.iterations = 5000
+		}
+		testing.expect(t, !nsec3_all_over_ceiling(nil, zone, budget_at(150)), "records ignored for their flags are not over the ceiling")
+	}
+
+	// The control: opt-out alone is a flag this package reads, and reads as
+	// opt-out rather than ignoring the record.
+	zone := a_zone()
+	for &record in zone {
+		record.rr.flags = NSEC3_FLAG_OPT_OUT
+	}
+	testing.expect_value(t, nsec3_proves_name_error(zone, "nx.example.", "example.", budget_at(A_ITERATIONS)), Proof.Opt_Out)
+	free_all(context.temp_allocator)
+}
+
+@(test)
 test_nsec3_covering_span_wraps_at_the_end_of_the_chain :: proc(t: ^testing.T) {
 	/*
 	`xx.example.` holds the last span, and its next hash points back at the
