@@ -988,10 +988,22 @@ Authenticated_Set :: struct {
 	rrsig: Rrsig,
 	/*
 	The most this set may be served with: `rrsig`'s Original TTL, or the time
-	left before it expires when it verified, whichever is less. The prune holds
-	the set and its signatures to it (RFC 4035 section 5.3.3).
+	left before it expires when it verified, whichever is less. For a CNAME a
+	DNAME synthesized, which has no `rrsig`, the DNAME's signature's. The prune
+	holds the set and its signatures to it (RFC 4035 section 5.3.3).
 	*/
 	ttl:   u32,
+}
+
+// The least TTL any set this verdict rests on may be served with.
+ttl_ceiling :: proc(result: Result) -> u32 {
+	ceiling := max(u32)
+	for sets in ([][]Authenticated_Set{result.answer, result.authority, result.additional}) {
+		for s in sets {
+			ceiling = min(ceiling, s.ttl)
+		}
+	}
+	return ceiling
 }
 
 // Whether two RRSIGs are the same record, field for field.
@@ -3741,7 +3753,7 @@ zone_step :: proc(
 			return .Insecure, nil
 		}
 
-		child_keys, kstatus, keys_sig := fetch_keys(v, budget, child, set[:], unix, allocator)
+		child_keys, kstatus, keys_sig, keys_ttl := fetch_keys(v, budget, child, set[:], unix, allocator)
 		if kstatus != .Secure {
 			if kstatus == .Insecure {
 				cache_put(v, child, .Insecure, nil, min(rrset_ttl(ds_records), ds_sig.original_ttl), now, sig_lapses(ds_sig, unix))
@@ -3771,9 +3783,9 @@ zone_step :: proc(
 			}
 			return .Indeterminate, nil
 		}
-		// Held to both signatures the keys rest on: the parent's over the DS
-		// and the zone's own over its DNSKEY set.
-		ttl := min(rrset_ttl(ds_records), ds_sig.original_ttl, keys_sig.original_ttl)
+		// Held to both RRsets the keys rest on and the signatures over them:
+		// the parent's over the DS and the zone's own over its DNSKEY set.
+		ttl := min(rrset_ttl(ds_records), ds_sig.original_ttl, keys_ttl, keys_sig.original_ttl)
 		cache_put(v, child, .Secure, child_keys, ttl, now, min(sig_lapses(ds_sig, unix), sig_lapses(keys_sig, unix)))
 		return .Secure, child_keys
 	}
@@ -4006,24 +4018,26 @@ fetch_keys :: proc(
 ) -> (
 	keys: []Dnskey,
 	status: Status,
-	// On `Secure`, the signature that vouched for the set, whose Original TTL
-	// and expiration bound how long the keys are kept (RFC 4035 section 5.3.3).
+	// On `Secure`, the signature that vouched for the set and the set's own
+	// TTL as received, which with the signature's Original TTL and expiration
+	// bound how long the keys are kept (RFC 4035 section 5.3.3).
 	vouched: Rrsig,
+	set_ttl: u32,
 ) {
 	if deadline_passed(budget) {
 		budget.walk_stopped = DEADLINE_PASSED
-		return nil, .Indeterminate, {}
+		return nil, .Indeterminate, {}, 0
 	}
 	if !may_look_up(v, budget) {
 		budget.walk_stopped = WALKS_IN_FLIGHT
-		return nil, .Indeterminate, {}
+		return nil, .Indeterminate, {}, 0
 	}
 	if !spend_lookup(budget) {
-		return nil, .Indeterminate, {}
+		return nil, .Indeterminate, {}, 0
 	}
 	wire, ok := v.query(v.query_ctx, zone, .DNSKEY, allocator, budget.deadline)
 	if !ok {
-		return nil, .Indeterminate, {}
+		return nil, .Indeterminate, {}, 0
 	}
 	msg, derr := dns.decode_message(wire, allocator, budget.spent)
 	if derr != .None {
@@ -4031,15 +4045,15 @@ fetch_keys :: proc(
 		// this zone's keys unread rather than forged.
 		if derr == .Request_Budget {
 			budget.walk_stopped = READING_OVER_BUDGET
-			return nil, .Indeterminate, {}
+			return nil, .Indeterminate, {}, 0
 		}
 		broke_at(budget, zone, "the DNSKEY reply could not be decoded", allocator)
-		return nil, .Bogus, {}
+		return nil, .Bogus, {}, 0
 	}
 	// As in `zone_step`: an upstream error leaves the zone's keys unknown, which
 	// is not the same as the zone failing to produce them.
 	if !answerable_rcode(msg) {
-		return nil, .Indeterminate, {}
+		return nil, .Indeterminate, {}, 0
 	}
 	class := dns.Class.IN
 
@@ -4047,7 +4061,7 @@ fetch_keys :: proc(
 	if len(records) == 0 || len(records) > MAX_KEYS_PER_ZONE {
 		why := "the DNSKEY reply held no keys" if len(records) == 0 else "the DNSKEY reply held more keys than this server reads"
 		broke_at(budget, zone, why, allocator)
-		return nil, .Bogus, {}
+		return nil, .Bogus, {}, 0
 	}
 	parsed := make([dynamic]Dnskey, 0, len(records), allocator)
 	for r in records {
@@ -4139,7 +4153,7 @@ fetch_keys :: proc(
 				result, _ := check_signature(sig, zone, class, records, attested[:], unix, allocator)
 				switch result {
 				case .Ok:
-					return parsed[:], .Secure, sig
+					return parsed[:], .Secure, sig, rrset_ttl(records)
 				case .Unsupported, .Refused:
 					/*
 					The DS named an algorithm the table reports as checkable and
@@ -4164,7 +4178,7 @@ fetch_keys :: proc(
 	Running out is a statement about this server, so it says so.
 	*/
 	if exhausted {
-		return nil, .Indeterminate, {}
+		return nil, .Indeterminate, {}, 0
 	}
 	if checkable {
 		why := "no DNSKEY both matches a DS the parent published and signs the DNSKEY set"
@@ -4172,9 +4186,9 @@ fetch_keys :: proc(
 			why = "no DNSKEY both matches a trust anchor and signs the DNSKEY set"
 		}
 		broke_at(budget, zone, why, allocator)
-		return nil, .Bogus, {}
+		return nil, .Bogus, {}, 0
 	}
-	return nil, .Insecure, {}
+	return nil, .Insecure, {}, 0
 }
 
 // Does this DNSKEY hash to this DS? The digest runs over the owner name in
@@ -4236,11 +4250,11 @@ zone_keys :: proc(
 	}
 
 	unix := u32(time.to_unix_seconds(now))
-	fetched, fstatus, vouched := fetch_keys(v, budget, zone, anchors[:], unix, allocator)
+	fetched, fstatus, vouched, keys_ttl := fetch_keys(v, budget, zone, anchors[:], unix, allocator)
 	if fstatus != .Secure {
 		return fstatus, nil
 	}
-	cache_put(v, zone, .Secure, fetched, min(MAX_ZONE_TTL, vouched.original_ttl), now, sig_lapses(vouched, unix))
+	cache_put(v, zone, .Secure, fetched, min(keys_ttl, vouched.original_ttl), now, sig_lapses(vouched, unix))
 	return .Secure, fetched
 }
 

@@ -215,3 +215,47 @@ test_served_ttl_takes_the_least_received :: proc(t: ^testing.T) {
 	}
 	free_all(context.temp_allocator)
 }
+
+// The root's and `com.`'s DNSKEY sets, sent with a TTL of two minutes.
+@(private = "file")
+st_short_dnskey_query :: proc(ctx: rawptr, name: string, type: dns.Type, allocator: mem.Allocator, deadline: ^time.Tick) -> (wire: []u8, ok: bool) {
+	wire, ok = st_query(ctx, name, type, allocator, deadline)
+	if !ok || type != .DNSKEY || !(name == "." || dns.name_equal_fold(name, "com.")) {
+		return
+	}
+	msg, err := dns.decode_message(wire, allocator)
+	if err != .None {
+		return nil, false
+	}
+	for &rec in msg.answer {
+		if rec.type == .DNSKEY {
+			rec.ttl = 120
+		}
+	}
+	out, _, eerr := dns.encode_message(msg, allocator)
+	return out, eerr == .None
+}
+
+// The DNSKEY set's own TTL is one of the four RFC 4035 section 5.3.3 takes the
+// least of, so a zone's keys are not kept past it on the strength of the DS's.
+@(test)
+test_zone_keys_do_not_outlive_their_dnskey_ttl :: proc(t: ^testing.T) {
+	v := make_validator(st_short_dnskey_query, nil, Options{})
+	defer destroy_validator(v)
+	now := time.unix(FIXTURE_TIME, 0)
+	budget := query_budget(v)
+	status, _, _ := zone_trust(v, &budget, "com.", now, context.temp_allocator)
+	end_walk(v, &budget)
+	testing.expectf(t, status == .Secure, "com. walked to %v", status)
+	// The root's keys come from the trust anchor rather than a DS, so they
+	// take a road of their own into the cache.
+	for zone in ([]string{".", "com."}) {
+		entry, found := v.zones[zone]
+		testing.expectf(t, found, "%s was not cached", zone)
+		if found {
+			held := time.diff(now, entry.expires)
+			testing.expectf(t, held <= 120 * time.Second, "%s's keys are kept %v over a DNSKEY TTL of 120 s", zone, held)
+		}
+	}
+	free_all(context.temp_allocator)
+}

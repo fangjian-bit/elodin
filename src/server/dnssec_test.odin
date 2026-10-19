@@ -1035,3 +1035,62 @@ test_a_served_ttl_is_held_to_the_signature :: proc(t: ^testing.T) {
 	}
 	free_all(context.temp_allocator)
 }
+
+/*
+And where the prune cannot rebuild the answer: it goes out as it arrived and
+without AD, but no longer than the signatures behind it allow - the copy kept
+in the cache is the one every later client gets, so a raised TTL kept there is
+the same problem by another road.
+*/
+@(test)
+test_an_unrebuildable_answer_still_has_its_ttl_held :: proc(t: ^testing.T) {
+	msg := signed_response()
+	msg.answer[0].ttl = 604800
+	msg.answer[1].ttl = 604800
+	wire, _, _ := dns.encode_message(msg, context.temp_allocator)
+	/*
+	An authenticated MX whose exchange is a compression pointer the decoder
+	could not follow (it points past the message), so it stays raw RDATA and
+	`encode_message` refuses to write it: the prune's rebuild fails. Appended by
+	hand, after the answer, since no encoder will write it.
+	*/
+	mx := []u8 {
+		0xc0, 0x0c, // www.example.com., the question's name
+		0x00, 0x0f, 0x00, 0x01, // MX IN
+		0x00, 0x09, 0x3a, 0x80, // 604800
+		0x00, 0x04, 0x00, 0x0a, 0xff, 0xff, // preference 10, pointer to 0x3fff
+	}
+	ancount := int(wire[7]) + 1
+	ends := dns.HEADER_SIZE
+	question_end := 0
+	{
+		// The answer section ends where the authority begins; re-encoding with
+		// only the question and answer gives that offset.
+		head := msg
+		head.authority = nil
+		head.additional = nil
+		head_wire, _, _ := dns.encode_message(head, context.temp_allocator)
+		question_end = len(head_wire)
+	}
+	_ = ends
+	broken := make([dynamic]u8, 0, len(wire) + len(mx), context.temp_allocator)
+	append(&broken, ..wire[:question_end])
+	append(&broken, ..mx)
+	append(&broken, ..wire[question_end:])
+	broken[7] = u8(ancount)
+	verdict := secure_verdict()
+	verdict.answer[0].ttl = 300
+	sets := make([]dnssec.Authenticated_Set, 2, context.temp_allocator)
+	sets[0] = verdict.answer[0]
+	sets[1] = verdict.answer[0]
+	sets[1].type = .MX
+	verdict.answer = sets
+	out := present_response(broken[:], client_query(true), .A, verdict, nil, context.temp_allocator)
+	served, derr := dns.decode_message(out, context.temp_allocator)
+	testing.expect_value(t, derr, dns.Decode_Error.None)
+	testing.expect(t, !served.flags.ad, "the fallback should not claim AD")
+	for rec in served.answer {
+		testing.expectf(t, rec.ttl <= 300, "%v went out with TTL %d over a ceiling of 300", rec.type, rec.ttl)
+	}
+	free_all(context.temp_allocator)
+}

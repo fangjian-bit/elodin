@@ -628,7 +628,7 @@ pc_section :: proc(
 			continue
 		}
 		taken[matched] = true
-		pc_ttl(c, kind, name, u, el_recs[matched], el_recs, el.ad, policy)
+		pc_ttl(c, kind, name, u, el_recs[matched], up_recs, el_recs, el.ad, policy)
 	}
 
 	// Second pass: the same record with a name spelled in a different case.
@@ -671,7 +671,7 @@ pc_section :: proc(
 			pw_rr_key(el_recs[matched], c.allocator),
 			reason,
 		)
-		pc_ttl(c, kind, name, u.rec, el_recs[matched], el_recs, el.ad, policy)
+		pc_ttl(c, kind, name, u.rec, el_recs[matched], up_recs, el_recs, el.ad, policy)
 	}
 
 	for e, i in el_recs {
@@ -1249,7 +1249,7 @@ pc_ttl :: proc(
 	kind: Parity_Kind,
 	name: string,
 	u, e: Pw_RR,
-	el_recs: []Pw_RR,
+	up_recs, el_recs: []Pw_RR,
 	ad: bool,
 	policy: Parity_Policy,
 ) {
@@ -1258,7 +1258,7 @@ pc_ttl :: proc(
 	}
 	reason := ""
 	if policy.dnssec_validation && ad {
-		reason = pc_signed_ttl(u, e, el_recs, policy)
+		reason = pc_signed_ttl(u, e, up_recs, el_recs, policy)
 	}
 	if reason == "" {
 		if policy.cache {
@@ -1319,10 +1319,12 @@ the clock the expiration is read against.
 
 Which signature verified is elodin's to know, not the answer's: a set
 mid-rollover carries one per algorithm, each with its own ceiling. So the answer
-may sit as high as the most generous of them and as low as the least.
+may sit as high as the most generous of them and as low as the least. And the
+whole set goes out as one TTL, the least the upstream gave any of its records or
+signatures, so the floor reaches down to that too.
 */
 @(private = "file")
-pc_signed_ttl :: proc(u, e: Pw_RR, el_recs: []Pw_RR, policy: Parity_Policy) -> string {
+pc_signed_ttl :: proc(u, e: Pw_RR, up_recs, el_recs: []Pw_RR, policy: Parity_Policy) -> string {
 	covered := e.type
 	if e.type == 46 && len(e.rdata) >= 2 {
 		covered = pw_u16(e.rdata, 0)
@@ -1340,6 +1342,20 @@ pc_signed_ttl :: proc(u, e: Pw_RR, el_recs: []Pw_RR, policy: Parity_Policy) -> s
 		signed := min(pw_u32(r.rdata, 4), expiration - now if i32(expiration - now) > 0 else 0)
 		lo, hi = min(lo, signed), max(hi, signed)
 	}
+	// Nothing in elodin's answer signs it, so nothing here explains it.
+	if hi == 0 && lo == max(u32) {
+		return ""
+	}
+	received := u.ttl
+	for r in up_recs {
+		if r.class != e.class || !pc_name_equal_fold(r.name, e.name) {
+			continue
+		}
+		if r.type == covered || (r.type == 46 && len(r.rdata) >= 2 && pw_u16(r.rdata, 0) == covered) {
+			received = min(received, r.ttl)
+		}
+	}
+	lo = min(lo, received)
 	if lo >= u.ttl {
 		return ""
 	}
@@ -1347,7 +1363,7 @@ pc_signed_ttl :: proc(u, e: Pw_RR, el_recs: []Pw_RR, policy: Parity_Policy) -> s
 	if e.ttl > min(limit, hi) + 1 || e.ttl + policy.cache_age + 1 < min(limit, lo) {
 		return ""
 	}
-	return "a validated rrset is served with no more than its rrsig's original ttl or the time left before it expires (RFC 4035 section 5.3.3)"
+	return "a validated rrset and its rrsig go out with one ttl, no more than any received, the rrsig's original ttl or the time left before it expires (RFC 4035 section 5.3.3)"
 }
 
 // --- edns ------------------------------------------------------------------

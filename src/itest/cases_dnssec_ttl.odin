@@ -10,7 +10,8 @@ allows (RFC 4035 section 5.3.3).
 
 The TTL field is the one part of a record no RRSIG covers, so an answer whose
 TTLs were raised on the path still validates. The mock serves a whole signed
-chain - the `drtest.` scenario of `testdata/gen/sign_fixtures.py`, the bytes
+chain - scenario `deep_run_of_empty_non_terminals` of
+`testdata/gen/sign_fixtures.py`, copied by key, the same bytes
 `src/dnssec/minted_denial_test.odin` reads - with every TTL in the answer raised
 to a week, and the client must see AD and no TTL over the RRSIG's Original TTL:
 from the fresh answer, from the cache, and with the signatures stripped for a
@@ -328,4 +329,39 @@ parity_signed_ttl_case :: proc(r: ^Runner, udp_port: int, reference: []u8, origi
 		}
 	}
 	check(r, signed == 2, "%d of the answer's two lowered ttls were put down to the signature", signed)
+
+	/*
+	And the set's own received TTLs, the other half of the same minimum: an
+	upstream that sent the RRSIG at 200 gets its A back at 200 too. Built from
+	the answer above rather than asked for, since the mock serves one copy.
+	*/
+	low_up, low_el := lowered_rrsig(up, 200), make([]u8, len(res.wire), context.temp_allocator)
+	copy(low_el, res.wire)
+	dns.cap_ttls(low_el, 200)
+	c = parity_compare(q, low_up, low_el, policy)
+	signed = 0
+	for d in c.diffs {
+		if d.reason == "" {
+			fail(r, "%s: upstream %s, elodin %s", d.what, d.upstream, d.elodin)
+		} else if strings.contains(d.reason, "RFC 4035 section 5.3.3") {
+			signed += 1
+		}
+	}
+	check(r, signed == 1, "%d of the set's ttls were put down to the rrsig's received one", signed)
+}
+
+// The reply with its RRSIGs' TTLs set to `ttl` and nothing else changed.
+@(private = "file")
+lowered_rrsig :: proc(wire: []u8, ttl: u32) -> []u8 {
+	msg, err := dns.decode_message(wire, context.temp_allocator)
+	if err != .None {
+		return wire
+	}
+	for &rec in msg.answer {
+		if rec.type == .RRSIG {
+			rec.ttl = ttl
+		}
+	}
+	out, _, _ := dns.encode_message(msg, context.temp_allocator)
+	return out
 }
