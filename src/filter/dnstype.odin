@@ -52,6 +52,9 @@ mnemonic in any case, or RFC 3597 section 5's `TYPEnnn`, which urlfilter refuses
 */
 @(private)
 parse_dnstype :: proc(value: string, buf: []u16) -> (f: Type_Filter, ok: bool) {
+	if len(buf) < MAX_RULE_TYPES {
+		return
+	}
 	// A type named again takes no room, so only distinct ones count.
 	permit, exclude: [MAX_RULE_TYPES]u16
 	np, ne := 0, 0
@@ -90,9 +93,6 @@ parse_dnstype :: proc(value: string, buf: []u16) -> (f: Type_Filter, ok: bool) {
 	ps, es := permit[:np], exclude[:ne]
 	slice.sort(ps)
 	slice.sort(es)
-	if len(buf) < MAX_RULE_TYPES {
-		return
-	}
 	if len(ps) == 0 {
 		return {buf[:copy(buf, es)], true}, true
 	}

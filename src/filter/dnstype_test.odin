@@ -321,6 +321,13 @@ test_a_block_says_when_only_a_dnstype_rule_made_it :: proc(t: ^testing.T) {
 		{"||v6.example^$dnstype=~A\n||v6.example^$dnstype=~AAAA", "v6.example.", false},
 		{"||v6.example^$dnstype=A\n||v6.example^$dnstype=~A", "a.v6.example.", false},
 		{"/^v6\\.example$/$dnstype=~A\n/^v6\\.example$/$dnstype=~AAAA", "v6.example.", false},
+		// A `$dnstype` allow rule leaves the name the types it exempts.
+		{"||v6.example^\n@@||v6.example^$dnstype=A", "v6.example.", true},
+		{"||v6.example^\n@@||example^$dnstype=A", "v6.example.", true},
+		{"||v6.example^\n@@/^v6\\.example$/$dnstype=A", "v6.example.", true},
+		{"||v6.example^\n@@|example^$dnstype=A", "v6.example.", false},
+		{"||v6.example^\n@@||a.v6.example^$dnstype=A", "v6.example.", false},
+		{"||v6.example^\n@@/^a\\.v6\\.example$/$dnstype=A", "v6.example.", false},
 	}
 	for c in cases {
 		block, allow := set_make(), set_make()

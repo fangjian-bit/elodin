@@ -294,6 +294,29 @@ set_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type) -> bool {
 }
 
 /*
+Whether a `$dnstype` rule covers `normalised` for some type, whichever it is: its
+own entry's apex, or a parent's subdomains.
+*/
+@(private)
+set_covers_some_type :: proc(s: ^Set, normalised: string) -> bool {
+	if s == nil || s.names.used == 0 {
+		return false
+	}
+	flag, rest := Rule_Flag.Apex, normalised
+	for rest != "" {
+		if entry := table_entry(&s.names, rest); entry != nil && .Typed in entry^ && typed_ids(entry, len(rest))[int(flag)] != 0 {
+			return true
+		}
+		idx := strings.index_byte(rest, '.')
+		if idx < 0 {
+			break
+		}
+		flag, rest = .Subdomains, rest[idx + 1:]
+	}
+	return false
+}
+
+/*
 What covers `normalised` for `qtype`: its own entry's apex, or a parent's
 subdomains. A rule for every type is looked for past one for some, so a block
 can say which it was.
@@ -405,9 +428,10 @@ and about one nothing blocks, since `Allowed` exempts an answer from the CNAME
 walk; a block regex only about a name no table has blocked for every type.
 
 `qtype` is the type the client asked for, which a `$dnstype` rule is matched
-against. `typed_only`, when given, is set on a block to whether only such rules
-made it: then the name still has other types, so the answer must not say it has
-none (RFC 8020 section 2), and the caller answers NODATA for NXDOMAIN.
+against. `typed_only`, when given, is set on a block to whether the name keeps
+other types: only such rules made it, or a `$dnstype` allow rule exempts some of
+its types. Then the answer must not say it has none (RFC 8020 section 2), and
+the caller answers NODATA for NXDOMAIN.
 */
 engine_match :: proc(e: ^Engine, name: string, qtype: dns.Type, typed_only: ^bool = nil) -> Decision {
 	buf: [MAX_NORMALISED]u8
@@ -435,7 +459,10 @@ engine_match :: proc(e: ^Engine, name: string, qtype: dns.Type, typed_only: ^boo
 	}
 	sync.atomic_add(&e.stats.blocked, 1)
 	if typed_only != nil {
-		typed_only^ = listed == .Typed
+		typed_only^ =
+			listed == .Typed ||
+			set_covers_some_type(e.allow, key) ||
+			regex_lookup(e.allow, key, qtype, some_type = true) != .None
 	}
 	return .Blocked
 }

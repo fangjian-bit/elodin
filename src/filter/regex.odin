@@ -281,9 +281,10 @@ regex_cost :: proc(re: regex.Regular_Expression) -> int {
 /*
 What pattern matches `normalised` for `qtype`: none, only ones with a
 `$dnstype`, or one for every type, which is looked for past the others so a
-block can say which it was.
+block can say which it was. With `some_type`, only patterns with a `$dnstype`
+are asked, whatever types they name.
 */
-regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type) -> (best: Coverage) {
+regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type, some_type := false) -> (best: Coverage) {
 	if s == nil || len(s.regexes) == 0 {
 		return .None
 	}
@@ -305,7 +306,8 @@ regex_lookup :: proc(s: ^Set, normalised: string, qtype: dns.Type) -> (best: Cov
 	url := string(url_buf[:len(URL_PREFIX) + len(subject)])
 	for r in s.regexes {
 		any_type := type_is_any(r.types^)
-		if (best == .Typed && !any_type) || !type_matches(r.types^, qtype) || !strings.contains(url, r.shortcut) {
+		wanted := !any_type if some_type else type_matches(r.types^, qtype)
+		if !wanted || (best == .Typed && !any_type) || !strings.contains(url, r.shortcut) {
 			continue
 		}
 		mem.arena_free_all(&arena)
