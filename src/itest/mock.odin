@@ -102,6 +102,16 @@ Mock :: struct {
 	*/
 	gone_silent: bool,
 
+	/*
+	Set to answer every TLS connection with a handshake that never finishes: a
+	record header announcing a 512-byte message, then one byte of it every
+	`DRIP_HANDSHAKE_INTERVAL`, each well inside any read timeout. `dripped`
+	counts the bytes, so a case can see the trickle was still going when it
+	got its answer.
+	*/
+	drip_handshake: bool,
+	dripped:        int,
+
 	mu:          sync.Mutex,
 	udp_queries: int,
 	tcp_queries: int,
@@ -710,6 +720,11 @@ mock_tcp_conn :: proc(conn: ^Mock_Conn) {
 	defer free(conn)
 
 	tls_conn: ^tlsx.Conn
+	if conn.tls && m.drip_handshake {
+		drip_handshake(conn)
+		net.close(conn.socket)
+		return
+	}
 	if conn.tls {
 		c, err := tlsx.server_accept(m.tls_ctx, conn.socket)
 		if err != .None {
@@ -827,5 +842,33 @@ mock_tcp_conn :: proc(conn: ^Mock_Conn) {
 			}
 		}
 		free_all(context.temp_allocator)
+	}
+}
+
+@(private = "file")
+DRIP_HANDSHAKE_INTERVAL :: 200 * time.Millisecond
+@(private = "file")
+DRIP_HANDSHAKE_BYTES :: 60
+
+@(private = "file")
+drip_handshake :: proc(conn: ^Mock_Conn) {
+	m := conn.mock
+	// A handshake record, TLS 1.2 on the record layer as RFC 8446 5.1 has a
+	// server send, whose body never arrives.
+	head := [5]u8{0x16, 0x03, 0x03, 0x02, 0x00}
+	if n, err := net.send_tcp(conn.socket, head[:]); err != nil || n != len(head) {
+		return
+	}
+	body := [1]u8{0x02}
+	for _ in 0 ..< DRIP_HANDSHAKE_BYTES {
+		if sync.atomic_load(&m.stop) {
+			return
+		}
+		time.sleep(DRIP_HANDSHAKE_INTERVAL)
+		// Ends once the peer has gone: the send after its close draws a reset.
+		if n, err := net.send_tcp(conn.socket, body[:]); err != nil || n != 1 {
+			return
+		}
+		sync.atomic_add(&m.dripped, 1)
 	}
 }

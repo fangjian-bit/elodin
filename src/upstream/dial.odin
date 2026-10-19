@@ -139,12 +139,13 @@ handshake_failure :: proc(terr: tlsx.Error) -> Error {
 	return .TLS_Failed
 }
 
-// Apply read and write deadlines to a connected socket. A positive timeout is
+// Apply read and write deadlines to a connected socket. A non-zero timeout is
 // never under a millisecond - a sliver of a deadline rounds to a zero
-// `timeval`, which the socket reads as no timeout at all - while zero stays
-// zero, which is what a configured `timeout: 0` has always meant.
+// `timeval`, and a negative one, a deadline already gone, reads back as zero,
+// both of which the socket and `tlsx` take as no timeout at all - while zero
+// stays zero, which is what a configured `timeout: 0` means.
 set_socket_timeouts :: proc(socket: net.Any_Socket, timeout: time.Duration) {
-	bounded := max(timeout, time.Millisecond) if timeout > 0 else timeout
+	bounded := max(timeout, time.Millisecond) if timeout != 0 else 0
 	_ = net.set_option(socket, .Receive_Timeout, bounded)
 	_ = net.set_option(socket, .Send_Timeout, bounded)
 }
