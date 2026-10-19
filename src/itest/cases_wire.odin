@@ -37,6 +37,9 @@ empty_character_strings_answer :: proc(name: string, allocator := context.alloca
 		},
 	}
 	m.flags.qr = true
+	// RD echoed from the query, as an upstream does: the bit is the client's,
+	// and the byte-for-byte check below would otherwise read it as a change.
+	m.flags.rd = true
 	m.flags.ra = true
 	wire, truncated, err := dns.encode_message(m, allocator, dns.MAX_MESSAGE)
 	if err != .None || truncated {

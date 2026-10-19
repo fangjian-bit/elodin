@@ -270,6 +270,7 @@ main :: proc() {
 
 	section(&r, "upstream transports")
 	run_upstream_transport_cases(&r)
+	run_upstream_header_cases(&r)
 	run_stale_connection_cases(&r)
 	run_query_id_cases(&r)
 

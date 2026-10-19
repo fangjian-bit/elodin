@@ -398,7 +398,10 @@ pc_header :: proc(
 		)
 	}
 
-	pc_flag(c, "aa (authoritative answer)", up.aa, el.aa, "")
+	// AA and RA are about the responder, so they are judged against this server
+	// rather than copied from the upstream (RFC 1035 section 4.1.1): it is never
+	// an authority for what it forwards, and it always offers recursion.
+	pc_flag(c, "aa (authoritative answer)", false, el.aa, "")
 	pc_flag(c, "rd (recursion desired)", q.rd, el.rd, "")
 	/*
 	CD is judged against the client's query rather than against the upstream's
@@ -416,8 +419,6 @@ pc_header :: proc(
 		pc_add(c, .Header, "reserved z bit is set", "0", "1", "")
 	}
 
-	// RA says this server offers recursion, which is a fact about this server
-	// and not a copy of anything upstream said.
 	if !el.ra && el.rcode != 5 {
 		pc_add(c, .Header, "ra (recursion available) is clear", "-", "0", "")
 	}
@@ -502,12 +503,12 @@ pc_tc :: proc(c: ^Parity_Compare, up, el: Pw_Msg, policy: Parity_Policy, first_d
 /*
 The AD bit.
 
-AD is this server's assertion that it authenticated the data, so it is the one
-header bit that must not be copied: forwarding an upstream's AD would be
+AD is this server's assertion that it authenticated the data, so like AA and RA
+it is a header bit that must not be copied: forwarding an upstream's AD would be
 repeating a claim this server did not check. Clearing it is therefore always
 allowed and setting it never is.
 
-Two things clear it (`settle_ad_bit` in src/server/dnssec.odin): validation being
+Two things clear it (`settle_header` in src/server/dnssec.odin): validation being
 off, and a client that asked for neither DO nor AD, which RFC 6840 section 5.7
 says must not be handed one.
 */
@@ -546,7 +547,7 @@ pc_ad :: proc(c: ^Parity_Compare, q: Parity_Query, up, el: Pw_Msg, policy: Parit
 		/*
 		The client disabled checking, so this server validated nothing and
 		has no verdict to put in the bit; the upstream's AD is its own claim
-		(`settle_ad_bit` in src/server/dnssec.odin). A resolver that sets AD
+		(`settle_header` in src/server/dnssec.odin). A resolver that sets AD
 		under CD anyway - AdGuard's does, for data it validated earlier - is
 		entitled to, and so is one that does not.
 		*/

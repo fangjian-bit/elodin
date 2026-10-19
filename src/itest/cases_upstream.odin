@@ -709,3 +709,84 @@ blocking: {{ enabled: false }}
 		stop_server(&srv)
 	}
 }
+
+/*
+RD, RA, AA and Z in a forwarded or cached answer are this server's, not the
+upstream's (RFC 1035 section 4.1.1).
+
+The upstream answers as a careless authoritative-only server does - AA set, RA
+clear, the reserved Z bit set - and the premise is checked on the mock's own
+reply. The client sees AA and Z clear and RA set on the forwarded answer and on
+the cached one, and RD as its own query had it: an RD=0 query for the cached
+name gets RD=0 back, not the RD=1 of the query that filled the entry.
+*/
+run_upstream_header_cases :: proc(r: ^Runner) {
+	name :: "aa.example.test."
+	upstream_port := next_port(r)
+	mock := mock_make("authoritative-only", upstream_port)
+	reply := make_a_response(name, {192, 0, 2, 1}, 300)
+	reply[2], reply[3] = 0x85, 0x40 // QR, AA, RD; RA clear, reserved Z set
+	mock_reply(mock, name, u16(dns.Type.A), reply)
+	if !mock_start(mock) {
+		skip_case(r, "upstream: header bits", "cannot start the mock")
+		return
+	}
+	defer mock_stop(mock)
+
+	udp_port := next_port(r)
+	config := fmt.tprintf(
+		`log: {{ level: warn }}
+listeners:
+  udp: {{ enabled: true, address: "127.0.0.1", port: %d }}
+  tcp: {{ enabled: true, address: "127.0.0.1", port: %d }}
+upstream:
+  timeout: 2s
+  servers: ["127.0.0.1:%d"]
+cache: {{ enabled: true }}
+blocking: {{ enabled: false }}
+dnssec: {{ enabled: false }}
+`,
+		udp_port,
+		udp_port,
+		upstream_port,
+	)
+	srv, ok := start_server(r, Server_Options{config = config, udp_port = udp_port})
+	if !ok {
+		skip_case(r, "upstream: header bits", "server did not start")
+		return
+	}
+	defer stop_server(&srv)
+
+	expect :: proc(r: ^Runner, res: Query_Result, rd: bool, what: string) {
+		if !check(r, res.ok, "no response to the %s query", what) {
+			return
+		}
+		h := parse_header(r, res.wire)
+		check_eq_int(r, h.ancount, 1, what)
+		check(r, !h.aa, "%s: AA is set", what)
+		check(r, h.ra, "%s: RA is clear", what)
+		check(r, h.rd == rd, "%s: RD is %v, the query had %v", what, h.rd, rd)
+		check(r, len(res.wire) < 4 || res.wire[3] & 0x40 == 0, "%s: the reserved Z bit is set", what)
+	}
+
+	start_case(r, "upstream: a forwarded answer carries this server's AA, RA and Z")
+	{
+		expect(r, query_udp(udp_port, build_query(name, u16(dns.Type.A), id = 1)), true, "forwarded")
+		up, _ := mock_last_reply(mock)
+		if check(r, len(up) >= 4, "the mock recorded no reply") {
+			check(r, up[2] & 0x04 != 0 && up[3] & 0xc0 == 0x40, "premise: the upstream set AA and Z and cleared RA")
+		}
+	}
+	end_case(r)
+
+	start_case(r, "upstream: a cached answer carries this server's AA, RA and Z, and this query's RD")
+	{
+		expect(r, query_udp(udp_port, build_query(name, u16(dns.Type.A), id = 2)), true, "cached")
+		no_rd := build_query(name, u16(dns.Type.A), id = 3)
+		no_rd[2] &~= 0x01
+		expect(r, query_udp(udp_port, no_rd), false, "cached RD=0 over UDP")
+		expect(r, query_tcp(udp_port, no_rd), false, "cached RD=0 over TCP")
+		check_eq_int(r, mock_total(mock), 1, "queries the upstream saw")
+	}
+	end_case(r)
+}
