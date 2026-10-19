@@ -163,7 +163,7 @@ run_cli_cases :: proc(r: ^Runner) {
 	end_case(r)
 
 	// The file from #316: each figure the server cannot honour is named, rather
-	// than a port wrapped or picked by the kernel and a TTL sent as 4294967295.
+	// than a port picked by the kernel and a TTL cast to 4294967295.
 	start_case(r, "cli: --check rejects ports, TTLs and timeouts out of range")
 	{
 		path := filepath.join({r.work_dir, "out-of-range.yaml"}, context.temp_allocator) or_else ""

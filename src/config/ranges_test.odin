@@ -27,8 +27,8 @@ accepted :: proc(t: ^testing.T, doc: string, loc := #caller_location) {
 
 /*
 A listener on port 0 binds whichever port the kernel picks, which no client can
-be told; one past 65535 used to bind the port it wraps to (#316). Either way the
-server comes up somewhere nothing asked for, so both are refused - the metrics
+be told, and one past 65535 is no port at all (#316). Either way the server
+would come up somewhere nothing asked for, so both are refused - the metrics
 endpoint's rule, and like it only for a listener that binds.
 */
 @(test)
@@ -52,9 +52,10 @@ test_a_listener_port_outside_1_to_65535_is_refused :: proc(t: ^testing.T) {
 
 /*
 RFC 2181 section 8: a TTL is 0 to 2^31-1, and a receiver treats one with the top
-bit set as zero. A rewrite TTL of -1 went out on the wire as 4294967295 (#316),
-and every other TTL this file sets - the cache's and the block answers' - could
-be set past 2^31-1 the same way. Each is refused, at both ends, by name.
+bit set as zero, so a rewrite TTL of -1 cast to 4294967295 is no TTL at all
+(#316), and the same holds for every other TTL this file sets - the cache's and
+the block answers'. Each is refused, at both ends, by name, and so is a fraction
+of a second, which no TTL can carry.
 */
 @(test)
 test_a_ttl_outside_rfc_2181_range_is_refused :: proc(t: ^testing.T) {
@@ -69,8 +70,21 @@ test_a_ttl_outside_rfc_2181_range_is_refused :: proc(t: ^testing.T) {
 	refused(t, rw("4294967295"), "rewrites[0].ttl", "0 to 2147483647")
 	accepted(t, rw("2147483647"))
 	accepted(t, rw("0"))
-	// Written as a duration, as every other TTL key can be.
-	accepted(t, rw("5m"))
+	// Written as a duration, as every other TTL key can be, or as any YAML
+	// integer, and read as the seconds it says.
+	for c in ([]struct {
+			v:    string,
+			secs: u32,
+		}{{"5m", 300}, {"3_600", 3600}, {"0x12c", 300}, {"1.5m", 90}}) {
+		cfg, err := load_string(rw(c.v), context.temp_allocator)
+		if testing.expectf(t, err == nil, "%s refused: %v", c.v, err) {
+			testing.expectf(t, cfg.rewrites[0].ttl == c.secs, "%s read as %d", c.v, cfg.rewrites[0].ttl)
+		}
+	}
+	// A fraction is cut off nowhere: "500ms" is not a TTL of 0.
+	for v in ([]string{"500ms", "1.5", "0.5s"}) {
+		refused(t, rw(v), "rewrites[0].ttl", "whole seconds")
+	}
 
 	for key in ([]string{"min_ttl", "max_ttl", "negative_ttl", "prefetch_min_ttl"}) {
 		doc := strings.concatenate({"upstream:\n  servers: [1.1.1.1]\ncache:\n  ", key, ": 2147483648\n"}, context.temp_allocator)
@@ -86,22 +100,27 @@ test_a_ttl_outside_rfc_2181_range_is_refused :: proc(t: ^testing.T) {
 /*
 `client_timeout` is how long an idle client connection is held. RFC 7766 6.2.3
 recommends an idle period "on the order of seconds" and warns that long ones
-exhaust a server; zero there means closing at once. Here a non-positive one was
-no timeout at all, and anything under a microsecond truncates to a zero timeval
-that SO_RCVTIMEO also reads as forever (#316). Refused under a millisecond, the
-same floor as `upstream.timeout`.
+exhaust a server; zero there means closing at once, while SO_RCVTIMEO reads a
+zero timeval - and anything under a microsecond truncates to one - as forever
+(#316). Refused under a millisecond, the same floor as `upstream.timeout`, and
+over a day, where a message's deadline added to the clock would wrap into one
+already spent.
 */
 @(test)
-test_a_client_timeout_under_1ms_is_refused :: proc(t: ^testing.T) {
+test_a_client_timeout_outside_1ms_to_24h_is_refused :: proc(t: ^testing.T) {
 	doc :: proc(v: string) -> string {
 		return strings.concatenate({"upstream:\n  servers: [1.1.1.1]\nserver:\n  client_timeout: ", v, "\n"}, context.temp_allocator)
 	}
 	for v in ([]string{"0s", "0", "0.5us", "999us", "0.5ms"}) {
-		refused(t, doc(v), "server.client_timeout", "at least 1ms")
+		refused(t, doc(v), "server.client_timeout", "from 1ms to 24h")
+	}
+	for v in ([]string{"24h1s", "9999999999", "1000000d"}) {
+		refused(t, doc(v), "server.client_timeout", "from 1ms to 24h")
 	}
 	// A duration has no sign, so this one never parses.
 	refused(t, doc("-1s"), "server.client_timeout", "expected a duration")
 	accepted(t, doc("1ms"))
 	accepted(t, doc("10s"))
+	accepted(t, doc("24h"))
 	free_all(context.temp_allocator)
 }

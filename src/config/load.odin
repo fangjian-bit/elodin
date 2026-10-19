@@ -183,11 +183,18 @@ opt_ttl :: proc(l: ^Loader, n: ^yaml.Node, key: string, dst: ^u32, path: string)
 	if yaml.is_null(child) {
 		return
 	}
-	// Accept both a bare number of seconds and a duration such as "5m".
-	d, ok := yaml.as_duration(child)
-	secs := i64(d / time.Second)
+	// A YAML integer of seconds ("3_600" and "0x12c" included), or a duration
+	// such as "5m" that comes to whole seconds: a fraction has no TTL to be, and
+	// cut off it sends "500ms" as 0.
+	secs, ok := yaml.as_int(child)
+	if !ok {
+		d: time.Duration
+		d, ok = yaml.as_duration(child)
+		ok = ok && d % time.Second == 0
+		secs = i64(d / time.Second)
+	}
 	if !ok || secs < 0 || secs > MAX_TTL {
-		errorf(l, "%s.%s: expected a TTL from 0 to %d seconds, or a duration such as 5m (RFC 2181 section 8)", path, key, MAX_TTL)
+		errorf(l, "%s.%s: expected a TTL of whole seconds from 0 to %d, or a duration such as 5m (RFC 2181 section 8)", path, key, MAX_TTL)
 		return
 	}
 	dst^ = u32(secs)
@@ -231,6 +238,11 @@ query fails at once. A day is far above any upstream worth waiting on and far
 below either edge.
 */
 MAX_UPSTREAM_TIMEOUT :: 24 * time.Hour
+
+// The most `server.client_timeout` may be: far above any idle period worth
+// holding, and far below the wrap of a deadline added to the clock. See
+// `load_server`.
+MAX_CLIENT_TIMEOUT :: 24 * time.Hour
 
 @(private)
 opt_upstream_timeout :: proc(l: ^Loader, n: ^yaml.Node, dst: ^time.Duration, path: string) {
@@ -323,12 +335,19 @@ load_server :: proc(l: ^Loader, cfg: ^Config) {
 	// How long an idle client connection is held. RFC 7766 section 6.2.3 wants
 	// it "on the order of seconds" and section 6.1.2 says why: an idle period
 	// with no end is the TCP denial of service it describes. Zero there is
-	// closing at once, not never; here it reached SO_RCVTIMEO as no timeout, as
-	// anything under a microsecond does once truncated to a timeval. So the
+	// closing at once, not never, while SO_RCVTIMEO reads zero as no timeout, as
+	// it does anything under a microsecond once truncated to a timeval. So the
 	// floor is `upstream.timeout`'s, the least the sockets and `poll` express.
+	// The ceiling is the other edge: a message's deadline is `tick_add(now,
+	// client_timeout)`, which wraps for a figure near the largest duration into
+	// one already past, and every TCP and DoT message is then refused.
 	if opt_duration(l, n, "client_timeout", &cfg.server.client_timeout, "server") &&
-	   cfg.server.client_timeout < time.Millisecond {
-		errorf(l, "server.client_timeout must be at least 1ms: it is how long an idle client connection is held, and less is no limit at all")
+	   (cfg.server.client_timeout < time.Millisecond || cfg.server.client_timeout > MAX_CLIENT_TIMEOUT) {
+		errorf(
+			l,
+			"server.client_timeout must be from 1ms to %dh: it is how long an idle client connection is held, and less is no limit at all",
+			int(MAX_CLIENT_TIMEOUT / time.Hour),
+		)
 	}
 	opt_string(l, n, "user", &cfg.server.user, "server")
 	opt_string(l, n, "group", &cfg.server.group, "server")

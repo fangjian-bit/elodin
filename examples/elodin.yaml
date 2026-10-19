@@ -48,7 +48,7 @@ server:
   # queries asked over it, and a client can stay inside both while letting go of
   # nothing - so this is the only setting that says how long one may be held.
   max_connections_per_prefix: 0
-  # How long an idle client connection is held; at least 1ms.
+  # How long an idle client connection is held; 1ms to 24h.
   client_timeout: 10s
   # Queries queued or in flight before new ones are dropped. 0 derives it as
   # `workers * 8`, which keeps the backlog to about eight upstream round trips
