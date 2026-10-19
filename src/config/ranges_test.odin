@@ -75,7 +75,7 @@ test_a_ttl_outside_rfc_2181_range_is_refused :: proc(t: ^testing.T) {
 	for c in ([]struct {
 			v:    string,
 			secs: u32,
-		}{{"5m", 300}, {"3_600", 3600}, {"0x12c", 300}, {"1.5m", 90}}) {
+		}{{"5m", 300}, {"3_600", 3600}, {"0x12c", 300}, {"1.5m", 90}, {"2.3h", 8280}}) {
 		cfg, err := load_string(rw(c.v), context.temp_allocator)
 		if testing.expectf(t, err == nil, "%s refused: %v", c.v, err) {
 			testing.expectf(t, cfg.rewrites[0].ttl == c.secs, "%s read as %d", c.v, cfg.rewrites[0].ttl)
@@ -92,6 +92,12 @@ test_a_ttl_outside_rfc_2181_range_is_refused :: proc(t: ^testing.T) {
 	}
 	refused(t, "upstream:\n  servers: [1.1.1.1]\nblocking:\n  block_ttl: 2147483648\n", "blocking.block_ttl", "0 to 2147483647")
 	refused(t, "upstream:\n  servers: [1.1.1.1]\nblocking:\n  block_ttl: -1\n", "blocking.block_ttl", "0 to 2147483647")
+	// Past 2^64 an integer is still out of range, not wrapped round to 1.
+	for v in ([]string{"18446744073709551617", "-18446744073709551615"}) {
+		refused(t, rw(v), "rewrites[0].ttl", "0 to 2147483647")
+		doc := strings.concatenate({"upstream:\n  servers: [1.1.1.1]\ncache:\n  min_ttl: ", v, "\n"}, context.temp_allocator)
+		refused(t, doc, "cache.min_ttl", "0 to 2147483647")
+	}
 	accepted(t, "upstream:\n  servers: [1.1.1.1]\ncache:\n  min_ttl: 2147483647\n  max_ttl: 2147483647\n")
 	accepted(t, "upstream:\n  servers: [1.1.1.1]\nblocking:\n  block_ttl: 2147483647\n")
 	free_all(context.temp_allocator)

@@ -345,7 +345,7 @@ load_server :: proc(l: ^Loader, cfg: ^Config) {
 	   (cfg.server.client_timeout < time.Millisecond || cfg.server.client_timeout > MAX_CLIENT_TIMEOUT) {
 		errorf(
 			l,
-			"server.client_timeout must be from 1ms to %dh: it is how long an idle client connection is held, and less is no limit at all",
+			"server.client_timeout must be from 1ms to %dh: it is how long an idle client connection is held",
 			int(MAX_CLIENT_TIMEOUT / time.Hour),
 		)
 	}

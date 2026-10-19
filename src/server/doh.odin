@@ -616,8 +616,9 @@ The loader refuses a `client_timeout` under a millisecond; a non-positive one in
 doh_question_overdue :: proc(s: ^Server, last_question: time.Tick, now: time.Tick) -> bool {
 	limit := s.cfg.server.client_timeout
 	// Less the limit rather than against twice it, which overflows for a
-	// `client_timeout` past 146 years - an operator's "forever" - into a
-	// negative bound that closes every connection before its first request.
+	// `client_timeout` past 146 years - refused by the loader, not by a `Config`
+	// built elsewhere - into a negative bound that closes every connection
+	// before its first request.
 	return limit > 0 && time.tick_diff(last_question, now) - limit > limit
 }
 
