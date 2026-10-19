@@ -263,6 +263,29 @@ CD_FIXTURES := []Fixture{
 	},
 }
 
+/*
+`cd_no_proof` - a signed CNAME and the target's SOA, no NSEC - is served with
+one record from the unsigned `cdun.` appended to the answer. The appended
+record drags the answer's verdict to insecure without touching the chain, and
+the denial must still be proven.
+*/
+@(private = "file")
+CD_PADDED :: "bare.cdsrc."
+
+@(private = "file")
+with_unsigned_answer :: proc(wire: []u8) -> ([]u8, bool) {
+	msg, err := dns.decode_message(wire, context.allocator)
+	if err != .None {
+		return nil, false
+	}
+	answer := make([dynamic]dns.Record, 0, len(msg.answer) + 1, context.allocator)
+	append(&answer, ..msg.answer)
+	append(&answer, dns.Record{name = "x.cdun.", type = .A, class = .IN, ttl = 300, data = dns.Rdata_A{addr = {192, 0, 2, 1}}})
+	msg.answer = answer[:]
+	out, _, eerr := dns.encode_message(msg, context.allocator)
+	return out, eerr == .None
+}
+
 @(private = "file")
 cd_config :: proc(udp_port, upstream_port: int) -> string {
 	return fmt.tprintf(
@@ -286,7 +309,16 @@ dnssec:
 run_dnssec_cname_denial_cases :: proc(r: ^Runner) {
 	mock := mock_make("dnssec-cname-denial", next_port(r))
 	for f in CD_FIXTURES {
-		mock_reply(mock, f.qname, f.qtype, from_hex(f.response, context.allocator))
+		wire := from_hex(f.response, context.allocator)
+		if f.key == "cd_no_proof" {
+			padded, padded_ok := with_unsigned_answer(wire)
+			if !padded_ok {
+				skip_case(r, "dnssec: denial after a cname", "cannot append to the unproven denial")
+				return
+			}
+			wire = padded
+		}
+		mock_reply(mock, f.qname, f.qtype, wire)
 	}
 	if !mock_start(mock) {
 		skip_case(r, "dnssec: denial after a cname", "cannot start the mock upstream")
@@ -313,6 +345,7 @@ run_dnssec_cname_denial_cases :: proc(r: ^Runner) {
 		{"dnssec: the cached copy of that nodata keeps AD and its proof", "www.cdsrc.", .AAAA, .No_Error, 4},
 		{"dnssec: an nxdomain after a cname is validated at the target and keeps its proof", "gone.cdsrc.", .A, .NX_Domain, 6},
 		{"dnssec: a denial after a cname that the target's zone does not sign is refused", "swap.cdsrc.", .AAAA, .Serv_Fail, 0},
+		{"dnssec: an unsigned record appended does not excuse an unproven denial after a cname", CD_PADDED, .AAAA, .Serv_Fail, 0},
 	}
 	for c, i in cases {
 		start_case(r, c.name)

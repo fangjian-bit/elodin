@@ -283,6 +283,30 @@ CD_FIXTURES := []Fixture{
 			"d341e7ca16c6983223b5b85ee0486dbd826b9dcf0d6a3409755388b80ee38f5fceac3f644dc967c2aad1f1b4bb652b82" +
 			"a58f781c1b8a7c5c2ccc903e464e2600",
 	},
+	{
+		key   = "cd_wildcard_replay",
+		name  = "www.cdsrc.",
+		type  = .A,
+		rcode = 0,
+		wire  = "12348580000100020000000003777777056364737263000001000103777777056364737263000001000100000e100004" +
+			"c00002420377777705636473726300002e000100000e10005900010f0100000e107d3b18206a47882007ad0563647372" +
+			"6300dca4ac49a417d4a920b83496110401ab7b7cfd9919f11f6604ee8adf549dc5ef3657ee9d9d13d5b67f8dc7576276" +
+			"d9354cd0808471dae4bae6e124efac393605",
+	},
+	{
+		key   = "cd_www_ds",
+		name  = "www.cdsrc.",
+		type  = .DS,
+		rcode = 0,
+		wire  = "1234858000010000000400000377777705636473726300002b0001056364737263000006000100000e100030026e7305" +
+			"6364737263000a686f73746d6173746572056364737263000000000100000e100000038400093a800000012c05636473" +
+			"726300002e000100000e10005900060f0100000e107d3b18206a47882007ad0563647372630092bfe263461a70106d17" +
+			"92947ae2d87e66730a3c30d06f12f83476b92c8501e299e3a4812a9a42d29d1dc89907f7d4ae523d38e1618d51873d93" +
+			"b635aeab57050377777705636473726300002f000100000e100011017805636473726300000604000000000303777777" +
+			"05636473726300002e000100000e100059002f0f0200000e107d3b18206a47882007ad0563647372630013f92513e683" +
+			"83b4d5455ab955b081728f2839063e7eb476f3e924f28f7de1c3ba7da11ee587117d099a0f47b8918976b696235c1aa3" +
+			"4b4696cc719d6414fe01",
+	},
 }
 
 @(private = "file")
@@ -299,8 +323,13 @@ cd_query :: proc(ctx: rawptr, name: string, type: dns.Type, allocator: mem.Alloc
 	return nil, false
 }
 
+/*
+Validate a fixture, optionally reshaped first: `edit`, when given, rewrites the
+decoded message before it is encoded again, as an on-path sender can without
+touching a signature.
+*/
 @(private = "file")
-cd_validate :: proc(key: string, unreachable: ^string = nil) -> Result {
+cd_validate :: proc(key: string, unreachable: ^string = nil, edit: proc(msg: ^dns.Message) = nil) -> Result {
 	anchor, parsed := parse_trust_anchor(CD_ANCHOR, context.temp_allocator)
 	if !parsed {
 		return {status = .Indeterminate, reason = "the anchor did not parse"}
@@ -310,29 +339,23 @@ cd_validate :: proc(key: string, unreachable: ^string = nil) -> Result {
 	v := make_validator(cd_query, unreachable, Options{anchors = anchors})
 	defer destroy_validator(v)
 	for f in CD_FIXTURES {
-		if f.key == key {
-			reply, _ := decode_hex(f.wire, context.temp_allocator)
-			return validate(v, f.name, f.type, reply, time.unix(FIXTURE_TIME, 0))
+		if f.key != key {
+			continue
 		}
-	}
-	return {status = .Indeterminate, reason = "no such fixture"}
-}
-
-// The same fixture with the header's rcode nibble rewritten, as an on-path
-// sender can without touching a signature.
-@(private = "file")
-cd_validate_as :: proc(key: string, rcode: dns.Rcode) -> Result {
-	anchor, _ := parse_trust_anchor(CD_ANCHOR, context.temp_allocator)
-	anchors := make([]Trust_Anchor, 1, context.temp_allocator)
-	anchors[0] = anchor
-	v := make_validator(cd_query, nil, Options{anchors = anchors})
-	defer destroy_validator(v)
-	for f in CD_FIXTURES {
-		if f.key == key {
-			reply, _ := decode_hex(f.wire, context.temp_allocator)
-			reply[3] = (reply[3] & 0xf0) | u8(rcode)
-			return validate(v, f.name, f.type, reply, time.unix(FIXTURE_TIME, 0))
+		reply, _ := decode_hex(f.wire, context.temp_allocator)
+		if edit != nil {
+			msg, derr := dns.decode_message(reply, context.temp_allocator)
+			if derr != .None {
+				return {status = .Indeterminate, reason = "the fixture did not decode"}
+			}
+			edit(&msg)
+			encoded, _, eerr := dns.encode_message(msg, context.temp_allocator, dns.MAX_MESSAGE)
+			if eerr != .None {
+				return {status = .Indeterminate, reason = "the edited fixture did not encode"}
+			}
+			reply = encoded
 		}
+		return validate(v, f.name, f.type, reply, time.unix(FIXTURE_TIME, 0))
 	}
 	return {status = .Indeterminate, reason = "no such fixture"}
 }
@@ -385,9 +408,10 @@ test_a_denial_after_a_cname_into_an_unsigned_zone_is_insecure :: proc(t: ^testin
 
 /*
 A denial the target's zone does not back is refused, as the same denial asked
-for directly would be. The lifted proof is the one to watch: it is genuine and
-verifies against the source zone, so reading it against any zone but the one
-holding the chain's end would pass it.
+for directly would be. The lifted proof is genuine and verifies against the
+source zone, but it speaks for `swap.cdsrc.` - the name asked about, not the
+chain's end - and is signed by keys the target's zone does not hold, so it is
+read against the wrong keys and proves nothing about the target either way.
 */
 @(test)
 test_an_unproven_denial_after_a_cname_is_bogus :: proc(t: ^testing.T) {
@@ -415,9 +439,54 @@ target is absent, so they prove no NODATA. Either flip is refused.
 */
 @(test)
 test_a_flipped_rcode_after_a_cname_is_bogus :: proc(t: ^testing.T) {
-	as_nxdomain := cd_validate_as("cd_nodata", .NX_Domain)
+	as_nxdomain := cd_validate("cd_nodata", edit = proc(msg: ^dns.Message) {msg.flags.rcode = u8(dns.Rcode.NX_Domain)})
 	testing.expectf(t, as_nxdomain.status == .Bogus, "NODATA read as NXDOMAIN: got %v (%q)", as_nxdomain.status, as_nxdomain.reason)
-	as_nodata := cd_validate_as("cd_nxdomain", .No_Error)
+	as_nodata := cd_validate("cd_nxdomain", edit = proc(msg: ^dns.Message) {msg.flags.rcode = u8(dns.Rcode.No_Error)})
 	testing.expectf(t, as_nodata.status == .Bogus, "NXDOMAIN read as NODATA: got %v (%q)", as_nodata.status, as_nodata.reason)
+	free_all(context.temp_allocator)
+}
+
+/*
+One unsigned RRset appended to the answer, from a zone that really is unsigned,
+drags the message's verdict down to `Insecure` without touching the chain. The
+denial at the chain's end is still claimed, and still has to be proven: an
+unproven one is refused, and a proven one is merely insecure, the appended
+record being the part nothing vouches for.
+*/
+@(test)
+test_an_unsigned_rrset_does_not_buy_past_the_denial_after_a_cname :: proc(t: ^testing.T) {
+	append_unsigned :: proc(msg: ^dns.Message) {
+		answer := make([dynamic]dns.Record, 0, len(msg.answer) + 1, context.temp_allocator)
+		append(&answer, ..msg.answer)
+		append(&answer, dns.Record{name = "x.cdun.", type = .A, class = .IN, ttl = 300, data = dns.Rdata_A{addr = {192, 0, 2, 1}}})
+		msg.answer = answer[:]
+	}
+	for key in ([]string{"cd_no_proof", "cd_type_present", "cd_wrong_zone"}) {
+		result := cd_validate(key, edit = append_unsigned)
+		testing.expectf(t, result.status == .Bogus, "%s with an unsigned RRset appended: got %v (%q)", key, result.status, result.reason)
+	}
+	proven := cd_validate("cd_nodata", edit = append_unsigned)
+	testing.expectf(t, proven.status == .Insecure, "a proven denial with an unsigned RRset appended: got %v (%q)", proven.status, proven.reason)
+	free_all(context.temp_allocator)
+}
+
+/*
+A genuine wildcard record replayed for a name with records of its own is
+refused, and an unsigned RRset appended beside it does not buy it out of the
+expansion proof: that proof is not gated on the rest of the answer being
+`Secure`, for the same reason the denial at a chain's end is not.
+*/
+@(test)
+test_an_unsigned_rrset_does_not_buy_past_the_wildcard_proof :: proc(t: ^testing.T) {
+	append_unsigned :: proc(msg: ^dns.Message) {
+		answer := make([dynamic]dns.Record, 0, len(msg.answer) + 1, context.temp_allocator)
+		append(&answer, ..msg.answer)
+		append(&answer, dns.Record{name = "x.cdun.", type = .A, class = .IN, ttl = 300, data = dns.Rdata_A{addr = {192, 0, 2, 1}}})
+		msg.answer = answer[:]
+	}
+	plain := cd_validate("cd_wildcard_replay")
+	testing.expectf(t, plain.status == .Bogus, "a replayed wildcard: got %v (%q)", plain.status, plain.reason)
+	padded := cd_validate("cd_wildcard_replay", edit = append_unsigned)
+	testing.expectf(t, padded.status == .Bogus, "a replayed wildcard with an unsigned RRset appended: got %v (%q)", padded.status, padded.reason)
 	free_all(context.temp_allocator)
 }

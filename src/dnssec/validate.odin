@@ -1234,10 +1234,10 @@ IPv4-only name is the everyday version of it, and a CNAME pointing at a name
 that does not exist is the same shape with NXDOMAIN on it - reaches `Secure`
 only once `validate_answer` has proven the denial in the zone holding the
 chain's end, so the NSEC or NSEC3 records and the SOA are among what the verdict
-names and survive. An SOA that did not verify is the one thing dropped from
-that shape (see `proved_denial`); `cache.put` then reads the result as the
-denial it is (RFC 2308 section 2.2), finds no SOA, and keeps none of it
-(section 5).
+names and survive. An SOA that did not verify is not named, and goes with the
+rest of what the verdict leaves out (see `proved_denial`); `cache.put` then
+reads the result as the denial it is (RFC 2308 section 2.2), finds no SOA, and
+keeps none of it (section 5).
 
 The rcode is the part of this no prune can reach. AD covers the records in those
 two sections, and this makes it honest about them; it says nothing about the
@@ -2187,15 +2187,25 @@ validate_answer :: proc(
 	itself needs it to reach the same conclusion.
 	*/
 	proved := make([dynamic]Authenticated_Set, 0, 1, allocator)
-	if worst == .Secure {
+	// Verified once for the message, not once per expansion or once more for a
+	// denial at the chain's end below: they are the same records, read against
+	// the same zone, and re-verifying them spends an allowance the answer needs
+	// for its own RRsets.
+	denials := make([dynamic]Verified_Denial, 0, 1, allocator)
+	/*
+	Not gated on `worst` being `Secure`, for the reason the two guards above are
+	not: one unsigned RRset appended from a zone that really is unsigned drags
+	`worst` to `Insecure`, `Insecure` is forwarded, and a genuine wildcard
+	record replayed for a name with records of its own would ride out on that
+	one record. A proof that fails is refused whatever else the section holds;
+	one that holds leaves the verdict where the rest of the answer put it.
+	*/
+	if worst != .Bogus && worst != .Indeterminate {
 		// Every one of them, and the worst verdict wins. Stopping at the first
 		// failure would let an expansion that came out merely insecure - an
 		// opt-out cover does - hide a forged one behind it, and which comes
 		// first in the answer section is the sender's choice.
-		// Verified once for the message, not once per expansion: they are the
-		// same records, read against the same zone, and re-verifying them spends
-		// an allowance the answer needs for its own RRsets.
-		denials := make([dynamic]Verified_Denial, 0, 1, allocator)
+		before := worst
 		proof_reason, proof_detail: string
 		for e in expansions {
 			proof, records, why := validate_wildcard_proof(v, budget, msg, e.owner, e.encloser, class, &denials, unix, now, allocator)
@@ -2208,7 +2218,7 @@ validate_answer :: proc(
 			worst = worse(worst, proof)
 			append(&proved, ..records)
 		}
-		if worst != .Secure {
+		if worst != before {
 			return {status = worst, reason = proof_reason, detail = proof_detail}
 		}
 	}
@@ -2223,8 +2233,8 @@ validate_answer :: proc(
 	SOA in the *authority* section, signed by the target's zone. RFC 6840
 	section 5.8 has the AD bit cover "any relevant negative response RRs in the
 	Authority section" as well as the answer, and the prune keeps only what the
-	verdict names - so without this the proof was either stripped from under the
-	AD bit or the bit withheld from the commonest answer there is.
+	verdict names - so an unchecked denial either loses its proof from under the
+	AD bit or withholds the bit from the commonest answer there is.
 
 	`validate_denial` is asked about `end`, the last name in the chain, because
 	that is the name the rcode and the proof are about (RFC 6604 section 3), and
@@ -2253,13 +2263,24 @@ validate_answer :: proc(
 	this would be a way to skip that proof: an attacker replays a genuine
 	wildcard record as the answer for a name that has its own records, adds a
 	proven denial for the target, and the expansion is never asked about.
+
+	Not gated on `worst` being `Secure`, for the reason the two guards above are
+	not: one unsigned RRset appended from a zone that really is unsigned drags
+	`worst` to `Insecure` without touching the chain, and `Insecure` is
+	forwarded. A denial an attacker forged behind a signed CNAME would ride out
+	on that one record. So an unproven denial is refused whatever else the
+	section holds, and a proven one leaves the verdict where the rest put it.
 	*/
-	if worst == .Secure && shape == .Chain_Only && denial_claimed(msg) {
-		denied := validate_denial(v, budget, msg, end, qtype, class, unix, now, allocator)
-		if denied.status != .Secure {
+	if worst != .Bogus && worst != .Indeterminate && shape == .Chain_Only && denial_claimed(msg) {
+		denied := validate_denial(v, budget, msg, end, qtype, class, unix, now, allocator, &denials)
+		switch {
+		case denied.status == .Secure:
+			append(&proved, ..denied.authority)
+		case denied.status == .Insecure && worst == .Insecure:
+		// Insecure already, and the reason that made it so stands.
+		case:
 			return denied
 		}
-		append(&proved, ..denied.authority)
 	}
 	/*
 	The RRsets are named only when the verdict is `Secure`, which is what
@@ -2299,6 +2320,9 @@ validate_denial :: proc(
 	unix: u32,
 	now: time.Time,
 	allocator: mem.Allocator,
+	// The message's verified denial records, when a wildcard proof over the same
+	// authority section may already have read them. See `Verified_Denial`.
+	seen: ^[dynamic]Verified_Denial = nil,
 ) -> Result {
 	/*
 	The zone is worked out from the name that was asked about, not from a signer
@@ -2333,9 +2357,14 @@ validate_denial :: proc(
 		return {status = .Indeterminate, reason = walk_reason(budget)}
 	}
 
-	nsecs, nsec3s, proved, denial_spent := validated_denial_records(
+	local: [dynamic]Verified_Denial
+	if seen == nil {
+		local = make([dynamic]Verified_Denial, 0, 1, allocator)
+	}
+	records := denial_records_for(
 		v,
 		budget,
+		seen if seen != nil else &local,
 		msg.authority,
 		established,
 		class,
@@ -2344,6 +2373,7 @@ validate_denial :: proc(
 		now,
 		allocator,
 	)
+	nsecs, nsec3s, proved, denial_spent := records.nsecs, records.nsec3s, records.verified, records.exhausted
 	/*
 	Our own allowance again, and the same answer as everywhere else: a proof this
 	server stopped short of reading is not a proof it found wanting. Reported as

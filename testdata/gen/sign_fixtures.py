@@ -1445,6 +1445,13 @@ def cname_denial():
     lifted = signed_soa(src) + nsec(src, "swap.cdsrc.", "two.cdsrc.", [CNAME, RRSIG, NSEC])
     answer("cd_wrong_zone", "swap.cdsrc.", AAAA, cname("swap.cdsrc.", "host.cdtgt."), lifted)
 
+    # A genuine wildcard record, `*.cdsrc. A`, replayed for `www.cdsrc.`, which
+    # has a CNAME of its own: no proof can show `www.cdsrc.` absent.
+    wild = [a_rr("www.cdsrc.", "192.0.2.66")]
+    answer("cd_wildcard_replay", "www.cdsrc.", A, wild + [sign(wild, src, labels=1)], [])
+    www = signed_soa(src) + nsec(src, "www.cdsrc.", "x.cdsrc.", [CNAME, RRSIG, NSEC])
+    emit("cd_www_ds", "www.cdsrc.", "DS", message("www.cdsrc.", DS, [], www))
+
 if __name__ == "__main__":
     wanted = sys.argv[1:] or list(SCENARIOS)
     for name in wanted:
