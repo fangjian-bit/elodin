@@ -103,10 +103,10 @@ start_validator :: proc(s: ^Server) -> bool {
 	if !dnssec.usable_anchor(in_use, ".") {
 		if dnssec.anchors_the_root(in_use) {
 			logx.errorf("dnssec: no trust anchor for the root names an algorithm and digest this build can check")
-			logx.errorf("dnssec: nothing would be validated; check the host crypto policy, or set dnssec.enabled: false")
+			logx.errorf("dnssec: no name outside the anchored zones would be validated; check the host crypto policy, or set dnssec.enabled: false")
 		} else {
-			logx.errorf("dnssec: no trust anchor covers the root, which is where every chain of trust starts")
-			logx.errorf("dnssec: every name would fail to validate; anchor `.` as well, or set dnssec.enabled: false")
+			logx.errorf("dnssec: no trust anchor covers the root, which is where every chain outside the anchored zones starts")
+			logx.errorf("dnssec: every name outside the anchored zones would fail to validate; anchor `.` as well, or set dnssec.enabled: false")
 		}
 		// The validator is still nil, and `destroy_validator` takes that; what
 		// this is here for is the anchors parsed above, which the refusal to

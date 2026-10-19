@@ -58,8 +58,10 @@ budget covers the whole question — the forward, the DNSSEC chain lookups, and
 both groups a routed apex `DS` asks — counted from its first exchange; a lookup
 that finds none left asks nobody. A rewrite alias's target is a lookup of its
 own, with a budget of its own. With routes of different `timeout`s, the budget
-is two of the longest among the question's route, the default group and, inside
-an anchored zone, the routes between the anchor and the name.
+is two of the longest among the question's route, the default group and every
+route at, above or below a [`trust_anchors`](dnssec.md#trust-anchors) zone. That
+last applies to every question, since any answer can CNAME into an anchored
+zone.
 
 Within it, a dead first server hands over to the second, which gets its full
 `timeout`; a third waits for the next query. A SERVFAIL, REFUSED or referral reply sends

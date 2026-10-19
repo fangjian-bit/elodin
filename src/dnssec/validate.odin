@@ -4403,9 +4403,9 @@ cache_get :: proc(
 	if time.diff(cached.expires, now) > 0 {
 		return {}, false, false
 	}
-	// A hit is what keeps an entry alive when the cache overflows. The root is
-	// read here at the start of every chain, which is what puts it out of reach
-	// of a flood of names nobody asks for twice.
+	// A hit is what keeps an entry alive when the cache overflows. The root, or
+	// the closest anchor, is read here at the start of every chain, which is
+	// what puts it out of reach of a flood of names nobody asks for twice.
 	zone_touch(v, cached)
 	/*
 	The RDATA is copied, not referenced. A `Dnskey` is a handful of slices into
