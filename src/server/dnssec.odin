@@ -561,7 +561,7 @@ answers, so which client happened to warm an entry cannot change what a later
 one is told.
 */
 /*
-Decide what the AD bit on the way out is allowed to say.
+Settle the header bits that are this server's to state: AA, RA, RD, Z, CD and AD.
 
 Every answer goes through here, whether it came from the cache or from an
 upstream a moment ago. Where we validated, `apply_ad_policy` narrows the stored
@@ -580,9 +580,27 @@ clears CD on every answer. The validated path puts the client's bit back in
 `present_response`, but an answer to a CD query is never validated and so never
 passed through there, and a cached one carries whatever the query that filled
 the entry was answered with.
+
+RD, RA and AA are this server's to state as well, not the upstream's (RFC 1035
+section 4.1.1). RD "is copied into the response" - from this client's query, not
+from the one that filled the cache entry. RA says recursion is available here,
+which it is whatever an authoritative-only upstream answered with. AA says the
+responder is an authority for the name, which a forwarder never is. And the one
+bit still reserved as Z "must be zero in all queries and responses", whatever an
+upstream sent. Unbound and BIND build their own header for forwarded and cached
+data the same way, and `dns.make_response` sets these bits so for every answer
+built here.
 */
 @(private)
-settle_ad_bit :: proc(wire: []u8, query: dns.Message, validated: bool) {
+settle_header :: proc(wire: []u8, query: dns.Message, validated: bool) {
+	if len(wire) < dns.HEADER_SIZE {
+		return
+	}
+	wire[2] &~= 0x04 | 0x01
+	if query.flags.rd {
+		wire[2] |= 0x01
+	}
+	wire[3] = (wire[3] | 0x80) &~ 0x40
 	set_cd_bit(wire, query.flags.cd)
 	if validated {
 		apply_ad_policy(wire, query)

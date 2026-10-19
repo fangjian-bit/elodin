@@ -148,15 +148,20 @@ pm_assemble :: proc(
 	// randomising it is relying on.
 	append(&out, ..query[:q_end])
 
-	flags := u16(0x8000) | u16(0x0080) // QR, RA
+	// The AA shape answers as a careless authoritative-only server does: AA
+	// set, RA clear and the reserved Z bit set. None of them is a bit a
+	// forwarder passes on (RFC 1035 section 4.1.1).
+	flags := u16(0x8000) // QR
+	if aa {
+		flags |= 0x0400 | 0x0040 // AA, Z
+	} else {
+		flags |= 0x0080 // RA
+	}
 	if query[2] & 0x01 != 0 {
 		flags |= 0x0100 // RD, echoed
 	}
 	if query[3] & 0x10 != 0 {
 		flags |= 0x0010 // CD, echoed
-	}
-	if aa {
-		flags |= 0x0400
 	}
 	flags |= rcode & 0xf
 

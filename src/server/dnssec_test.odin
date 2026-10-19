@@ -979,3 +979,31 @@ test_cd_bit_echoes_the_client_not_the_upstream :: proc(t: ^testing.T) {
 		testing.expectf(t, (out[3] & 0x10 != 0) == c.cd, "%s: cd is %v, the client asked with %v", c.name, out[3] & 0x10 != 0, c.cd)
 	}
 }
+
+@(test)
+test_settle_header_states_this_servers_rd_ra_aa_z :: proc(t: ^testing.T) {
+	// RFC 1035 section 4.1.1. An authoritative-only upstream's answer - AA set,
+	// RA clear, and Z set by a careless one - stored for a client that set RD,
+	// then served to one that did not.
+	wire, _, _ := dns.encode_message(signed_response(), context.temp_allocator)
+	wire[2] |= 0x04 | 0x01
+	wire[3] = (wire[3] &~ 0x80) | 0x40
+
+	no_rd := client_query(false)
+	no_rd.flags.rd = false
+	settle_header(wire, no_rd, false)
+	testing.expect(t, wire[2] & 0x04 == 0, "AA is an authority's to set, not a forwarder's")
+	testing.expect(t, wire[3] & 0x80 != 0, "RA says this server recurses, whatever the upstream said")
+	testing.expect(t, wire[2] & 0x01 == 0, "RD is copied from this client's query, which left it clear")
+	testing.expect(t, wire[3] & 0x40 == 0, "Z must be zero in every response")
+
+	settle_header(wire, client_query(false), true)
+	testing.expect(t, wire[2] & 0x01 != 0, "RD is copied from this client's query, which set it")
+	testing.expect(t, wire[2] & 0x04 == 0 && wire[3] & 0x80 != 0, "the validated path settles AA and RA too")
+
+	// Shorter than a header: nothing to settle, and nothing to write past.
+	short := []u8{0, 0, 0x04}
+	settle_header(short, client_query(false), false)
+	testing.expect(t, short[2] == 0x04, "a buffer shorter than a header is left alone")
+	free_all(context.temp_allocator)
+}

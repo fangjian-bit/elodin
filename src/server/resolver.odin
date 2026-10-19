@@ -1338,7 +1338,7 @@ resolve_query :: proc(
 	// `home.arpa.` is delegated insecure and would validate on its own, but the
 	// router that answers the zone swallows the `DS` query that proves it,
 	// breaking the walk the same way. Both are served as insecure, which is what
-	// `settle_ad_bit` records once `validating` is off - unless the operator
+	// `settle_header` records once `validating` is off - unless the operator
 	// anchored the zone themselves, in which case that request to validate it
 	// wins and the bypass stands down.
 	//
@@ -2892,7 +2892,7 @@ resolve_query :: proc(
 	}
 	/*
 	What was just stored, or would have been, handed over and landed before
-	`settle_ad_bit` below writes into it - each follower settles its own copy,
+	`settle_header` below writes into it - each follower settles its own copy,
 	and decides for itself whether the rcode is one it may take.
 	*/
 	if flight != nil {
@@ -2910,7 +2910,7 @@ resolve_query :: proc(
 	it once the record is this server's own, which is the one shape the encoder's
 	reservation is right about. See `match_client_opt`.
 	*/
-	settle_ad_bit(resp, msg, validating)
+	settle_header(resp, msg, validating)
 	log_query(s, client, proto, q, .Forwarded, answering_upstream(winner), started)
 	return resp, .Forwarded, true
 }
@@ -3677,7 +3677,7 @@ serve_from_cache :: proc(
 	dns.copy_question_case(wire, query)
 	// The stored answer carries the verdict; whether this client gets to hear it
 	// is a separate question.
-	settle_ad_bit(wire, msg, validating)
+	settle_header(wire, msg, validating)
 	// And the extended error that goes with the verdict, under the same
 	// condition: one reached while validating is not this request's to repeat.
 	if ede != nil && validating {
