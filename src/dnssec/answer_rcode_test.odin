@@ -258,7 +258,7 @@ test_denial_contradicted_reads_the_end_of_the_chain :: proc(t: ^testing.T) {
 
 	// A chain that stops short. The rcode is about `target.example.`, which
 	// nothing here says anything about - RFC 2308 section 2.1's own shape, and
-	// the one `denial_claimed` declines to vouch for rather than refusing.
+	// the one `validate_answer` proves against the target's zone instead.
 	chain := []dns.Record{rec("www.example.com.", .CNAME, "target.example.")}
 	testing.expect(
 		t,
