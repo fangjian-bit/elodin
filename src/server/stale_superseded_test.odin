@@ -1,0 +1,294 @@
+package server
+
+import "core:net"
+import "core:testing"
+import "core:thread"
+import "core:time"
+import "elodin:cache"
+import "elodin:config"
+import "elodin:dns"
+import "elodin:filter"
+import "elodin:pool"
+import "elodin:upstream"
+
+/*
+An answer `cache.put` refuses still supersedes the expired copy (issue #419).
+
+The upstream has spoken: a TTL-0 answer is the zone saying "do not cache this"
+(RFC 1035 section 3.2.1, RFC 2181 section 8), and a denial without a SOA is one
+RFC 2308 section 5 says not to cache - but both are answers, and the expired
+bytes no longer stand for anything. Left in place, every later query whose
+upstream is slower than `stale_timeout` is lent those bytes again, for the rest
+of the day `serve_stale` keeps them, while the upstream answers the whole time.
+
+A failure is the other side: SERVFAIL and REFUSED are what RFC 8767 keeps the
+copy for, so they leave it where it was.
+
+Both roads a refresh takes: detached on the pool, answering after the client was
+lent the copy, and on the client's own thread where there is no pool.
+*/
+@(private = "file")
+Superseded_Case :: struct {
+	name:  string,
+	reply: []u8,
+	// Whether the expired entry is still there once the reply has landed.
+	kept:  bool,
+	// A name on the block list, so the reply is refused by the CNAME walk
+	// and reaches the cache through the cloaking store instead.
+	block: string,
+}
+
+@(private = "file")
+superseded_reply :: proc(rcode: dns.Rcode, ttl0: bool) -> []u8 {
+	question := make([]dns.Question, 1, context.temp_allocator)
+	question[0] = dns.Question{name = STALE_NAME, type = .A, class = .IN}
+	msg := dns.Message{question = question}
+	if ttl0 {
+		answer := make([]dns.Record, 1, context.temp_allocator)
+		answer[0] = dns.Record{name = STALE_NAME, type = .A, class = .IN, ttl = 0, data = dns.Rdata_A{addr = LIVE_ADDR}}
+		msg.answer = answer
+	}
+	msg.flags.qr = true
+	msg.flags.rd = true
+	msg.flags.ra = true
+	dns.set_rcode(&msg, rcode)
+	wire, _, err := dns.encode_message(msg, context.temp_allocator)
+	if err != .None {
+		return nil
+	}
+	return wire
+}
+
+// The question, a TTL-0 CNAME to `target`, and a TTL-0 address there.
+@(private = "file")
+superseded_cloak :: proc(target: string) -> []u8 {
+	question := make([]dns.Question, 1, context.temp_allocator)
+	question[0] = dns.Question{name = STALE_NAME, type = .A, class = .IN}
+	answer := make([]dns.Record, 2, context.temp_allocator)
+	answer[0] = dns.Record{name = STALE_NAME, type = .CNAME, class = .IN, ttl = 0, data = dns.Rdata_Name{name = target}}
+	answer[1] = dns.Record{name = target, type = .A, class = .IN, ttl = 0, data = dns.Rdata_A{addr = LIVE_ADDR}}
+	msg := dns.Message{question = question, answer = answer}
+	msg.flags.qr = true
+	msg.flags.rd = true
+	msg.flags.ra = true
+	wire, _, err := dns.encode_message(msg, context.temp_allocator)
+	if err != .None {
+		return nil
+	}
+	return wire
+}
+
+@(private = "file")
+superseded_cases :: proc() -> []Superseded_Case {
+	cases := make([]Superseded_Case, 6, context.temp_allocator)
+	cases[0] = {"a TTL-0 answer", superseded_reply(.No_Error, true), false, ""}
+	cases[1] = {"a NODATA without a SOA", superseded_reply(.No_Error, false), false, ""}
+	cases[2] = {"an NXDOMAIN without a SOA", superseded_reply(.NX_Domain, false), false, ""}
+	cases[3] = {"a SERVFAIL", superseded_reply(.Serv_Fail, false), true, ""}
+	cases[4] = {"a REFUSED", superseded_reply(.Refused, false), true, ""}
+	cases[5] = {"a TTL-0 chain to a listed name", superseded_cloak("tracker.evil.example."), false, "tracker.evil.example"}
+	return cases
+}
+
+@(private = "file")
+run_superseded :: proc(t: ^testing.T, c: Superseded_Case, detached: bool) {
+	socket, serr := net.make_bound_udp_socket(net.IP4_Loopback, 0)
+	if !testing.expectf(t, serr == nil, "cannot bind the mock upstream: %v", serr) {
+		return
+	}
+	defer net.close(socket)
+	_ = net.set_option(socket, .Receive_Timeout, MOCK_RECV_TIMEOUT)
+	bound, berr := net.bound_endpoint(socket)
+	if !testing.expectf(t, berr == nil, "cannot read the mock's port: %v", berr) {
+		return
+	}
+
+	answers := cache.make_cache(cache.Options{max_entries = 8, max_ttl = 3600, serve_stale = true})
+	defer cache.destroy(answers)
+	cfg: config.Config
+	s := stale_server(&cfg, answers, nil)
+	cfg.upstream.strategy = .Failover
+	cfg.upstream.attempts = 1
+	cfg.upstream.timeout = 5 * time.Second
+	cfg.cache.stale_timeout = 100 * time.Millisecond
+	cfg.upstream.servers = blackhole_servers(bound.port)
+
+	group, gerr := upstream.make_group(cfg.upstream, nil, context.allocator, false)
+	if !testing.expectf(t, gerr == .None, "cannot build the upstream group: %v", gerr) {
+		return
+	}
+	defer upstream.destroy_group(group)
+	s.group = group
+	if c.block != "" {
+		engine := filter.engine_make()
+		block := filter.set_make()
+		filter.set_add(block, c.block, {.Apex, .Subdomains})
+		filter.engine_swap(engine, block, filter.set_make())
+		cfg.blocking.enabled = true
+		s.filters = engine
+	}
+	defer if s.filters != nil {
+		filter.engine_destroy(s.filters)
+	}
+	workers: ^pool.Pool
+	if detached {
+		workers = pool.make_pool(2)
+		s.handler_pool = workers
+	}
+	defer if workers != nil {
+		pool.destroy(workers)
+	}
+
+	if !testing.expect(t, cache_an_answer(answers, expired = true), "the answer was not cached") {
+		return
+	}
+
+	// Late for the detached road, so the client is lent the copy and the
+	// reply reaches the cache alone; prompt where the client waits for it.
+	x := Stale_Exchange {
+		socket = socket,
+		reply  = c.reply,
+		delay  = 400 * time.Millisecond if detached else 0,
+	}
+	mock := thread.create_and_start_with_poly_data(&x, serve_one_stale)
+	_, outcome, ok := handle_query(&s, stale_query(true), .UDP, "127.0.0.1:5555", context.temp_allocator)
+	thread.join(mock)
+	thread.destroy(mock)
+	testing.expectf(t, ok, "%s: nothing came back", c.name)
+	testing.expectf(t, x.got, "%s: the upstream was never asked", c.name)
+	if !detached && c.block != "" {
+		testing.expectf(t, outcome == .Blocked, "%s: the chain was not refused by the walk (%v)", c.name, outcome)
+	}
+	if detached {
+		testing.expectf(t, outcome == .Cached, "%s: the client was not lent the copy (%v)", c.name, outcome)
+		// Joined, not slept on: the store happens on the refresh's way out.
+		pool.destroy(workers)
+		workers = nil
+		s.handler_pool = nil
+	}
+
+	kb: [cache.KEY_MAX]u8
+	key := cache.make_key(kb[:], STALE_NAME, .A, .IN, false, false)
+	_, hit, found := cache.get(answers, key, context.temp_allocator)
+	if c.kept {
+		testing.expectf(t, found && hit.stale, "%s (detached=%v): the expired copy was dropped", c.name, detached)
+	} else {
+		testing.expectf(t, !found, "%s (detached=%v): the expired copy outlived the upstream's answer", c.name, detached)
+	}
+}
+
+@(test)
+test_a_late_refused_answer_supersedes_the_stale_copy :: proc(t: ^testing.T) {
+	for c in superseded_cases() {
+		run_superseded(t, c, detached = true)
+	}
+	free_all(context.temp_allocator)
+}
+
+@(test)
+test_a_refused_answer_supersedes_the_stale_copy_without_a_pool :: proc(t: ^testing.T) {
+	for c in superseded_cases() {
+		run_superseded(t, c, detached = false)
+	}
+	free_all(context.temp_allocator)
+}
+
+@(private = "file")
+Tcp_Superseded :: struct {
+	listener: net.TCP_Socket,
+	reply:    []u8,
+	got:      bool,
+}
+
+// Answer one query over TCP, with the TC bit set on the reply.
+@(private = "file")
+serve_one_truncated :: proc(x: ^Tcp_Superseded) {
+	conn, _, aerr := net.accept_tcp(x.listener)
+	if aerr != nil {
+		return
+	}
+	defer net.close(conn)
+	_ = net.set_option(conn, .Receive_Timeout, MOCK_RECV_TIMEOUT)
+	length: [2]u8
+	if n, err := net.recv_tcp(conn, length[:]); err != nil || n != 2 {
+		return
+	}
+	buf: [512]u8
+	want := int(length[0]) << 8 | int(length[1])
+	got := 0
+	for got < want && want <= len(buf) {
+		n, err := net.recv_tcp(conn, buf[got:want])
+		if err != nil || n == 0 {
+			return
+		}
+		got += n
+	}
+	if got < dns.HEADER_SIZE {
+		return
+	}
+	x.got = true
+	out: [514]u8
+	out[0], out[1] = u8(len(x.reply) >> 8), u8(len(x.reply))
+	copy(out[2:], x.reply)
+	out[2], out[3] = buf[0], buf[1]
+	out[4] |= 0x02 // TC
+	_, _ = net.send_tcp(conn, out[:2 + len(x.reply)])
+}
+
+/*
+A truncated reply is not the answer, so the expired copy stays.
+
+RFC 2181 section 9 has a truncated response retried rather than used, and
+`cache.put` turns it away; a server that sets TC over TCP has not answered the
+question either. Over TCP because a TC over UDP is retried there and never
+reaches the store.
+*/
+@(test)
+test_a_truncated_reply_keeps_the_stale_copy :: proc(t: ^testing.T) {
+	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
+		return
+	}
+	defer net.close(listener)
+	bound, _ := net.bound_endpoint(listener)
+
+	answers := cache.make_cache(cache.Options{max_entries = 8, max_ttl = 3600, serve_stale = true})
+	defer cache.destroy(answers)
+	cfg: config.Config
+	s := stale_server(&cfg, answers, nil)
+	cfg.upstream.strategy = .Failover
+	cfg.upstream.attempts = 1
+	cfg.upstream.timeout = 5 * time.Second
+	servers := blackhole_servers(bound.port)
+	servers[0].kind = .TCP
+	cfg.upstream.servers = servers
+	group, gerr := upstream.make_group(cfg.upstream, nil, context.allocator, false)
+	if !testing.expectf(t, gerr == .None, "cannot build the upstream group: %v", gerr) {
+		return
+	}
+	defer upstream.destroy_group(group)
+	s.group = group
+	if !testing.expect(t, cache_an_answer(answers, expired = true), "the answer was not cached") {
+		return
+	}
+
+	x := Tcp_Superseded {
+		listener = listener,
+		reply    = superseded_reply(.No_Error, true),
+	}
+	mock := thread.create_and_start_with_poly_data(&x, serve_one_truncated)
+	out, _, ok := handle_query(&s, stale_query(true), .UDP, "127.0.0.1:5555", context.temp_allocator)
+	thread.join(mock)
+	thread.destroy(mock)
+	testing.expect(t, x.got, "the upstream was never asked")
+	// The premise: the TC reply is what reached the client, so it reached the store.
+	if testing.expect(t, ok && len(out) >= dns.HEADER_SIZE, "nothing came back") {
+		testing.expect(t, out[2] & 0x02 != 0, "the reply that came back was not truncated")
+	}
+
+	kb: [cache.KEY_MAX]u8
+	key := cache.make_key(kb[:], STALE_NAME, .A, .IN, false, false)
+	_, hit, found := cache.get(answers, key, context.temp_allocator)
+	testing.expect(t, found && hit.stale, "a truncated reply dropped the expired copy")
+	free_all(context.temp_allocator)
+}

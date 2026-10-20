@@ -2860,6 +2860,9 @@ resolve_query :: proc(
 				if flight != nil && kept {
 					flight.stored = .Cloak
 				}
+				if !kept {
+					forget_superseded(s, stale_hit, decoded.msg)
+				}
 			}
 			return out, cloak_outcome(verdict), true
 		}
@@ -2894,7 +2897,9 @@ resolve_query :: proc(
 	willing to speak stores what it said.
 	*/
 	if live(s).cfg.cache.enabled && decoded.full && !unproven_apex_ds {
-		cache.put(live(s).answers, key, resp, decoded.msg, generation, ede = answer_ede)
+		if !cache.put(live(s).answers, key, resp, decoded.msg, generation, ede = answer_ede) {
+			forget_superseded(s, stale_hit, decoded.msg)
+		}
 	}
 	/*
 	What was just stored, or would have been, handed over and landed before
@@ -2931,6 +2936,34 @@ rules_generation :: proc(s: ^Server) -> u64 {
 		return filter.engine_generation(s.filters)
 	}
 	return 0
+}
+
+/*
+Drop the expired copy `stale_hit` once the upstream has answered with something
+`cache.put` would not keep (issue #419).
+
+A TTL-0 answer is the zone saying not to cache it (RFC 1035 section 3.2.1, RFC
+2181 section 8), and a denial without a SOA is one RFC 2308 section 5 says not
+to cache - but each is the upstream's answer, and the expired bytes no longer
+stand for anything. Left in place, they are lent again to every later query
+whose upstream is slower than `stale_timeout`, for the rest of the day
+`serve_stale` keeps them, while the upstream answers the whole time.
+
+Only for NOERROR and NXDOMAIN, untruncated: a SERVFAIL or a REFUSED is the
+failure RFC 8767 keeps the copy for, and a truncated reply is not the answer.
+The callers have already turned away a reply that would not decode in full and
+an apex DS the parent never spoke to, which are outages too. `forget` checks
+the serial, so an answer stored meanwhile by another query stays.
+*/
+@(private)
+forget_superseded :: proc(s: ^Server, stale_hit: Cached_Answer, msg: dns.Message) {
+	if stale_hit.wire == nil || msg.flags.tc {
+		return
+	}
+	#partial switch dns.rcode_of(msg) {
+	case .No_Error, .NX_Domain:
+		cache.forget(live(s).answers, stale_hit.key, stale_hit.serial)
+	}
 }
 
 // The entry under `key`, fresh or expired, as the answer path reads it.
