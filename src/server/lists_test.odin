@@ -634,13 +634,15 @@ test_a_refresh_releases_each_downloads_scratch_before_the_next :: proc(t: ^testi
 	}
 	cfg.blocking.lists = lists[:]
 
+	// Capacity, not `total_used`: freeing a block back to a temp guard lowers
+	// only the capacity.
 	scratch := &(^runtime.Default_Temp_Allocator)(context.temp_allocator.data).arena
-	before := scratch.total_used
+	before := scratch.total_capacity
 	loads: [LISTS]List_Load
 	block, allow := build_filter_sets(&cfg, true, loads[:])
 	defer filter.set_destroy(block)
 	defer filter.set_destroy(allow)
-	held := scratch.total_used - before
+	held := scratch.total_capacity - before
 
 	for load in loads {
 		testing.expect_value(t, load, List_Load.Current)
