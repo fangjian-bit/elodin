@@ -600,6 +600,12 @@ test_a_reload_rebuilds_the_rules_and_takes_them_away_with_blocking :: proc(t: ^t
 
 	reload_from(t, f, BASE)
 	testing.expect(t, filter.engine_match(f.s.filters, "second.example", .A) != .Blocked, "turning blocking off left the rules in the engine")
+
+	// Rules edited while blocking stays off have no sets to build or take away.
+	dormant := swap(blocking(`"||third.example^"`), "blocking: { enabled: true", "blocking: { enabled: false")
+	out = reload_from(t, f, dormant)
+	testing.expect(t, out.applied, "the dormant rule edit did not load")
+	testing.expect(t, !out.blocking && !out.rules, "rules edited with blocking off rebuilt the rule sets")
 }
 
 @(test)

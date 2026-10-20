@@ -296,10 +296,15 @@ addresses a `custom` one carries, its TTL and the refresh interval - which take
 effect without one. A rebuild holds
 two sets of every list in memory at once and may download them, which is not a
 price a new `block_ttl` should pay. Read off the type the other way round, so a
-key added to the section later rebuilds until it is listed here.
+key added to the section later rebuilds until it is listed here. With blocking
+off on both sides there are no sets to build or take away, as `policy_changed`
+reads `dnssec` and `rebind`.
 */
 @(private)
 rules_changed :: proc(a, b: config.Blocking_Config) -> bool {
+	if !a.enabled && !b.enabled {
+		return false
+	}
 	x, y := a, b
 	x.response, x.block_ttl, x.refresh = y.response, y.block_ttl, y.refresh
 	x.custom_ipv4, x.custom_ipv6 = y.custom_ipv4, y.custom_ipv6
