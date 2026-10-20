@@ -155,10 +155,10 @@ reader_fill :: proc(r: ^Buf_Reader, unread := 0) -> Error {
 		}
 		stream_set_read_timeout(r.stream, wait)
 	}
-	// What has been read past is dropped before reading more, or a chunked
+	// What has been read past is dropped rather than grown over, or a chunked
 	// body would be held twice: here, and in the body its chunks are copied to.
 	// A view into `buf` lasts only until the next read, so nothing points here.
-	if r.pos > 0 {
+	if r.pos > 0 && len(r.buf) + 8192 > cap(r.buf) {
 		kept := copy(r.buf[:], r.buf[r.pos:])
 		resize(&r.buf, kept)
 		r.pos = 0
@@ -188,7 +188,8 @@ reader_fill :: proc(r: ^Buf_Reader, unread := 0) -> Error {
 	}
 	r.received = true
 	// Doubled as bytes arrive, but never past what a waiting read needs - the
-	// cursor is at zero once consumed bytes are dropped, so that is `unread`.
+	// drop above runs on any read that could grow `buf`, so the cursor is at
+	// zero here and that is `unread`.
 	// Not reserved to `unread` outright: a length the peer declares and never
 	// sends must not cost more than twice what it did send.
 	if need := len(r.buf) + n; need > cap(r.buf) {
@@ -222,11 +223,11 @@ next_wait :: proc(deadline: time.Tick, idle: time.Duration) -> (wait: time.Durat
 /*
 Read up to and including the next CRLF, returning the line without it.
 
-The result is a view into `r.buf`, which every later read shifts down over the
-bytes already consumed, and past its capacity moves to a different block. So a
-line is good until the next read and no longer: `http_exchange` finishes with each one inside the iteration that
-produced it, and clones the one thing it keeps. Anything added here that holds a
-line across a read has to copy it first.
+The result is a view into `r.buf`, which a later read may shift down over the
+bytes already consumed, or past its capacity move to a different block. So a
+line is good until the next read and no longer: `http_exchange` finishes with
+each one inside the iteration that produced it, and clones the one thing it
+keeps. Anything added here that holds a line across a read has to copy it first.
 */
 @(private)
 reader_line :: proc(r: ^Buf_Reader) -> (line: string, err: Error) {
@@ -353,7 +354,10 @@ MAX_HTTP_HEADERS :: 100
 Perform one request/response exchange on `stream`.
 
 The returned body is allocated from `allocator`; everything else borrows from
-scratch memory and must be copied if it needs to outlive the call.
+scratch memory and must be copied if it needs to outlive the call. The response
+is read through a buffer from `context.allocator`, freed before returning, so
+that has to be an allocator that frees: in an arena, every block the buffer
+outgrew would stay.
 
 `deadline`, when set, bounds the request's writes and the reading of the whole
 response, and `idle` any one read or write under it; see `stream_write` and
