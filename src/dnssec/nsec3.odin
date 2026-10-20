@@ -719,3 +719,94 @@ nsec3_proves_no_delegation :: proc(
 	cover, covered := nsec3_covering(n3s, name, budget)
 	return covered && cover.rr.flags & NSEC3_FLAG_OPT_OUT == 0, false
 }
+
+/*
+Whether the NSEC or NSEC3 records in an authority section show that nothing is
+delegated at `name`, read without verifying them.
+
+For a caller that has to tell an insecure delegation's NODATA for a `DS` from a
+NODATA for a name the parent holds itself, and that is not deciding anything a
+client is told is authentic: the records travel on with their signatures, and
+the client checks them. RFC 4035 section 5.2 gives the delegation's proof as an
+NSEC at the name with NS set and DS clear, RFC 5155 section 8.9 the NSEC3 one,
+and RFC 6840 section 4.4 rules out the child's own apex record - SOA set -
+standing for it. So what this reports is the other side: a record at the name
+with NS clear or SOA set, or records showing the name absent, which a wildcard
+NODATA does.
+
+Only a positive showing counts. No denial records at all, records past
+`max_iterations` or the hashing allowance, and an opt-out span are each the
+reading saying nothing, and false - the caller keeps whatever it decided
+without them. The hashing is charged to an allowance of its own,
+`MAX_NSEC3_ROUNDS_PER_QUERY`, so each reading is bounded however many records
+the reply carries.
+
+`absent` is the one showing that says more: an NSEC at the name with NXNAME in
+its bitmap, which is RFC 9824's compact denial standing for an NXDOMAIN - the
+name is not there at all. It implies `shown`.
+*/
+denial_shows_no_cut :: proc(
+	authority: []dns.Record,
+	name: string,
+	max_iterations: int,
+	allocator: mem.Allocator,
+) -> (
+	shown: bool,
+	absent: bool,
+) {
+	nsecs := make([dynamic]Nsec_Rr, 0, 4, allocator)
+	n3s := make([dynamic]Nsec3_Rr, 0, 4, allocator)
+	for r in authority {
+		append_denial_record(r, &nsecs, &n3s, allocator)
+	}
+	if len(nsecs) > 0 && nsec_proves_no_delegation(nsecs[:], name) {
+		match, found := nsec_matching(nsecs[:], name)
+		return true, found && bitmap_has(match.rr.types, .NXNAME)
+	}
+	if len(n3s) == 0 {
+		return false, false
+	}
+	budget := Nsec3_Budget{max_iterations = nsec3_iterations_ceiling(max_iterations)}
+	shown, _ = nsec3_proves_no_delegation(n3s[:], name, dns.name_parent(name), &budget)
+	return shown, false
+}
+
+/*
+The iteration ceiling a configured `dnssec.max_nsec3_iterations` stands for:
+zero is `DEFAULT_MAX_NSEC3_ITERATIONS`, and anything past
+`MAX_NSEC3_ITERATIONS_LIMIT` is held down to it. `make_validator` and
+`denial_shows_no_cut` both read the option through this, so the two agree on
+which records are past it.
+*/
+nsec3_iterations_ceiling :: proc(configured: int) -> int {
+	n := configured if configured > 0 else DEFAULT_MAX_NSEC3_ITERATIONS
+	return min(n, MAX_NSEC3_ITERATIONS_LIMIT)
+}
+
+/*
+Parse one NSEC or NSEC3 record onto the matching list, dropping one that will
+not parse - or an NSEC3 whose owner label is not a hash the width of its next
+hash - and ignoring every other type.
+*/
+@(private)
+append_denial_record :: proc(r: dns.Record, nsecs: ^[dynamic]Nsec_Rr, n3s: ^[dynamic]Nsec3_Rr, allocator: mem.Allocator) {
+	rdata, is_raw := raw_rdata(r)
+	if !is_raw {
+		return
+	}
+	#partial switch r.type {
+	case .NSEC:
+		if parsed, perr := parse_nsec(rdata, allocator); perr == .None {
+			append(nsecs, Nsec_Rr{owner = r.name, rr = parsed})
+		}
+	case .NSEC3:
+		parsed, perr := parse_nsec3(rdata)
+		if perr != .None {
+			return
+		}
+		hash := make([]u8, 32, allocator)
+		if n, decoded := base32hex_decode(first_label(r.name), hash); decoded && n == len(parsed.next_hash) {
+			append(n3s, Nsec3_Rr{hash = hash[:n], rr = parsed})
+		}
+	}
+}

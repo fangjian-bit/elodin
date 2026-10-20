@@ -2044,12 +2044,16 @@ test_the_memo_still_asks_the_parent_unless_the_route_answered_the_nodata :: proc
 		// A `DS` RRset rather than an empty answer section, which is a NOERROR
 		// that is no more the NODATA than the NXDOMAIN beside it is.
 		signed: bool,
+		// The NODATA beside the zone's own apex NSEC, which is the child
+		// speaking for the parent's side of the cut (issue #244).
+		apex:   bool,
 	}
 	cases := []Case {
-		{"nothing at all", false, .No_Error, false},
-		{"SERVFAIL", true, .Serv_Fail, false},
-		{"NXDOMAIN", true, .NX_Domain, false},
-		{"a DS RRset", true, .No_Error, true},
+		{"nothing at all", false, .No_Error, false, false},
+		{"SERVFAIL", true, .Serv_Fail, false, false},
+		{"NXDOMAIN", true, .NX_Domain, false, false},
+		{"a DS RRset", true, .No_Error, true, false},
+		{"its own apex NSEC", true, .No_Error, false, true},
 	}
 
 	for c in cases {
@@ -2132,6 +2136,10 @@ test_the_memo_still_asks_the_parent_unless_the_route_answered_the_nodata :: proc
 		route_reply := route_reply_nodata("corp.example.", .DS, c.rcode)
 		if c.signed {
 			route_reply = route_reply_ds("corp.example.")
+		} else if c.apex {
+			// The zone's own apex NSEC: RFC 6840 section 4.4 rules it out as a
+			// DS denial.
+			route_reply = ds_nodata("corp.example.", nsec_at("corp.example.", "example.", .NS, .SOA, .RRSIG, .NSEC, .DNSKEY))
 		}
 		failing := Route_Mock {
 			socket = route_socket,

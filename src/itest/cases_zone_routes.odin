@@ -88,6 +88,30 @@ signed_delegation_reply :: proc(name: string) -> []u8 {
 	return wire
 }
 
+/*
+A NODATA for `name`'s `DS` whose NSEC shows a name the parent holds itself: A,
+RRSIG and NSEC in the bitmap and no NS, so nothing is delegated there (issue
+#244). On the heap, as `signed_delegation_reply` is, for the same reason.
+*/
+@(private = "file")
+held_name_reply :: proc(name: string) -> []u8 {
+	// The next name is the root; window 0 holds A (byte 0) and RRSIG, NSEC (byte 5).
+	nsec := []u8{0, 0, 6, 0x40, 0, 0, 0, 0, 0x03}
+	authority := make([]dns.Record, 1, context.temp_allocator)
+	authority[0] = dns.Record{name = name, type = .NSEC, class = .IN, ttl = 300, data = dns.Rdata_Raw{data = nsec}}
+	question := make([]dns.Question, 1, context.temp_allocator)
+	question[0] = dns.Question{name = name, type = .DS, class = .IN}
+	msg := dns.Message{question = question, authority = authority}
+	msg.flags.qr = true
+	msg.flags.rd = true
+	msg.flags.ra = true
+	wire, _, err := dns.encode_message(msg, context.allocator)
+	if err != .None {
+		return nil
+	}
+	return wire
+}
+
 @(private = "file")
 routed_config :: proc(udp_port, public_port, internal_port: int, dnssec := DEFAULT_DNSSEC) -> string {
 	return fmt.tprintf(
@@ -253,6 +277,8 @@ run_zone_route_cases :: proc(r: ^Runner) {
 	// And the one it signs, for the case below it: a zone the public tree really
 	// does delegate, whose DS is not the "no data" the carve-out went to fetch.
 	mock_reply(public, "signed.example.", u16(dns.Type.DS), signed_delegation_reply("signed.example."))
+	// And a name it holds itself, which is no delegation for the NODATA to prove.
+	mock_reply(public, "held.example.", u16(dns.Type.DS), held_name_reply("held.example."))
 	if !mock_start(public) {
 		skip_case(r, "upstream.zones", "cannot start the public mock")
 		return
@@ -494,6 +520,41 @@ rebind: {{enabled: false}}
 			check(r, mock_total(internal) > 0, "the signed apex DS was not put back on the route")
 		} else {
 			skip_case(r, "upstream.zones: signed apex DS", "server did not start")
+		}
+	}
+	end_case(r)
+
+	start_case(r, "upstream.zones: an apex DS for a name the parent holds goes back to the route")
+	{
+		/*
+		The NODATA that is not the proof (issue #244). `held.example.` is a name
+		the public parent publishes itself - an address for a portal - so its
+		NSEC carries no NS bit and nothing is delegated there for the NODATA to
+		prove insecure (RFC 4035 section 5.2). The control is "the apex DS does
+		not follow the route" above, whose NODATA carries no NSEC at all and stays
+		at the parent.
+		*/
+		held_port := next_port(r)
+		config, _ := strings.replace_all(
+			routed_config(held_port, public_port, internal_port, "dnssec: {enabled: false}\n"),
+			"[corp.example]",
+			"[held.example]",
+			context.temp_allocator,
+		)
+		held, started := start_server(r, Server_Options{config = config, udp_port = held_port})
+		if started {
+			defer stop_server(&held)
+			mock_reset_counts(public)
+			mock_reset_counts(internal)
+			res := query_udp(held_port, build_query("held.example.", u16(dns.Type.DS)))
+			if check(r, res.ok, "no response") {
+				h := parse_header(r, res.wire)
+				check_eq_int(r, h.rcode, int(dns.Rcode.No_Error), "rcode for a held routed apex")
+			}
+			check(r, mock_total(public) > 0, "the parent was not asked for the held apex DS")
+			check(r, mock_total(internal) > 0, "a NODATA without the NS bit was read as an insecure delegation")
+		} else {
+			skip_case(r, "upstream.zones: held apex DS", "server did not start")
 		}
 	}
 	end_case(r)

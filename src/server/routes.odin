@@ -4,6 +4,7 @@ import "core:mem"
 import "core:sync"
 import "core:time"
 import "elodin:dns"
+import "elodin:dnssec"
 import "elodin:upstream"
 
 /*
@@ -255,7 +256,7 @@ carve-out was built to fetch: a NODATA, the parent saying it holds no DS for thi
 name. That is RFC 8375 section 4 item 4.B's whole subject, it is `home.arpa.`'s
 answer from `arpa.`, and it is the only thing the parent can tell a validating
 client that the route cannot. Every other reply goes back on the route -
-`parent_answers_apex_ds` is the test, and there are five ways to fail it:
+`parent_answers_apex_ds` is the test, and there are six ways to fail it:
 
   - NXDOMAIN. The parent zone has no such name, so nothing in the public tree
     delegates this zone: there is no proof of an insecure delegation to be had,
@@ -302,27 +303,26 @@ client that the route cannot. Every other reply goes back on the route -
     validating client would be handed an answer to a `DS` query that is neither
     a DS nor a denial of one: a broken chain, which is this carve-out's own
     failure arriving through the question it sends out.
+  - A NODATA whose denial records show no delegation at the name (issue
+    #244). "No DS for this name" is the answer both to an insecure delegation -
+    a zone the parent delegates and does not sign, which is `home.arpa.` and
+    every case this carve-out was written for - and to a name that sits in the
+    parent's own zone without being a delegation at all: `corp.example.com.`
+    published as an A record for a portal, or standing as an empty non-terminal
+    because `vpn.corp.example.com.` is public. RFC 4035 section 5.2 tells them
+    apart by the NS bit of the NSEC at the name, RFC 5155 section 8.9 by the
+    NSEC3 one, and RFC 6840 section 4.4 rules out the child's own apex record -
+    SOA set - standing for the parent's. The second shape is no proof of an
+    insecure delegation, so it is the NXDOMAIN case above met through a name
+    that exists, and the route answers it the same way - though uncached, the
+    bits being unvalidated: see `parent_answers_apex_ds`.
+    `dnssec.denial_shows_no_cut` reads them.
 
-What the NODATA does not distinguish is worth setting down, because the
-distinction is real and this does not draw it. "No DS for this name" is the
-answer both to an insecure delegation - a zone the parent delegates and does not
-sign, which is `home.arpa.` and every case this carve-out was written for - and
-to a name that sits in the parent's own zone without being a delegation at all:
-`corp.example.com.` published as an A record for a portal, or standing as an
-empty non-terminal because `vpn.corp.example.com.` is public. Telling the two
-apart means reading the NS bit out of the type bitmap of the NSEC or NSEC3 record
-in the authority section, which nothing here does - `decode_through_answer` stops
-where its name says.
-
-For the second shape the proof is passed on and the client is right to act on it:
-the public tree really does cover those names with signed data, so the local
-authority's unsigned answers below them really are Bogus, and a validator that
-resolved the zone without this carve-out would do so only because the route's
-own unsigned NODATA kept the parent's proof out of its sight. The remedy is the
-one this file already documents for a routed zone the public tree signs:
-`trust_anchors` over the zone, or not routing a name the public tree publishes.
-An operator who wants elodin to make that distinction for them wants the bitmap
-read, which is a change to this predicate and not to the shape of the carve-out.
+A route under a name the parent holds is still a route under signed data: a
+strict validator reads the route's unsigned answers below it as Bogus, correctly.
+The remedy is the one this file already documents for a routed zone the public
+tree signs: `trust_anchors` over the zone, or not routing a name the public tree
+publishes.
 
 `home.arpa.` is the one deployment none of that touches, which is the point:
 `arpa.` delegates the zone and publishes the proof, so the answer is a NODATA,
@@ -353,11 +353,9 @@ make about it and they are not the same decision.
 
 `proved` is whether this is the client's answer, so that the route is not asked
 in its place: NOERROR with an empty answer section, which is a NODATA and says
-the parent holds no DS for this name. It does not say the name is a delegation -
-`apex_ds_off_route` sets out what that leaves out and why the answer still
-passes. The name is there and the type is not. That is the reply this carve-out
-went to fetch, and `apex_ds_off_route` argues why every other one is the route's
-to answer.
+the parent holds no DS for this name, and no NSEC or NSEC3 beside it showing the
+name is no delegation. That is the reply this carve-out went to fetch, and
+`apex_ds_off_route` argues why every other one is the route's to answer.
 
 An *empty* section rather than merely one with no `DS` in it, because a NODATA
 carries nothing in the answer at all - a denial's NSEC or NSEC3 travels in the
@@ -368,11 +366,15 @@ actually arrives, and reading that as the proof would keep the question at a
 parent that never answered it. It is `settled` no more than a SERVFAIL is, the
 rcode having been rewritten by something that is not the parent zone.
 
-The NODATA is read from the answer section alone. Whether the NSEC or NSEC3
-beside it actually proves it is the client's question and not this server's - a
-routed zone is served insecure here either way, so the records travel with their
-signatures intact and the client checks them against its own anchor. What this
-decides is only which upstream the question belongs to.
+The denial records are read and not validated. Whether they are genuine is the
+client's question and not this server's - a routed zone is served insecure here
+either way, so the records travel with their signatures intact and the client
+checks them against its own anchor. What this decides is only which upstream the
+question belongs to, so only a positive showing of no delegation turns the
+NODATA away: no records at all - an unsigned parent, with no chain below it to
+break - records past the NSEC3 iteration ceiling, and an opt-out span each leave
+it the proof. A reply whose authority section will not decode is read as far as
+its answer, the same reading of a section it cannot see.
 
 `settled` is whether the parent said anything about the delegation that holds
 for as long as a cache entry does. The proof does; so does NXDOMAIN ("nothing
@@ -380,8 +382,9 @@ public delegates this zone") and so does a `DS` RRset ("it is delegated and
 signed out here"). Those are facts about the public tree, and the route's answer
 standing in for one of them is the answer for that zone until the public tree
 changes. Nothing else is: no reply at all, an rcode that is neither NOERROR nor
-NXDOMAIN, a NOERROR whose answer section holds something that is not a DS, and a
-reply that would not decode are all this server failing to reach a statement
+NXDOMAIN, a NOERROR whose answer section holds something that is not a DS, a
+NODATA whose unvalidated denial records show no delegation, and a reply that
+would not decode are all this server failing to reach a statement
 rather than a statement, so the route's answer stands in for a fact nobody
 established. `resolve_query` serves that answer and declines to store it,
 for the reason it gives at the store.
@@ -426,6 +429,9 @@ parent_answers_apex_ds :: proc(
 	// The request's reading counter: this is another reading of a reply into
 	// the arena the request is served from. See `dns.REQUEST_DECODE_BUDGET`.
 	spent: ^int,
+	// `dnssec.max_nsec3_iterations`, the ceiling the NSEC3 hashing below is
+	// held to.
+	max_nsec3_iterations: int,
 	allocator: mem.Allocator,
 ) -> (
 	proved: bool,
@@ -443,9 +449,14 @@ parent_answers_apex_ds :: proc(
 	if rcode != .No_Error || dns.peek_referral(resp) {
 		return false, false
 	}
-	msg, err := dns.decode_through_answer(resp, allocator, spent)
+	// The authority section too, for the denial records below; a reply whose
+	// later sections would not decode is read as far as its answer.
+	msg, err := dns.decode_message(resp, allocator, spent)
 	if err != .None {
-		return false, false
+		msg, err = dns.decode_through_answer(resp, allocator, spent)
+		if err != .None {
+			return false, false
+		}
 	}
 	for rec in msg.answer {
 		if rec.type == .DS && dns.name_equal_fold(rec.name, name) {
@@ -456,6 +467,11 @@ parent_answers_apex_ds :: proc(
 	// somebody rewrote rather than the parent's answer to this question.
 	if len(msg.answer) != 0 {
 		return false, false
+	}
+	// A name the parent holds itself, not a delegation (issue #244) - or, under
+	// RFC 9824's compact denial, no name at all, which settles as NXDOMAIN does.
+	if held, absent := dnssec.denial_shows_no_cut(msg.authority, name, max_nsec3_iterations, allocator); held {
+		return false, absent
 	}
 	return true, true
 }

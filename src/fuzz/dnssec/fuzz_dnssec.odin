@@ -1,5 +1,6 @@
 package fuzz_dnssec
 
+import "elodin:dns"
 import "elodin:dnssec"
 import "elodin:fuzz/harness"
 
@@ -12,6 +13,10 @@ public key and a signature, so every key and signature encoder - RSA's exponent
 length, ECDSA's r and s, the Edwards keys - is reached with bytes of any length.
 What is asked of it is only that it accepts or refuses without reading or
 writing out of bounds; the verdict is not the point.
+
+The whole input is also read as a reply, and its authority section handed to
+`denial_shows_no_cut`, which reads an upstream's NSEC and NSEC3 records without
+verifying them first (issue #244).
 */
 @(export, link_name = "LLVMFuzzerTestOneInput")
 fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
@@ -32,6 +37,10 @@ fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
 	}
 	if n, err := dnssec.parse_nsec3(rest); err == .None {
 		_ = dnssec.bitmap_has(n.types, .NSEC3)
+	}
+
+	if m, err := dns.decode_message(data[:size]); err == .None && len(m.question) == 1 {
+		_, _ = dnssec.denial_shows_no_cut(m.authority, m.question[0].name, 100, context.allocator)
 	}
 
 	split := (int(data[1]) << 8 | int(data[2])) % (len(rest) + 1)
