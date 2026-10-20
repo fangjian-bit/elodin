@@ -24,12 +24,13 @@ fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
 	defer harness.unfeed(socket, peer)
 
 	/*
-	The reader's buffer comes from `context.temp_allocator`, whose arena never
-	frees a block it outgrows, so a line held across a read that grows the buffer -
-	the use after free `reader_line` warns about - reads memory that is still there
-	and ASan says nothing. On the heap the outgrown block is freed; the tracker is
-	how everything the exchange took is handed back afterwards. Scoped to the block
-	so `teardown` sees the thread's own temp allocator again.
+	The reader's buffer is on the heap, so a line held across a read that grows
+	it - the use after free `reader_line` warns about - reads a freed block and
+	ASan reports it. Scratch is tracked too: an arena never frees a block it
+	outgrows, so anything the exchange reads through it would hide the same
+	mistake. The tracker is how everything the exchange took is handed back
+	afterwards. Scoped to the block so `teardown` sees the thread's own
+	allocators again.
 	*/
 	{
 		heap := runtime.heap_allocator()
@@ -41,7 +42,8 @@ fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
 			}
 			mem.tracking_allocator_destroy(&scratch)
 		}
-		context.temp_allocator = mem.tracking_allocator(&scratch)
+		context.allocator = mem.tracking_allocator(&scratch)
+		context.temp_allocator = context.allocator
 
 		stream := upstream.Stream {
 			socket = socket,

@@ -386,12 +386,19 @@ http_exchange :: proc(
 		stream_write(stream, req.body, deadline, idle) or_return
 	}
 
+	/*
+	On the heap rather than in scratch. The buffer holds the whole response and
+	grows by doubling, and scratch keeps every block it outgrows until the
+	caller's `free_all`: a blocklist refresh held about three times every list's
+	size until its last list had loaded.
+	*/
 	r := Buf_Reader {
 		stream   = stream,
-		buf      = make([dynamic]u8, 0, 8192, context.temp_allocator),
+		buf      = make([dynamic]u8, 0, 8192),
 		deadline = deadline,
 		idle     = idle,
 	}
+	defer delete(r.buf)
 
 	/*
 	Interim (1xx) responses come first and are passed over: their fields are

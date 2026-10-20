@@ -1,6 +1,5 @@
 package server
 
-import "base:runtime"
 import "core:fmt"
 import "core:hash"
 import "core:os"
@@ -208,12 +207,6 @@ load_one_list :: proc(
 	allow_network: bool,
 	as_allowlist: bool,
 ) -> List_Load {
-	// A download is read into scratch, which otherwise lasts until the
-	// maintenance tick ends: every list's buffers would pile up on top of the
-	// two rule sets a refresh already holds. Nothing loaded outlives this call
-	// in scratch - the rules are in the sets' own arenas.
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-
 	// A disabled list is expected to add nothing, which is not a failure.
 	if !list.enabled {
 		return .Current

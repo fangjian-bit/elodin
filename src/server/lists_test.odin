@@ -520,14 +520,14 @@ test_a_given_name_like_a_default_keeps_its_copy :: proc(t: ^testing.T) {
 One_List :: struct {
 	listener: net.TCP_Socket,
 	body:     string,
-	// Requests to answer before returning; zero is one.
+	// Requests to answer before returning.
 	count:    int,
 }
 
 // Answer `count` requests on `listener` with `body` as a 200.
 @(private = "file")
 serve_one_list :: proc(one: ^One_List) {
-	for _ in 0 ..< max(one.count, 1) {
+	for _ in 0 ..< one.count {
 		client, _, err := net.accept_tcp(one.listener)
 		if err != nil {
 			return
@@ -568,7 +568,7 @@ test_a_fresh_cached_page_is_downloaded_over :: proc(t: ^testing.T) {
 		return
 	}
 	defer net.close(listener)
-	one := One_List{listener = listener, body = "0.0.0.0 fetched.example\n"}
+	one := One_List{listener, "0.0.0.0 fetched.example\n", 1}
 	server := thread.create_and_start_with_poly_data(&one, serve_one_list)
 	defer thread.destroy(server)
 	defer thread.join(server)
@@ -598,11 +598,11 @@ test_a_fresh_cached_page_is_downloaded_over :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_a_refresh_releases_each_downloads_scratch_before_the_next :: proc(t: ^testing.T) {
+test_a_refresh_leaves_no_download_in_scratch :: proc(t: ^testing.T) {
 	/*
-	A download is read into the scratch arena, which is cleared only when the
-	maintenance tick ends. Held for the whole refresh, every list's buffers
-	pile up on top of the old and new rule sets: the production lists' ~27 MB
+	Scratch is cleared only when the maintenance tick ends, so a download read
+	into it is held for the whole refresh, and every list's buffers pile up on
+	top of the old and new rule sets: the production lists' ~27 MB
 	of text peaked a refresh at 190 MB, where loading them from disk peaked at
 	41 MB.
 	*/
@@ -634,23 +634,24 @@ test_a_refresh_releases_each_downloads_scratch_before_the_next :: proc(t: ^testi
 	}
 	cfg.blocking.lists = lists[:]
 
-	// Capacity, not `total_used`: freeing a block back to a temp guard lowers
-	// only the capacity.
-	scratch := &(^runtime.Default_Temp_Allocator)(context.temp_allocator.data).arena
-	before := scratch.total_capacity
+	if !testing.expect(t, context.temp_allocator.data == &runtime.global_default_temp_allocator_data, "scratch is not the thread's own arena") {
+		return
+	}
+	scratch := &runtime.global_default_temp_allocator_data.arena
+	before := int(scratch.total_used)
 	loads: [LISTS]List_Load
 	block, allow := build_filter_sets(&cfg, true, loads[:])
 	defer filter.set_destroy(block)
 	defer filter.set_destroy(allow)
-	held := scratch.total_capacity - before
+	held := int(scratch.total_used) - before
 
 	for load in loads {
 		testing.expect_value(t, load, List_Load.Current)
 	}
 	testing.expectf(
 		t,
-		held < uint(len(one.body)),
-		"%d lists of %d bytes left %d bytes in the scratch arena; each download's should go before the next",
+		held < len(one.body),
+		"%d lists of %d bytes left %d bytes in the scratch arena; a download should not outlive its exchange there",
 		LISTS,
 		len(one.body),
 		held,
@@ -670,7 +671,7 @@ test_an_empty_download_with_no_copy_does_not_hold_the_others_back :: proc(t: ^te
 		return
 	}
 	defer net.close(listener)
-	one := One_List{listener = listener, body = "# emptied\n"}
+	one := One_List{listener, "# emptied\n", 1}
 	server := thread.create_and_start_with_poly_data(&one, serve_one_list)
 	defer thread.destroy(server)
 	defer thread.join(server)
