@@ -2626,7 +2626,7 @@ resolve_query :: proc(
 	validated - CD, or validation off - is held to it only here.
 	*/
 	// `signatures_lapse` reads no bound at all for a message that carries none.
-	signed_left, _ := dns.signatures_lapse(resp, u32(time.time_to_unix(time.now())))
+	signed_left, signed := dns.signatures_lapse(resp, u32(time.time_to_unix(time.now())))
 	dns.cap_ttls(resp, min(cache.ttl_ceiling(live(s).answers), signed_left))
 
 	/*
@@ -2661,12 +2661,18 @@ resolve_query :: proc(
 
 	A private address is the upstream's answer, refused rather than stored, so it
 	replaces the expired copy as an answer `cache.put` refuses does (issue
-	#419). An answer the guard could not read keeps it, and so does a private
-	address under an NXDOMAIN, which contradicts itself as `put` reads it.
+	#419). What `put` would not read as an answer keeps it: one the guard could
+	not read, a private address under an NXDOMAIN, which contradicts itself, a
+	truncated reply (RFC 2181 section 9) and one whose signatures have lapsed
+	(RFC 4034 section 3.1.5).
 	*/
 	if checking_rebind {
 		if out, detail, blocked := rebind_refusal(s, msg, q, decoded, limit, allocator); blocked {
-			if detail == "rebind" && decoded.full && dns.rcode_of(decoded.msg) == .No_Error {
+			if detail == "rebind" &&
+			   decoded.full &&
+			   !decoded.msg.flags.tc &&
+			   !(signed && signed_left == 0) &&
+			   dns.rcode_of(decoded.msg) == .No_Error {
 				cache.forget(live(s).answers, key, stale_hit.serial)
 			}
 			log_query(s, client, proto, q, .Blocked, detail, started)

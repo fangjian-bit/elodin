@@ -762,7 +762,8 @@ too small; this is an entry that turned out to be unusable, which is a different
 question and a rarer one.
 */
 forget :: proc(c: ^Cache, key: string, serial: u64) {
-	if c == nil {
+	// No entry is numbered zero, so there is nothing to look for or lock over.
+	if c == nil || serial == 0 {
 		return
 	}
 	sync.mutex_lock(&c.mu)

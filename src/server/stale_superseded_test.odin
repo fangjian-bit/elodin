@@ -76,11 +76,25 @@ superseded_junk :: proc(wire: []u8) -> []u8 {
 	return junk[:]
 }
 
+// An RRSIG over the A record whose expiration passed an hour ago.
+@(private = "file")
+superseded_lapsed_rrsig :: proc() -> dns.Record {
+	expiration := u32(time.time_to_unix(time.now())) - 3600
+	data := make([]u8, 23, context.temp_allocator)
+	data[0], data[1], data[2], data[3] = 0, 1, 8, 2 // covers A, RSASHA256, 2 labels
+	dns.write_ttl_at(data, 4, 300)
+	dns.write_ttl_at(data, 8, expiration)
+	dns.write_ttl_at(data, 12, expiration - 30 * 86400)
+	// Key tag, the root as signer, and a signature nothing checks.
+	copy(data[16:], []u8{0x12, 0x34, 0, 0xde, 0xad, 0xbe, 0xef})
+	return dns.Record{name = STALE_NAME, type = .RRSIG, class = .IN, ttl = 300, data = dns.Rdata_Raw{data = data}}
+}
+
 @(private = "file")
 superseded_cases :: proc() -> []Superseded_Case {
 	tracker :: "tracker.evil.example."
 	chain := dns.Record{name = STALE_NAME, type = .CNAME, class = .IN, data = dns.Rdata_Name{name = tracker}}
-	cases := make([]Superseded_Case, 11, context.temp_allocator)
+	cases := make([]Superseded_Case, 12, context.temp_allocator)
 	cases[0] = {"a TTL-0 answer", superseded_reply(.No_Error, superseded_a(STALE_NAME, LIVE_ADDR, 0)), false, "", false}
 	cases[1] = {"a NODATA without a SOA", superseded_reply(.No_Error), false, "", false}
 	cases[2] = {"an NXDOMAIN without a SOA", superseded_reply(.NX_Domain), false, "", false}
@@ -101,6 +115,14 @@ superseded_cases :: proc() -> []Superseded_Case {
 	// Neither is read in full, which is no answer to supersede anything with.
 	cases[9] = {"a TTL-0 answer with junk after it", superseded_junk(superseded_reply(.No_Error, superseded_a(STALE_NAME, LIVE_ADDR, 0))), true, "", false}
 	cases[10] = {"a private address with junk after it", superseded_junk(superseded_reply(.No_Error, superseded_a(STALE_NAME, {10, 0, 0, 1}, 300))), true, "", true}
+	// RFC 4034 section 3.1.5: not to be used, so no answer either.
+	cases[11] = {
+		"a private address whose signature lapsed",
+		superseded_reply(.No_Error, superseded_a(STALE_NAME, {10, 0, 0, 1}, 300), superseded_lapsed_rrsig()),
+		true,
+		"",
+		true,
+	}
 	return cases
 }
 
@@ -250,16 +272,26 @@ serve_one_truncated :: proc(x: ^Tcp_Superseded) {
 	_, _ = net.send_tcp(conn, out[:2 + len(x.reply)])
 }
 
+
 /*
 A truncated reply is not the answer, so the expired copy stays.
 
 RFC 2181 section 9 has a truncated response retried rather than used, and
 `cache.put` turns it away; a server that sets TC over TCP has not answered the
 question either. Over TCP because a TC over UDP is retried there and never
-reaches the store.
+reaches the store. Both roads a reply takes to drop the copy: the store, and
+the rebinding guard, which refuses a private address before the store is
+reached.
 */
 @(test)
 test_a_truncated_reply_keeps_the_stale_copy :: proc(t: ^testing.T) {
+	run_truncated(t, superseded_reply(.No_Error, superseded_a(STALE_NAME, LIVE_ADDR, 0)), false)
+	run_truncated(t, superseded_reply(.No_Error, superseded_a(STALE_NAME, {10, 0, 0, 1}, 300)), true)
+	free_all(context.temp_allocator)
+}
+
+@(private = "file")
+run_truncated :: proc(t: ^testing.T, reply: []u8, rebind: bool) {
 	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
 	if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
 		return
@@ -277,6 +309,7 @@ test_a_truncated_reply_keeps_the_stale_copy :: proc(t: ^testing.T) {
 	cfg.upstream.strategy = .Failover
 	cfg.upstream.attempts = 1
 	cfg.upstream.timeout = 5 * time.Second
+	cfg.rebind.enabled = rebind
 	servers := blackhole_servers(bound.port)
 	servers[0].kind = .TCP
 	cfg.upstream.servers = servers
@@ -292,21 +325,22 @@ test_a_truncated_reply_keeps_the_stale_copy :: proc(t: ^testing.T) {
 
 	x := Tcp_Superseded {
 		listener = listener,
-		reply    = superseded_reply(.No_Error, superseded_a(STALE_NAME, LIVE_ADDR, 0)),
+		reply    = reply,
 	}
 	mock := thread.create_and_start_with_poly_data(&x, serve_one_truncated)
-	out, _, ok := handle_query(&s, stale_query(true), .UDP, "127.0.0.1:5555", context.temp_allocator)
+	out, outcome, ok := handle_query(&s, stale_query(true), .UDP, "127.0.0.1:5555", context.temp_allocator)
 	thread.join(mock)
 	thread.destroy(mock)
-	testing.expect(t, x.got, "the upstream was never asked")
-	// The premise: the TC reply is what reached the client, so it reached the store.
-	if testing.expect(t, ok && len(out) >= dns.HEADER_SIZE, "nothing came back") {
+	testing.expectf(t, x.got, "rebind=%v: the upstream was never asked", rebind)
+	// The premise: the TC reply reached the guard, or the client and so the store.
+	if rebind {
+		testing.expectf(t, outcome == .Blocked, "the truncated private address was not refused (%v)", outcome)
+	} else if testing.expect(t, ok && len(out) >= dns.HEADER_SIZE, "nothing came back") {
 		testing.expect(t, out[2] & 0x02 != 0, "the reply that came back was not truncated")
 	}
 
 	kb: [cache.KEY_MAX]u8
 	key := cache.make_key(kb[:], STALE_NAME, .A, .IN, false, false)
 	_, hit, found := cache.get(answers, key, context.temp_allocator)
-	testing.expect(t, found && hit.stale, "a truncated reply dropped the expired copy")
-	free_all(context.temp_allocator)
+	testing.expectf(t, found && hit.stale, "rebind=%v: a truncated reply dropped the expired copy", rebind)
 }
