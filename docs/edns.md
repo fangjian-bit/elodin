@@ -7,7 +7,7 @@ cookies:
   enabled: true          # answer clients that send a cookie
   require: false         # demand a valid one from UDP clients that send any
   upstream: true         # present a cookie of our own to plain upstreams
-  secret: ""             # 32 hex characters; empty draws a random one at startup
+  secret: ""             # 32 hex characters; empty draws a random one at startup, kept across reloads
 ```
 
 Cookies (RFC 7873, RFC 9018) add 64 bits a forger off the path cannot see to the

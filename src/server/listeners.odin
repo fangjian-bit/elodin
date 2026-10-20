@@ -129,15 +129,16 @@ report_bind_failure :: proc(setting: string, address: string, port: int, err: ne
 }
 
 start_listeners :: proc(s: ^Server, l: ^Listeners) -> bool {
-	conn_manager_init(&l.conns, s.cfg.server.max_connections, s.cfg.server.max_connections_per_prefix)
+	cfg := startup_config(s)
+	conn_manager_init(&l.conns, cfg.server.max_connections, cfg.server.max_connections_per_prefix)
 	// Said only where it applies: with every stream listener off there are no
 	// client connections for the table to bound, and the line would be about a
 	// limit nothing in this run can reach.
-	streams := config.stream_listeners_enabled(s.cfg.listeners)
+	streams := config.stream_listeners_enabled(cfg.listeners)
 	if streams {
 		logx.infof(
 			"%s",
-			connection_limits_line(s.cfg.server.max_connections, s.cfg.server.max_connections_per_prefix),
+			connection_limits_line(cfg.server.max_connections, cfg.server.max_connections_per_prefix),
 		)
 	}
 	/*
@@ -155,37 +156,37 @@ start_listeners :: proc(s: ^Server, l: ^Listeners) -> bool {
 	Startup only - `--check` reads a different process's limit. See
 	`descriptor_limit_line`.
 	*/
-	if streams || s.cfg.metrics.enabled {
+	if streams || cfg.metrics.enabled {
 		if line, short := descriptor_limit_line(
 			descriptor_limit(),
 			Descriptor_Demand {
-				max_connections = s.cfg.server.max_connections if streams else 0,
-				pooled_upstream = config.pooled_upstream_connections(s.cfg.upstream),
-				workers = s.cfg.server.workers,
-				upstream_workers = s.cfg.server.upstream_workers,
-				udp_readers = s.cfg.listeners.udp.readers if s.cfg.listeners.udp.enabled else 0,
+				max_connections = cfg.server.max_connections if streams else 0,
+				pooled_upstream = config.pooled_upstream_connections(cfg.upstream),
+				workers = cfg.server.workers,
+				upstream_workers = cfg.server.upstream_workers,
+				udp_readers = cfg.listeners.udp.readers if cfg.listeners.udp.enabled else 0,
 			},
 		); short {
 			logx.warnf("%s", line)
 		}
 	}
 
-	if s.cfg.listeners.udp.enabled {
+	if cfg.listeners.udp.enabled {
 		if !start_udp(s, l) {
 			return false
 		}
 	}
-	if s.cfg.listeners.tcp.enabled {
+	if cfg.listeners.tcp.enabled {
 		if !start_tcp(s, l) {
 			return false
 		}
 	}
-	if s.cfg.listeners.dot.enabled {
+	if cfg.listeners.dot.enabled {
 		if !start_dot(s, l) {
 			return false
 		}
 	}
-	if s.cfg.listeners.doh.enabled {
+	if cfg.listeners.doh.enabled {
 		if !start_doh(s, l) {
 			return false
 		}
@@ -193,7 +194,7 @@ start_listeners :: proc(s: ^Server, l: ^Listeners) -> bool {
 	// Last, so that a port clash on an endpoint nobody queries cannot stop the
 	// ones they do from coming up first — and still fatal, because an operator
 	// who turned it on is about to be told the resolver is unmonitored.
-	if s.cfg.metrics.enabled {
+	if cfg.metrics.enabled {
 		if !start_metrics(s, l) {
 			return false
 		}
@@ -335,7 +336,7 @@ Udp_Job :: struct {
 
 @(private)
 start_udp :: proc(s: ^Server, l: ^Listeners) -> bool {
-	cfg := s.cfg.listeners.udp
+	cfg := startup_config(s).listeners.udp
 	endpoint, ok := parse_bind(cfg.address, cfg.port)
 	if !ok {
 		logx.errorf("listeners.udp: %q is not a valid bind address", cfg.address)
@@ -658,6 +659,12 @@ udp_loop :: proc(data: rawptr) {
 			continue
 		}
 
+		// The checks below read the configuration, so the generation is pinned
+		// for this datagram only and let go before the next read blocks: a reader
+		// holding one while it waited on a quiet socket would keep a reload from
+		// ever releasing it. See `generation.odin`.
+		pin_scope(ctx.server)
+
 		/*
 		Before the message is parsed, before the limiter and before the queue:
 		a source this server does not answer should cost a prefix compare and
@@ -676,7 +683,7 @@ udp_loop :: proc(data: rawptr) {
 		it dropped. Nothing is sent, so there is nothing a response budget is
 		bounding.
 		*/
-		if !config.source_allowed(ctx.server.cfg.server.allow_from, client.address) {
+		if !config.source_allowed(live(ctx.server).cfg.server.allow_from, client.address) {
 			sync.atomic_add(&ctx.server.stats.refused, 1)
 			report_refusal(client, .UDP)
 			continue
@@ -691,7 +698,7 @@ udp_loop :: proc(data: rawptr) {
 		reply that never gets built is charged for anyway, and a query that turns
 		out to be answerable from cache costs the same as one that is not.
 		*/
-		switch rate_check(ctx.server.limiter, client, time.tick_now()) {
+		switch rate_check(live(ctx.server).limiter, client, time.tick_now()) {
 		case .Allow:
 		case .Truncate:
 			if tc, built := dns.truncated_response(buf[:n], context.temp_allocator); built {
@@ -713,7 +720,7 @@ udp_loop :: proc(data: rawptr) {
 		this loop is what a flood arrives at, and the copy of the datagram the
 		job needs is worth not making for a query about to be shed.
 		*/
-		limit := ctx.server.cfg.server.max_pending
+		limit := live(ctx.server).cfg.server.max_pending
 		if limit > 0 && pool.pending(ctx.server.handler_pool) >= limit {
 			sync.atomic_add(&ctx.server.stats.dropped, 1)
 			report_shed(client, limit)
@@ -1232,6 +1239,8 @@ udp_job :: proc(data: rawptr) {
 	}
 
 	s := job.ctx.server
+	// Across the answer and the charge for it, so both are this generation's.
+	pin_scope(s)
 	client := net.endpoint_to_string(job.client, context.temp_allocator)
 	response, _, ok := handle_query(s, job.data, .UDP, client, context.temp_allocator)
 	if !ok || len(response) == 0 {
@@ -1253,7 +1262,7 @@ udp_job :: proc(data: rawptr) {
 	configuration that does not set one resolves to: no answer exceeds it, so
 	this is a compare and a return.
 	*/
-	rate_charge_response(s.limiter, job.client, len(response), time.tick_now())
+	rate_charge_response(live(s).limiter, job.client, len(response), time.tick_now())
 	_, _ = net.send_udp(job.socket, response, job.client)
 }
 
@@ -1324,7 +1333,7 @@ start_stream_listener :: proc(
 
 @(private)
 start_tcp :: proc(s: ^Server, l: ^Listeners) -> bool {
-	cfg := s.cfg.listeners.tcp
+	cfg := startup_config(s).listeners.tcp
 	if !start_stream_listener(s, l, cfg, .TCP, &l.tcp_socket, &l.tcp_open) {
 		return false
 	}
@@ -1343,7 +1352,7 @@ DOH_ALPN := []string{"h2", "http/1.1"}
 
 @(private)
 start_dot :: proc(s: ^Server, l: ^Listeners) -> bool {
-	cfg := s.cfg.listeners.dot
+	cfg := startup_config(s).listeners.dot
 	ctx, err := tlsx.server_context(cfg.cert_file, cfg.key_file, DOT_ALPN)
 	if err != .None {
 		logx.errorf("listeners.dot: %s", tlsx.describe_error(err, context.temp_allocator))
@@ -1359,7 +1368,7 @@ start_dot :: proc(s: ^Server, l: ^Listeners) -> bool {
 
 @(private)
 start_doh :: proc(s: ^Server, l: ^Listeners) -> bool {
-	cfg := s.cfg.listeners.doh
+	cfg := startup_config(s).listeners.doh
 	ctx, err := tlsx.server_context(cfg.cert_file, cfg.key_file, DOH_ALPN)
 	if err != .None {
 		logx.errorf("listeners.doh: %s", tlsx.describe_error(err, context.temp_allocator))
@@ -1404,12 +1413,12 @@ connection threads read them for every new connection, hence `l.tls_mu`.
 reload_tls :: proc(s: ^Server, l: ^Listeners) -> bool {
 	ok := true
 	if l.dot_open {
-		if !reload_tls_ctx(l, &l.dot_ctx, s.cfg.listeners.dot, DOT_ALPN, "dot", nil) {
+		if !reload_tls_ctx(l, &l.dot_ctx, startup_config(s).listeners.dot, DOT_ALPN, "dot", nil) {
 			ok = false
 		}
 	}
 	if l.doh_open {
-		if !reload_tls_ctx(l, &l.doh_ctx, s.cfg.listeners.doh, DOH_ALPN, "doh", s.profiles) {
+		if !reload_tls_ctx(l, &l.doh_ctx, startup_config(s).listeners.doh, DOH_ALPN, "doh", s.profiles) {
 			ok = false
 		}
 	}
@@ -1582,7 +1591,10 @@ accept_loop :: proc(data: rawptr) {
 		list sees the connection go rather than a reason, which is why the log
 		has to carry one - see `report_refusal`.
 		*/
-		if !config.source_allowed(ctx.server.cfg.server.allow_from, client.address) {
+		// For the rest of this accept, which no longer blocks on anything a
+		// client controls; let go before the next accept waits.
+		pin_scope(ctx.server)
+		if !config.source_allowed(live(ctx.server).cfg.server.allow_from, client.address) {
 			sync.atomic_add(&ctx.server.stats.refused, 1)
 			report_refusal(client, ctx.proto)
 			net.close(client_socket)
@@ -1615,14 +1627,14 @@ accept_loop :: proc(data: rawptr) {
 		writing a reason takes a connection, and a connection is what is being
 		refused.
 		*/
-		if !conn_rate_check(ctx.server.limiter, client, time.tick_now()) {
+		if !conn_rate_check(live(ctx.server).limiter, client, time.tick_now()) {
 			// The figure this client's own network is held to, which is the
 			// top-level one only where no override names it - see
 			// `prefix_response_budget`.
 			report_conn_rate_limit(
 				client,
 				ctx.proto,
-				prefix_response_budget(ctx.server.limiter, client.address),
+				prefix_response_budget(live(ctx.server).limiter, client.address),
 			)
 			net.close(client_socket)
 			continue
@@ -1696,7 +1708,7 @@ stream_job :: proc(data: rawptr) {
 	}
 
 	s := job.ctx.server
-	timeout := s.cfg.server.client_timeout
+	timeout := client_timeout(s)
 	_ = net.set_option(job.socket, .Receive_Timeout, timeout)
 	_ = net.set_option(job.socket, .Send_Timeout, timeout)
 	_ = net.set_option(job.socket, .TCP_Nodelay, true)
@@ -1772,7 +1784,7 @@ serve_dns_stream :: proc(s: ^Server, conn: Conn, proto: Protocol, client: string
 		`Read_Budget`.
 		*/
 		budget := Read_Budget {
-			idle = s.cfg.server.client_timeout,
+			idle = client_timeout(s),
 		}
 
 		length_buf: [2]u8
@@ -1839,7 +1851,10 @@ serve_dns_stream :: proc(s: ^Server, conn: Conn, proto: Protocol, client: string
 		buy nothing and cost up to `STREAM_LINGER_TIMEOUT` of one of
 		`max_connections`, which is the slot this close exists to hand back.
 		*/
-		if !stream_rate_check(s.limiter, conn.peer, time.tick_now()) {
+		if !stream_source_allowed(s, conn.peer, proto) {
+			return
+		}
+		if !stream_admits(s, conn.peer) {
 			report_rate_limited(client, proto, true)
 			if answered {
 				stream_linger(conn)

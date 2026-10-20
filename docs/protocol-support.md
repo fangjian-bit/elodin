@@ -42,4 +42,4 @@ RFC 6761 and RFC 7686 answered here instead of forwarded.
 - elodin does not advertise its own DoT/DoH over DDR: `resolver.arpa` is answered NODATA ([resolver.arpa](dnssec.md#resolverarpa)). Point clients at the encrypted listeners by configuration, the [Apple profile](doh.md#apple-devices-ios-ipados-macos), or a `rewrites` rule.
 - EDNS Client Subnet is not implemented: a client's option is dropped upstream and cannot be forwarded, since the cache is not keyed per network (RFC 7871 section 7.3).
 - No per-client rules, query log database, or web/API surface; statistics go to the [log](logging.md#stats) and [metrics](metrics.md#metrics).
-- Configuration is read once at startup; only `SIGHUP` reloads, and only the DoT/DoH certificates ([signals](install.md#signals)).
+- `SIGHUP` reloads the configuration and the certificates, except the listeners, the metrics endpoint, the pool and connection-table sizes, `server.user`/`group` and `blocking.cache_dir`, which need a restart ([signals](install.md#signals)).

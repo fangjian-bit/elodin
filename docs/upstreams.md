@@ -239,7 +239,7 @@ upstream:
 `domains` matches on label boundaries and ignores case: `corp.example` covers
 itself and everything under it, not `notcorp.example`. The longest match wins.
 
-The routing table is built at startup, so restart after changing a route.
+A [reload](install.md#signals) rebuilds the routing table along with the upstreams.
 `--check` and the startup log print one line per route that gives something up,
 from the two points below.
 

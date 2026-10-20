@@ -184,7 +184,7 @@ test_doh_request_survives_a_buffer_that_grows :: proc(t: ^testing.T) {
 	defer context.temp_allocator = saved
 
 	r := Http_Reader {
-		conn = Conn{socket = accepted},
+		conn = Conn{socket = accepted, peer = net.Endpoint{address = net.IP4_Loopback, port = 1}},
 		buf  = make([dynamic]u8, 0, 4096, context.temp_allocator),
 	}
 	defer delete(r.buf)
@@ -268,7 +268,7 @@ test_doh_answers_a_pipelined_pair :: proc(t: ^testing.T) {
 	s := Server {
 		cfg = &cfg,
 	}
-	serve_doh(&s, Conn{socket = accepted}, "test")
+	serve_doh(&s, Conn{socket = accepted, peer = net.Endpoint{address = net.IP4_Loopback, port = 1}}, "test")
 
 	_ = net.set_option(client, .Receive_Timeout, 500 * time.Millisecond)
 	answers := strings.builder_make(context.temp_allocator)
@@ -343,7 +343,7 @@ test_doh_reader_gives_back_an_oversized_buffer :: proc(t: ^testing.T) {
 	_ = net.set_option(accepted, .Receive_Timeout, 3 * time.Second)
 
 	r := Http_Reader {
-		conn = Conn{socket = accepted},
+		conn = Conn{socket = accepted, peer = net.Endpoint{address = net.IP4_Loopback, port = 1}},
 		buf  = make([dynamic]u8, 0, HTTP_BUF_SIZE),
 	}
 	defer delete(r.buf)
@@ -421,7 +421,7 @@ test_doh_answers_a_request_that_arrives_split :: proc(t: ^testing.T) {
 	}
 	session := Doh_Session {
 		server = &s,
-		conn   = Conn{socket = accepted},
+		conn   = Conn{socket = accepted, peer = net.Endpoint{address = net.IP4_Loopback, port = 1}},
 	}
 	handler := thread.create_and_start_with_poly_data(&session, run_serve_doh)
 	defer {
@@ -898,7 +898,7 @@ read_request_over_loopback :: proc(
 	_ = net.set_option(accepted, .Receive_Timeout, 3 * time.Second)
 
 	r := Http_Reader {
-		conn = Conn{socket = accepted},
+		conn = Conn{socket = accepted, peer = net.Endpoint{address = net.IP4_Loopback, port = 1}},
 		buf  = make([dynamic]u8, 0, 4096, context.temp_allocator),
 	}
 	req, status, parsed = read_http_request(&r)
@@ -1688,7 +1688,7 @@ test_doh_reader_gives_up_on_a_drip_fed_request :: proc(t: ^testing.T) {
 	_ = net.set_option(accepted, .Receive_Timeout, 5 * time.Second)
 
 	r := Http_Reader {
-		conn   = Conn{socket = accepted},
+		conn   = Conn{socket = accepted, peer = net.Endpoint{address = net.IP4_Loopback, port = 1}},
 		buf    = make([dynamic]u8, 0, HTTP_BUF_SIZE),
 		budget = Read_Budget{idle = 400 * time.Millisecond},
 	}
@@ -1786,7 +1786,7 @@ test_doh_lets_go_of_a_connection_that_asks_nothing :: proc(t: ^testing.T) {
 		cfg = &cfg,
 	}
 	start := time.tick_now()
-	serve_doh(&s, Conn{socket = accepted}, "test")
+	serve_doh(&s, Conn{socket = accepted, peer = net.Endpoint{address = net.IP4_Loopback, port = 1}}, "test")
 	held := time.tick_since(start)
 
 	sync.atomic_store(&peer.stop, true)
@@ -1894,11 +1894,12 @@ test_doh_a_slow_answer_does_not_count_against_the_connection :: proc(t: ^testing
 	// What ends `serve_doh` once both are answered.
 	net.shutdown(client, .Send)
 
-	accepted, _, aerr := net.accept_tcp(listener)
+	accepted, peer, aerr := net.accept_tcp(listener)
 	if !testing.expectf(t, aerr == nil, "nothing connected: %v", aerr) {
 		return
 	}
-	serve_doh(&s, Conn{socket = accepted}, "test")
+	// With its peer, which `server.allow_from` is read against per request.
+	serve_doh(&s, Conn{socket = accepted, peer = peer}, "test")
 	// Closed now so the read below ends at EOF, not at its timeout.
 	net.close(accepted)
 
@@ -2161,4 +2162,64 @@ test_doh_request_connection_is_a_list :: proc(t: ^testing.T) {
 		testing.expectf(t, req.keep_alive == c.keep_alive, "%q: keep_alive %v, want %v", c.connection, req.keep_alive, c.keep_alive)
 		free_all(context.temp_allocator)
 	}
+}
+
+@(test)
+test_doh_a_held_connection_outside_the_allow_list_gets_nothing_but_403 :: proc(t: ^testing.T) {
+	/*
+	A reload can take a held connection's network out of `server.allow_from`.
+	The accept loop gives such a source nothing at all, so neither does the
+	connection: a request for a path that is not the endpoint is refused 403,
+	not answered 404 - and the profile is not handed out either.
+	*/
+	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if lerr != nil {
+		testing.expectf(t, false, "cannot listen: %v", lerr)
+		return
+	}
+	defer net.close(listener)
+	bound, berr := net.bound_endpoint(listener)
+	if berr != nil {
+		testing.expectf(t, false, "cannot read the bound port: %v", berr)
+		return
+	}
+	client, derr := net.dial_tcp_from_endpoint(bound)
+	if derr != nil {
+		testing.expectf(t, false, "cannot dial the listener: %v", derr)
+		return
+	}
+	defer net.close(client)
+	if !send_all(t, client, "GET /not-the-endpoint HTTP/1.1\r\nHost: dns.example\r\n\r\n") {
+		return
+	}
+	net.shutdown(client, .Send)
+	accepted, _, aerr := net.accept_tcp(listener)
+	if aerr != nil {
+		testing.expectf(t, false, "nothing connected: %v", aerr)
+		return
+	}
+	defer net.close(accepted)
+	_ = net.set_option(accepted, .Receive_Timeout, 500 * time.Millisecond)
+
+	cfg := config.default_config()
+	cfg.listeners.doh.path = "/dns-query"
+	s := Server {
+		cfg = &cfg,
+	}
+	// TEST-NET-3: in no range the default allow list names.
+	serve_doh(&s, Conn{socket = accepted, peer = net.Endpoint{address = net.IP4_Address{203, 0, 113, 9}, port = 1}}, "test")
+
+	_ = net.set_option(client, .Receive_Timeout, 500 * time.Millisecond)
+	answer := strings.builder_make(context.temp_allocator)
+	for {
+		chunk: [4096]u8
+		n, rerr := net.recv_tcp(client, chunk[:])
+		if rerr != nil || n <= 0 {
+			break
+		}
+		strings.write_bytes(&answer, chunk[:n])
+	}
+	head := strings.to_string(answer)
+	testing.expect(t, strings.contains(head, "HTTP/1.1 403"), "a source outside the allow list was answered on another path")
+	testing.expect(t, !strings.contains(head, "HTTP/1.1 404"), "a source outside the allow list was told what is not there")
 }

@@ -126,7 +126,7 @@ attach_keepalive :: proc(
 	if _, asked := dns.find_edns_option(query, .TCP_Keepalive); !asked {
 		return wire
 	}
-	units, statable := keepalive_units(s.cfg.server.client_timeout)
+	units, statable := keepalive_units(live(s).cfg.server.client_timeout)
 	if !statable {
 		return wire
 	}

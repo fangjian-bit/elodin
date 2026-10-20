@@ -24,6 +24,15 @@ Group :: struct {
 	cursor:     u64,
 	race_pool:  ^pool.Pool,
 	allocator:  mem.Allocator,
+	/*
+	Race workers still running against this group's servers.
+
+	A race worker outlives the caller that started it - see `Race_State` - so a
+	group the caller is done with is not yet a group nothing is using. A
+	configuration reload that replaces the group reads this before destroying
+	it; see `busy`.
+	*/
+	racing:     int,
 }
 
 make_group :: proc(
@@ -53,10 +62,24 @@ make_group :: proc(
 		append(&servers, u)
 	}
 	if len(servers) == 0 {
+		// Released here: a reload that cannot build a group keeps running, so
+		// what this call took would otherwise be lost on every such SIGHUP.
+		delete(servers)
+		free(g, allocator)
 		return nil, .Not_Resolved
 	}
 	g.servers = servers[:]
 	return g, .None
+}
+
+/*
+Whether a race worker is still using one of this group's servers.
+
+Nothing new can start once every caller is done with the group, so a group
+that reads idle here after that stays idle and is safe to destroy.
+*/
+busy :: proc(g: ^Group) -> bool {
+	return g != nil && sync.atomic_load(&g.racing) > 0
 }
 
 destroy_group :: proc(g: ^Group) {
@@ -906,6 +929,8 @@ Race_State :: struct {
 	query:       []u8,
 	timeout:     time.Duration,
 	jobs:        []Race_Job,
+	// Whose `racing` each worker is counted in until it is done.
+	group:       ^Group,
 }
 
 @(private)
@@ -965,7 +990,11 @@ race_worker :: proc(data: rawptr) {
 	if won || last_one {
 		sync.sema_post(&st.sema)
 	}
+	// Last, after the worker's final touch of `job.upstream`: a reload may
+	// destroy the group the moment this reaches zero.
+	group := st.group
 	race_state_release(st)
+	sync.atomic_sub(&group.racing, 1)
 }
 
 @(private)
@@ -1009,6 +1038,7 @@ resolve_race :: proc(
 	st.query = make([]u8, len(query))
 	copy(st.query, query)
 	st.jobs = make([]Race_Job, len(candidates))
+	st.group = g
 	defer race_state_release(st)
 
 	submitted := 0
@@ -1021,6 +1051,7 @@ resolve_race :: proc(
 		st.refs += 1
 		st.outstanding += 1
 		sync.mutex_unlock(&st.mu)
+		sync.atomic_add(&g.racing, 1)
 
 		if !pool.submit(g.race_pool, race_worker, &st.jobs[i]) {
 			// The pool is shutting down; undo this leg's bookkeeping.
@@ -1028,6 +1059,7 @@ resolve_race :: proc(
 			st.refs -= 1
 			st.outstanding -= 1
 			sync.mutex_unlock(&st.mu)
+			sync.atomic_sub(&g.racing, 1)
 			continue
 		}
 		submitted += 1
@@ -1060,10 +1092,11 @@ resolve_race :: proc(
 	return out, st.winner, .None
 }
 
-// Close idle connections that have been sitting around too long.
-groom :: proc(g: ^Group) -> (closed: int) {
+// Close idle connections that have been sitting around too long, or every idle
+// one when `all` - for a group a reload has replaced, which nothing new will ask.
+groom :: proc(g: ^Group, all := false) -> (closed: int) {
 	for u in g.servers {
-		closed += close_idle(u)
+		closed += close_idle(u, all)
 	}
 	return
 }

@@ -1,6 +1,7 @@
 package config
 
 import "core:fmt"
+import "core:mem/virtual"
 import "core:net"
 import "core:strings"
 import "core:testing"
@@ -1767,4 +1768,21 @@ test_an_address_or_port_out_of_shape_is_a_config_error :: proc(t: ^testing.T) {
 		testing.expectf(t, berr == nil && cfg.upstream.servers[0].address != "[2606:4700::1111]", "%q: %v", src, berr)
 	}
 	free_all(context.temp_allocator)
+}
+
+@(test)
+test_the_certificate_check_can_be_left_to_the_listener :: proc(t: ^testing.T) {
+	// `tls_files` off is what a SIGHUP reload loads with; the default still
+	// refuses a certificate that is not there, which is what `--check` and
+	// startup want.
+	arena: virtual.Arena
+	testing.expect(t, virtual.arena_init_growing(&arena) == nil)
+	defer virtual.arena_destroy(&arena)
+	TEXT :: "upstream: { servers: [\"127.0.0.1\"] }\nlisteners: { dot: { enabled: true, cert_file: /nonexistent/c.pem, key_file: /nonexistent/k.pem } }\n"
+	_, strict := load_string(TEXT, virtual.arena_allocator(&arena))
+	_, has := strict.?
+	testing.expect(t, has, "a missing certificate was accepted by default")
+	_, lenient := load_string(TEXT, virtual.arena_allocator(&arena), tls_files = false)
+	e, refused := lenient.?
+	testing.expectf(t, !refused, "refused with the certificate check off: %v", e.messages)
 }

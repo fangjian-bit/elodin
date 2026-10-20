@@ -67,6 +67,15 @@ temp_arena :: proc() -> ^runtime.Arena {
 	return &data.arena
 }
 
+// A group with no usable server is refused with nothing left allocated: a reload
+// that cannot build one keeps running, so a leak here is one per SIGHUP.
+@(test)
+test_a_group_with_no_usable_server_releases_what_it_took :: proc(t: ^testing.T) {
+	g, err := make_group(config.Upstream_Config{}, nil)
+	testing.expect(t, g == nil, "a group with no servers was built")
+	testing.expect_value(t, err, Error.Not_Resolved)
+}
+
 @(test)
 test_race_worker_releases_its_scratch :: proc(t: ^testing.T) {
 	arena := temp_arena()
@@ -134,6 +143,8 @@ test_race_worker_releases_its_scratch :: proc(t: ^testing.T) {
 	st.query = make([]u8, len(wire))
 	copy(st.query, wire)
 	st.jobs = make([]Race_Job, LEGS)
+	group := Group{}
+	st.group = &group
 
 	// `wire` lives in the arena the legs are about to reset, and it has been
 	// copied into `st.query` by now.
@@ -149,6 +160,7 @@ test_race_worker_releases_its_scratch :: proc(t: ^testing.T) {
 		st.refs += 1
 		st.outstanding += 1
 		sync.mutex_unlock(&st.mu)
+		sync.atomic_add(&group.racing, 1)
 
 		race_worker(&st.jobs[i])
 
@@ -173,6 +185,9 @@ test_race_worker_releases_its_scratch :: proc(t: ^testing.T) {
 	// Legs that allocate nothing would satisfy the check above without proving
 	// anything, so confirm the responder was actually reached.
 	testing.expect(t, answered > 0, "no leg ever got an answer, so nothing was measured")
+	// And each leg let go of the group as it finished, which is what a reload
+	// waits on before releasing one; see `busy`.
+	testing.expect(t, !busy(&group), "a finished race worker still counts against its group")
 	race_state_release(st)
 }
 
@@ -836,6 +851,18 @@ test_bootstrap_refresh_does_not_orphan_its_key :: proc(t: ^testing.T) {
 		len(track.allocation_map) - settled,
 	)
 	testing.expect_value(t, len(bootstrap_cache.entries), 1)
+
+	// A reload that replaces the bootstrap servers forgets what the old ones
+	// said: the entry is expired, not served, and asking again refreshes it in
+	// place. Checked here because this test owns the package-global cache.
+	bootstrap_forget()
+	sync.mutex_lock(&bootstrap_cache.mu)
+	forgotten := time.diff(bootstrap_cache.entries[HOST].expires, time.now()) >= 0
+	sync.mutex_unlock(&bootstrap_cache.mu)
+	testing.expect(t, forgotten, "a forgotten entry would still be served")
+	_, ok3 := bootstrap_resolve(servers, HOST)
+	testing.expect(t, ok3, "the lookup after forgetting failed")
+	testing.expect_value(t, len(track.allocation_map), settled)
 
 	// The cache is a package global that outlives this test, and its keys point
 	// into the tracking allocator that is about to go away.
@@ -3779,7 +3806,9 @@ test_a_late_resolved_endpoint_is_published_once :: proc(t: ^testing.T) {
 
 	// A lookup that finishes after the endpoint is out leaves it as it is: a
 	// reader holding no lock may be copying it.
-	u.spec.address = "127.0.0.2"
+	// The upstream owns its spec's strings, so the replacement is one too.
+	delete(u.spec.address, u.allocator)
+	u.spec.address = strings.clone("127.0.0.2", u.allocator)
 	testing.expect(t, resolve_endpoint(u), "a lookup after the endpoint was published")
 	ep, _ = endpoint_of(u)
 	testing.expect(t, ep.address == net.Address(net.IP4_Loopback), "the published endpoint was written over")
@@ -3803,7 +3832,9 @@ test_a_failed_resolution_does_not_unpublish_the_endpoint :: proc(t: ^testing.T) 
 	}
 	defer destroy(u)
 	// The losing thread's view: a hostname with no bootstrap servers to ask.
-	u.spec.address = "kept-347.test"
+	// The upstream owns its spec's strings, so the replacement is one too.
+	delete(u.spec.address, u.allocator)
+	u.spec.address = strings.clone("kept-347.test", u.allocator)
 	testing.expect(t, resolve_endpoint(u), "the endpoint published before the failed lookup does not stand")
 
 	ep, eerr := endpoint_of(u)

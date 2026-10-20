@@ -31,8 +31,8 @@ Returns false when a configured trust anchor cannot be read, which is worth
 refusing to start over: an anchor nobody can parse is an anchor nobody is
 validating against.
 */
-start_validator :: proc(s: ^Server) -> bool {
-	if !s.cfg.dnssec.enabled {
+start_validator :: proc(s: ^Server, l: ^Live) -> bool {
+	if !l.cfg.dnssec.enabled {
 		return true
 	}
 
@@ -46,9 +46,9 @@ start_validator :: proc(s: ^Server) -> bool {
 	dnssec.probe_algorithms()
 
 	anchors: []dnssec.Trust_Anchor
-	if len(s.cfg.dnssec.trust_anchors) > 0 {
-		parsed := make([dynamic]dnssec.Trust_Anchor, 0, len(s.cfg.dnssec.trust_anchors))
-		for line in s.cfg.dnssec.trust_anchors {
+	if len(l.cfg.dnssec.trust_anchors) > 0 {
+		parsed := make([dynamic]dnssec.Trust_Anchor, 0, len(l.cfg.dnssec.trust_anchors))
+		for line in l.cfg.dnssec.trust_anchors {
 			anchor, ok := dnssec.parse_trust_anchor(line)
 			if !ok {
 				logx.errorf("dnssec: cannot read trust anchor %q", line)
@@ -64,7 +64,7 @@ start_validator :: proc(s: ^Server) -> bool {
 			append(&parsed, anchor)
 		}
 		anchors = parsed[:]
-		s.anchors = anchors
+		l.anchors = anchors
 
 		// An operator who anchors a zone below the root is asking for that zone
 		// to be validated, so the locally-served bypass must step aside for a
@@ -77,7 +77,7 @@ start_validator :: proc(s: ^Server) -> bool {
 				append(&zones, anchor.zone)
 			}
 		}
-		s.anchor_zones = zones[:]
+		l.anchor_zones = zones[:]
 	}
 
 	/*
@@ -111,13 +111,13 @@ start_validator :: proc(s: ^Server) -> bool {
 		// The validator is still nil, and `destroy_validator` takes that; what
 		// this is here for is the anchors parsed above, which the refusal to
 		// start would otherwise leave behind.
-		stop_validator(s)
+		stop_validator(l)
 		return false
 	}
 	if zone, found := dnssec.unfollowable_anchor_zone(in_use); found {
 		logx.errorf("dnssec: no trust anchor for %s names an algorithm and digest this build can check", zone)
 		logx.errorf("dnssec: %s would be served unvalidated; check the host crypto policy, or remove its anchors", zone)
-		stop_validator(s)
+		stop_validator(l)
 		return false
 	}
 
@@ -138,22 +138,22 @@ start_validator :: proc(s: ^Server) -> bool {
 	against the handler pool because that is what the bound protects - see
 	`handle_query`'s `shared_worker`.
 	*/
-	if !s.cfg.server.sizing.derived_chain_walks && s.cfg.dnssec.max_chain_walks >= s.cfg.server.workers {
+	if !l.cfg.server.sizing.derived_chain_walks && l.cfg.dnssec.max_chain_walks >= l.cfg.server.workers {
 		logx.warnf(
 			"dnssec: max_chain_walks %d leaves none of the %d workers reserved, so a flood of fresh names can hold them all; see issue #356",
-			s.cfg.dnssec.max_chain_walks,
-			s.cfg.server.workers,
+			l.cfg.dnssec.max_chain_walks,
+			l.cfg.server.workers,
 		)
 	}
 	// The same for the other pool, and said the same way. A bound that allows as
 	// many walks as there are connection threads is that bound switched off, and
 	// nothing else in the configuration would tell an operator so.
-	if !s.cfg.server.sizing.derived_connection_walks &&
-	   s.cfg.dnssec.max_connection_walks >= s.cfg.server.max_connections {
+	if !l.cfg.server.sizing.derived_connection_walks &&
+	   l.cfg.dnssec.max_connection_walks >= l.cfg.server.max_connections {
 		logx.warnf(
 			"dnssec: max_connection_walks %d leaves none of the %d connection threads reserved, so a flood of fresh names can hold them all; see issue #356",
-			s.cfg.dnssec.max_connection_walks,
-			s.cfg.server.max_connections,
+			l.cfg.dnssec.max_connection_walks,
+			l.cfg.server.max_connections,
 		)
 	}
 
@@ -172,29 +172,29 @@ start_validator :: proc(s: ^Server) -> bool {
 	server inventing a limit on the operator's own memory, and a resolver that
 	will not start is worse than one that says what it is doing.
 	*/
-	if s.cfg.dnssec.max_cached_zones > dnssec.DEFAULT_MAX_CACHED_ZONES {
+	if l.cfg.dnssec.max_cached_zones > dnssec.DEFAULT_MAX_CACHED_ZONES {
 		logx.warnf(
 			"dnssec: max_cached_zones %d lets the zone cache reach about %d MB of keys, against %d MB at the default of %d",
-			s.cfg.dnssec.max_cached_zones,
-			(s.cfg.dnssec.max_cached_zones * dnssec.MAX_CACHED_ZONE_BYTES) / (1024 * 1024),
+			l.cfg.dnssec.max_cached_zones,
+			(l.cfg.dnssec.max_cached_zones * dnssec.MAX_CACHED_ZONE_BYTES) / (1024 * 1024),
 			(dnssec.DEFAULT_MAX_CACHED_ZONES * dnssec.MAX_CACHED_ZONE_BYTES) / (1024 * 1024),
 			dnssec.DEFAULT_MAX_CACHED_ZONES,
 		)
 	}
 
-	s.validator = dnssec.make_validator(
+	l.validator = dnssec.make_validator(
 		validator_query,
 		s,
 		dnssec.Options {
 			anchors = anchors,
-			max_nsec3_iterations = s.cfg.dnssec.max_nsec3_iterations,
-			max_chain_walks = s.cfg.dnssec.max_chain_walks,
+			max_nsec3_iterations = l.cfg.dnssec.max_nsec3_iterations,
+			max_chain_walks = l.cfg.dnssec.max_chain_walks,
 			// The connection transports get their own, sized from the threads
 			// they actually have. See `Dnssec_Config.max_connection_walks`.
-			max_connection_walks = s.cfg.dnssec.max_connection_walks,
+			max_connection_walks = l.cfg.dnssec.max_connection_walks,
 			// The one dial on how much memory validation may hold. Zero here
 			// takes the validator's own default, as everywhere else.
-			max_cached_zones     = s.cfg.dnssec.max_cached_zones,
+			max_cached_zones     = l.cfg.dnssec.max_cached_zones,
 		},
 	)
 	// The bound is named here because it is the number an operator watching
@@ -208,8 +208,8 @@ start_validator :: proc(s: ^Server) -> bool {
 	logx.infof(
 		"dnssec: validating against %d trust anchor(s), at most %d chain walks upstream at once on the handler pool and %d on connection threads",
 		len(anchors) if len(anchors) > 0 else len(dnssec.root_anchors()),
-		dnssec.chain_walk_limit(s.validator, .Shared),
-		dnssec.chain_walk_limit(s.validator, .Connection),
+		dnssec.chain_walk_limit(l.validator, .Shared),
+		dnssec.chain_walk_limit(l.validator, .Connection),
 	)
 	return true
 }
@@ -221,26 +221,26 @@ The anchors are not the validator's to free - it borrows the slice, and an
 unconfigured one borrows `dnssec.root_anchors`, which is static - so
 `destroy_validator` leaves them alone and this is where the ones
 `start_validator` parsed go. Nothing here runs for the built-in anchors, which
-never filled `s.anchors` in the first place.
+never filled `l.anchors` in the first place.
 */
-stop_validator :: proc(s: ^Server) {
-	dnssec.destroy_validator(s.validator)
-	s.validator = nil
+stop_validator :: proc(l: ^Live) {
+	dnssec.destroy_validator(l.validator)
+	l.validator = nil
 
-	for anchor in s.anchors {
+	for anchor in l.anchors {
 		dnssec.destroy_trust_anchor(anchor)
 	}
-	delete(s.anchors)
-	s.anchors = nil
+	delete(l.anchors)
+	l.anchors = nil
 	// Only the slice: the strings in it are the anchors' own `zone` fields,
 	// released just above.
-	delete(s.anchor_zones)
-	s.anchor_zones = nil
+	delete(l.anchor_zones)
+	l.anchor_zones = nil
 }
 
 // Drop cached zone keys whose lifetime has run out.
 sweep_validator :: proc(s: ^Server) -> int {
-	return dnssec.sweep(s.validator)
+	return dnssec.sweep(live(s).validator)
 }
 
 /*
@@ -331,7 +331,7 @@ validator_query :: proc(
 	zone signed internally. The route's authority does, and `route_group` still
 	sends a `DS` at a nested route's apex to whoever answers its parent.
 	*/
-	group := route_group(s, name, type) if covered_by_local_anchor(s, name) else s.group
+	group := route_group(s, name, type) if covered_by_local_anchor(s, name) else live(s).group
 	response, _, uerr := upstream.resolve_answerable(group, asked, allocator, deadline)
 	if uerr != .None {
 		report_chain_fetch_failed(type, name, uerr)

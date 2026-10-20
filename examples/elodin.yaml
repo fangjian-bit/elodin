@@ -176,8 +176,8 @@ server:
   # network can be named and given its own: most specific entry wins, an entry
   # cannot be finer than the /24 or /64 the budgets are kept in, and an entry
   # that names no `slip` inherits the `slip` above it. Each entry is named in
-  # the log at startup, which is the only place that says which networks are
-  # not on the default.
+  # the log at startup and on a reload that changes them, which is the only
+  # place that says which networks are not on the default.
   #
   #   overrides:
   #     - { prefix: 198.51.100.0/24, responses_per_second: 5000 }
@@ -534,9 +534,9 @@ cookies:
   upstream: true
 
   # The key cookies are derived from, as 32 hex characters. Empty draws a random
-  # one at each startup, which is right for a single instance. Set it when
-  # several elodins answer on one address, or they will reject each other's
-  # cookies.
+  # one at each startup and keeps it across reloads, which is right for a
+  # single instance. Set it when several elodins answer on one address, or they
+  # will reject each other's cookies.
   # secret: e5e973e5a6b2a43f48e7dc849e37bfcf
 
 rebind:

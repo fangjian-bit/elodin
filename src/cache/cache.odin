@@ -194,7 +194,13 @@ Cache :: struct {
 	serials:      u64,
 	allocator:    mem.Allocator,
 	stats:        Stats,
+	// Which cache this is, never reused within the process; see `identity`.
+	id:           u64,
 }
+
+// The last number `make_cache` handed out.
+@(private)
+caches_made: u64
 
 // TTL handed out with a stale answer so the client comes back soon.
 STALE_TTL :: 30
@@ -279,16 +285,54 @@ Options :: struct {
 make_cache :: proc(opts: Options, allocator := context.allocator) -> ^Cache {
 	c := new(Cache, allocator)
 	c.allocator = allocator
+	c.id = sync.atomic_add(&caches_made, 1) + 1
+	apply_options(c, opts)
+	c.entries = make(map[string]^Entry, max(opts.max_entries, 16), allocator)
+	return c
+}
+
+/*
+Which cache `c` is, or 0 for none: a number no other cache in this process has
+had or will have. For a caller holding on to something about one cache across a
+point where it may have been destroyed and another made, which an address
+cannot tell apart - the allocator may hand the new one the old one's memory.
+*/
+identity :: proc(c: ^Cache) -> u64 {
+	return c.id if c != nil else 0
+}
+
+/*
+Take new limits and lifetimes in place, keeping what is stored.
+
+A configuration reload that changes the `cache` section lands here rather than
+on a new cache, so the answers already held survive it. Smaller limits evict
+down to themselves now rather than at the next insert, which on a quiet server
+could be a while. A lifetime applies to answers stored from here on: the ones
+already held keep the one they were stored with, and the caller that needs them
+judged afresh moves its policy number instead (see `make_key`).
+*/
+reconfigure :: proc(c: ^Cache, opts: Options) {
+	if c == nil {
+		return
+	}
+	sync.mutex_lock(&c.mu)
+	defer sync.mutex_unlock(&c.mu)
+	apply_options(c, opts)
+	evict_over_limits(c)
+}
+
+@(private)
+apply_options :: proc(c: ^Cache, opts: Options) {
 	c.max_entries = max(opts.max_entries, 1)
-	c.max_bytes = opts.max_bytes if opts.max_bytes > 0 else DEFAULT_MAX_BYTES
-	c.min_ttl = opts.min_ttl
-	c.max_ttl = opts.max_ttl if opts.max_ttl > 0 else 86400
-	c.negative_ttl = opts.negative_ttl
+	sync.atomic_store(&c.max_bytes, opts.max_bytes if opts.max_bytes > 0 else DEFAULT_MAX_BYTES)
+	// The three lifetimes and the byte budget atomically: `put` reads them
+	// before it takes the lock, and `ttl_ceiling` without it.
+	sync.atomic_store(&c.min_ttl, opts.min_ttl)
+	sync.atomic_store(&c.max_ttl, opts.max_ttl if opts.max_ttl > 0 else 86400)
+	sync.atomic_store(&c.negative_ttl, opts.negative_ttl)
 	c.serve_stale = opts.serve_stale
 	c.prefetch = opts.prefetch
 	c.prefetch_min = time.Duration(opts.prefetch_min_ttl) * time.Second
-	c.entries = make(map[string]^Entry, max(opts.max_entries, 16), allocator)
-	return c
 }
 
 destroy :: proc(c: ^Cache) {
@@ -302,8 +346,9 @@ destroy :: proc(c: ^Cache) {
 	free(c, c.allocator)
 }
 
-// Longest key we build on the stack: a presentation name plus type/class/flags.
-KEY_MAX :: 1024 + 8
+// Longest key we build on the stack: a presentation name plus type/class/flags
+// and the policy number.
+KEY_MAX :: 1024 + 16
 
 /*
 Build a lookup key for a question.
@@ -342,6 +387,14 @@ expired answer `serve_stale` is holding for that name - and the two are wanted a
 once. The verdict is what the next minute of queries is answered with; the
 expired answer is what covers the upstream being down after that minute runs
 out. See `server.remember_bogus_verdict`.
+
+`policy` is not part of the question either. It is the caller's number for the
+rules an answer was judged by before it was stored - which upstream asked,
+whether it was validated, whether rebind protection looked at it - and an entry
+stored under one number is never found under another. A configuration reload
+that changes those rules moves the number, and the answers judged under the old
+ones stop being served at once, including one a request still in flight under
+the old rules stores after the reload. See `server.Live.policy`.
 */
 make_key :: proc(
 	buf: []u8,
@@ -351,9 +404,10 @@ make_key :: proc(
 	dnssec_ok: bool,
 	checking_disabled := false,
 	verdict := false,
+	policy: u64 = 0,
 ) -> string {
 	n := 0
-	limit := len(buf) - 8
+	limit := len(buf) - 15
 	for i in 0 ..< len(name) {
 		if n >= limit {
 			break
@@ -369,7 +423,10 @@ make_key :: proc(
 	buf[n + 4] = 1 if dnssec_ok else 0
 	buf[n + 5] = 1 if checking_disabled else 0
 	buf[n + 6] = 1 if verdict else 0
-	return string(buf[:n + 7])
+	for i in 0 ..< 8 {
+		buf[n + 7 + i] = u8(policy >> uint(56 - 8 * i))
+	}
+	return string(buf[:n + 15])
 }
 
 /*
@@ -760,7 +817,8 @@ ttl_ceiling :: proc(c: ^Cache) -> u32 {
 	if c == nil {
 		return dns.TTL_MAX
 	}
-	return c.max_ttl
+	// Atomic, being read outside the lock that `reconfigure` writes it under.
+	return sync.atomic_load(&c.max_ttl)
 }
 
 /*
@@ -1053,8 +1111,13 @@ thing in both directions.
 	now := time.now()
 	now_unix := time.time_to_unix(now)
 	signed_left, signed := dns.signatures_lapse(wire, u32(now_unix))
+	// Read once each, atomically: this runs outside the lock `reconfigure`
+	// writes them under.
+	min_ttl := sync.atomic_load(&c.min_ttl)
+	max_ttl := sync.atomic_load(&c.max_ttl)
+	negative_ttl := sync.atomic_load(&c.negative_ttl)
 	for &t in ttls {
-		t = min(t, c.max_ttl, signed_left)
+		t = min(t, max_ttl, signed_left)
 	}
 
 	effective: u32
@@ -1063,7 +1126,7 @@ thing in both directions.
 		// `min_ttl`: that floor is how long the shortest *answer* is good for,
 		// and stretching a verdict to meet it would hold a zone broken past the
 		// minute this is allowed to.
-		effective = min(u32(BOGUS_TTL), c.max_ttl)
+		effective = min(u32(BOGUS_TTL), max_ttl)
 	} else {
 		if negative {
 			/*
@@ -1083,14 +1146,14 @@ thing in both directions.
 					effective = min(effective, dns.sane_ttl(r.ttl))
 				}
 			}
-			if c.negative_ttl > 0 {
-				effective = min(effective, c.negative_ttl)
+			if negative_ttl > 0 {
+				effective = min(effective, negative_ttl)
 			}
 		} else {
 			v, has := dns.min_ttl(ttls)
 			effective = v if has else 0
 		}
-		effective = clamp(effective, c.min_ttl, c.max_ttl)
+		effective = clamp(effective, min_ttl, max_ttl)
 	}
 	// A message whose signature has already lapsed is not stored at all, past
 	// `min_ttl`, which is a floor on what records claim and not on what their
@@ -1115,7 +1178,7 @@ thing in both directions.
 	response can be.
 	*/
 	size := sizeof_entry(key, wire, offsets, ttls)
-	if size > c.max_bytes {
+	if size > sync.atomic_load(&c.max_bytes) {
 		delete(offsets, c.allocator)
 		delete(ttls, c.allocator)
 		return false
@@ -1173,11 +1236,17 @@ thing in both directions.
 	// Both bounds, because the count alone is not one: see DEFAULT_MAX_BYTES. The
 	// entry just inserted is at the head and was refused above if it could not
 	// fit by itself, so this cannot come round to evicting it.
+	evict_over_limits(c)
+	return true
+}
+
+// Evict from the tail until both bounds hold. The caller holds `c.mu`.
+@(private)
+evict_over_limits :: proc(c: ^Cache) {
 	for (len(c.entries) > c.max_entries || c.bytes > c.max_bytes) && c.tail != nil {
 		remove_entry(c, c.tail)
 		c.stats.evictions += 1
 	}
-	return true
 }
 
 // Drop everything, e.g. after a configuration reload.

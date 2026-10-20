@@ -14,7 +14,6 @@ import "elodin:logx"
 import "elodin:pool"
 import "elodin:privdrop"
 import "elodin:server"
-import "elodin:upstream"
 
 USAGE :: `elodin - a filtering DNS forwarder
 
@@ -601,6 +600,19 @@ main :: proc() {
 		cfg.server.max_pending,
 		logx.quote(sizing_origin(cfg.server)),
 	)
+	log_config_warnings(&cfg)
+	run(&cfg, opts, service)
+}
+
+/*
+What the configuration gives up or leaves open, said at startup and again after
+every reload that puts a new one into effect, where an operator who has just
+edited the file is reading. `--check` prints the same lines from the same
+procedures, so the readings cannot drift apart.
+*/
+@(private)
+log_config_warnings :: proc(cfg: ^config.Config) {
+	misrouted := route_shaped_rules(cfg, context.temp_allocator)
 	if len(cfg.server.allow_from) == 0 {
 		logx.warnf("%s", allow_from_line(cfg.server))
 	} else {
@@ -613,7 +625,7 @@ main :: proc() {
 		logx.warnf("%s", route_rule_warning(rule, context.temp_allocator))
 	}
 	for route in cfg.upstream.zones {
-		if text, say := route_implication_warning(&cfg, route, context.temp_allocator); say {
+		if text, say := route_implication_warning(cfg, route, context.temp_allocator); say {
 			logx.warnf("%s", text)
 		}
 	}
@@ -635,7 +647,7 @@ main :: proc() {
 	operator to write both would be telling them to do something that changes
 	nothing.
 	*/
-	if text, say := mixed_validation_warning(&cfg); say {
+	if text, say := mixed_validation_warning(cfg); say {
 		logx.warnf("%s", text)
 	}
 
@@ -655,7 +667,6 @@ main :: proc() {
 	case !cfg.special_use.onion:
 		logx.warnf("special_use.onion is off: .onion queries are forwarded, which is only safe to a Tor-aware upstream")
 	}
-	run(&cfg, opts, service)
 }
 
 /*
@@ -702,67 +713,10 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 	handler_pool := pool.make_pool(cfg.server.workers, cfg.server.running_workers)
 	race_pool := pool.make_pool(cfg.server.upstream_workers)
 
-	group, gerr := upstream.make_group(cfg.upstream, race_pool, cookies = cfg.cookies.upstream)
-	if gerr != .None {
-		logx.errorf("no usable upstream servers, giving up")
-		os.exit(1)
-	}
-	defer upstream.destroy_group(group)
-
-	/*
-	One group per `upstream.zones` entry, built the same way the default is.
-
-	A route whose servers are all unusable is fatal rather than dropped. The
-	names it claims are the ones an operator added the route to keep resolving,
-	and a server that quietly carried on without it would send them to the
-	public upstream instead - which is both the leak the route was written to
-	stop and the answer least likely to be noticed, since the public resolver
-	replies rather than failing. Refusing to start says so at the one moment
-	somebody is watching.
-	*/
-	routes := make([]server.Zone_Route, len(cfg.upstream.zones))
-	defer delete(routes)
-	defer for route in routes {
-		upstream.destroy_group(route.group)
-	}
-	for zone, i in cfg.upstream.zones {
-		zg, zerr := upstream.make_group(zone.upstream, race_pool, cookies = cfg.cookies.upstream)
-		if zerr != .None {
-			logx.errorf("upstream.zones[%d]: no usable servers for %s, giving up", i, zone.domains[0])
-			os.exit(1)
-		}
-		routes[i] = server.Zone_Route {
-			domains = zone.domains,
-			group   = zg,
-		}
-		logx.infof("routing %s to its own upstream", strings.join(zone.domains, ", ", context.temp_allocator))
-	}
-
-	answers: ^cache.Cache
-	if cfg.cache.enabled {
-		answers = cache.make_cache(
-			cache.Options {
-				max_entries = cfg.cache.max_entries,
-				max_bytes = cfg.cache.max_bytes,
-				min_ttl = cfg.cache.min_ttl,
-				max_ttl = cfg.cache.max_ttl,
-				negative_ttl = cfg.cache.negative_ttl,
-				serve_stale = cfg.cache.serve_stale,
-				prefetch = cfg.cache.prefetch,
-				prefetch_min_ttl = cfg.cache.prefetch_min_ttl,
-			},
-		)
-	}
-	defer cache.destroy(answers)
-
 	filters := filter.engine_make()
 	defer filter.engine_destroy(filters)
 
 	s := server.Server {
-		cfg          = cfg,
-		group        = group,
-		routes       = routes,
-		answers      = answers,
 		filters      = filters,
 		handler_pool = handler_pool,
 		race_pool    = race_pool,
@@ -770,23 +724,23 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 		running      = true,
 	}
 
-	if !server.start_validator(&s) {
-		logx.errorf("dnssec is enabled but the trust anchors are not usable, shutting down")
+	/*
+	Everything a reload can change - the upstream groups, the cache, the
+	validator, the cookie secret, the rate limiter - is built as the first
+	generation, by the same procedure a SIGHUP builds the next one with. What it
+	cannot build is said by the part that failed; this only ends the process.
+	*/
+	if !server.boot_generation(&s, cfg) {
+		logx.errorf("the configuration could not be put into effect, giving up")
 		os.exit(1)
 	}
-	defer server.stop_validator(&s)
+	// Released last of all, once nothing can be using any generation: the
+	// block below drains both pools before this runs.
+	defer server.destroy_generations(&s)
 
-	if !server.start_rate_limiter(&s) {
-		logx.errorf("the rate limiter could not be created, shutting down")
-		os.exit(1)
-	}
-	defer server.stop_rate_limiter(&s)
-
-	if !server.start_cookies(&s) {
-		logx.errorf("the configured cookie secret is not usable, shutting down")
-		os.exit(1)
-	}
-	defer server.stop_cookies(&s)
+	// The main thread reads the configuration through `server.live` like any
+	// other until the maintenance loop takes over, which pins per tick.
+	server.pin(&s)
 
 	defer delete(s.lists_loaded)
 	lists_current := true
@@ -809,8 +763,8 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 	queued before it joins its workers. Those jobs reach for the validator, the
 	filters, the cache, the upstream group and the rate limiter - `udp_job`
 	charges the answer it just packed to the prefix it is addressed to - so the
-	pools have to be drained before any of that is torn down - the defers below
-	this one - and the listener contexts released only once nothing is left that
+	pools have to be drained before any of that is torn down - the defers written
+	above this one, which run after it - and the listener contexts released only once nothing is left that
 	could hold one.
 
 	The pools are handled here rather than at the point they are created, where
@@ -858,8 +812,9 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 		// wrote, whether the thing that refuses such answers is running.
 		cfg.rebind.enabled,
 	)
+	server.unpin(&s)
 
-	maintenance_loop(&s, &listeners, answers, cfg, opts, lists_current)
+	maintenance_loop(&s, &listeners, opts, lists_current)
 }
 
 /*
@@ -874,7 +829,10 @@ whoever it becomes.
 The blocklist cache goes over first. It is the one path still opened by name
 afterwards - the lists were downloaded above, as root, and a refresh some hours
 later reopens them - so without this the cache would silently stop being
-written the moment its owner changed.
+written the moment its owner changed. Only with blocking on, so a directory
+that is not elodin's - a shared one, named but unused - is not taken over for
+nothing. A reload that turns blocking on later finds it as it is; see
+`docs/install.md`.
 
 A drop that was asked for and did not happen ends the process. Carrying on
 would leave it as root while the log said otherwise, which is worse than not
@@ -916,24 +874,18 @@ Periodic housekeeping.
 
 Runs on the main thread, which otherwise has nothing to do once the listeners
 are up: expire cache entries, close idle upstream connections, refresh the
-blocklists when their interval comes round, and reload the TLS certificates
-when SIGHUP asks for it.
+blocklists when their interval comes round, release the configurations a reload
+has replaced once nothing uses them, and reload when SIGHUP asks for it.
 */
-maintenance_loop :: proc(
-	s: ^server.Server,
-	listeners: ^server.Listeners,
-	answers: ^cache.Cache,
-	cfg: ^config.Config,
-	opts: Options,
-	lists_current: bool,
-) {
+maintenance_loop :: proc(s: ^server.Server, listeners: ^server.Listeners, opts: Options, lists_current: bool) {
 	TICK :: 30 * time.Second
 	last_refresh := time.now()
 	// Zero while the lists are current; otherwise the wait before the next
 	// attempt, which `refresh_retry` stretches on each failure (#411).
 	retry: time.Duration
-	if !lists_current && !opts.no_fetch && cfg.blocking.refresh > 0 {
-		retry = server.refresh_retry(0, cfg.blocking.refresh)
+	refresh := server.live_config(s).blocking.refresh
+	if !lists_current && !opts.no_fetch && refresh > 0 {
+		retry = server.refresh_retry(0, refresh)
 		logx.warnf("blocklists: not every list is current; trying again in %v", retry)
 	}
 	last_report := time.now()
@@ -949,45 +901,115 @@ maintenance_loop :: proc(
 			sync.atomic_store(&s.running, false)
 			continue
 		case .Reload:
-			logx.infof("SIGHUP received, reloading TLS certificates")
-			server.reload_tls(s, listeners)
+			reload(s, listeners, opts, &last_refresh, &retry)
+			server.reap_generations(s)
 			free_all(context.temp_allocator)
 			continue
 		case .Tick:
 		}
 
-		if answers != nil {
-			if removed := cache.sweep(answers); removed > 0 {
-				logx.debugf("cache: swept %d expired entries", removed)
-			}
-		}
-		if closed := server.groom_upstreams(s); closed > 0 {
-			logx.debugf("upstream: closed %d idle connections", closed)
-		}
-		if dropped := server.sweep_validator(s); dropped > 0 {
-			logx.debugf("dnssec: dropped %d expired zone keys", dropped)
-		}
-
-		if cfg.blocking.enabled && !opts.no_fetch && cfg.blocking.refresh > 0 {
-			wait := server.refresh_wait(retry, cfg.blocking.refresh)
-			if time.diff(last_refresh, time.now()) >= wait {
-				logx.infof("refreshing blocklists")
-				if server.reload_filters(s, true) {
-					retry = 0
-				} else {
-					retry = server.refresh_retry(retry, cfg.blocking.refresh)
-					logx.warnf("blocklists: not every list is current; trying again in %v", retry)
-				}
-				last_refresh = time.now()
-			}
-		}
-
-		if time.diff(last_report, time.now()) >= 5 * time.Minute {
-			report(s, answers)
-			report_udp_drops(listeners, &last_udp_drops)
-			last_report = time.now()
+		tick(s, listeners, opts, &last_refresh, &retry, &last_report, &last_udp_drops)
+		if released := server.reap_generations(s); released > 0 {
+			logx.debugf("reload: released %d replaced configuration(s)", released)
 		}
 		free_all(context.temp_allocator)
+	}
+}
+
+/*
+What SIGHUP asks for, in the order an operator would want it.
+
+The log first, so everything the reload says lands where logrotate expects it:
+`logrotate` renames the file and sends the signal, and this is what opens the
+name again. Then the configuration, which may move the log somewhere else and
+says so. The certificates last, read from the paths the process started with -
+whether or not the rest of the file was usable, since a renewal that happens to
+coincide with a typo in the file is still a renewal.
+*/
+@(private)
+reload :: proc(
+	s: ^server.Server,
+	listeners: ^server.Listeners,
+	opts: Options,
+	last_refresh: ^time.Time,
+	retry: ^time.Duration,
+) {
+	file := server.live_config(s).log.file
+	reopened := logx.reopen(file)
+	logx.infof("SIGHUP received, reloading the configuration and the TLS certificates")
+	if !reopened {
+		logx.warnf("cannot open the log file %q again; logging where it was", file)
+	}
+
+	out := server.reload_config(s, opts.config_path, !opts.no_fetch)
+	if out.applied || out.blocking {
+		server.pin(s)
+		cfg := server.live(s).cfg
+		if out.applied {
+			log_config_warnings(cfg)
+		}
+		if out.blocking {
+			last_refresh^ = time.now()
+			retry^ = 0
+			if !out.lists_current && !opts.no_fetch && cfg.blocking.refresh > 0 {
+				retry^ = server.refresh_retry(0, cfg.blocking.refresh)
+				logx.warnf("blocklists: not every list is current; trying again in %v", retry^)
+			}
+		}
+		server.unpin(s)
+	}
+
+	// From the paths the process started with, which need no pin.
+	server.reload_tls(s, listeners)
+}
+
+// Everything the maintenance loop does on an ordinary tick, under the
+// generation current at its start.
+@(private)
+tick :: proc(
+	s: ^server.Server,
+	listeners: ^server.Listeners,
+	opts: Options,
+	last_refresh: ^time.Time,
+	retry: ^time.Duration,
+	last_report: ^time.Time,
+	last_udp_drops: ^u64,
+) {
+	server.pin(s)
+	defer server.unpin(s)
+	cfg := server.live(s).cfg
+	answers := server.live(s).answers
+
+	if answers != nil {
+		if removed := cache.sweep(answers); removed > 0 {
+			logx.debugf("cache: swept %d expired entries", removed)
+		}
+	}
+	if closed := server.groom_upstreams(s); closed > 0 {
+		logx.debugf("upstream: closed %d idle connections", closed)
+	}
+	if dropped := server.sweep_validator(s); dropped > 0 {
+		logx.debugf("dnssec: dropped %d expired zone keys", dropped)
+	}
+
+	if cfg.blocking.enabled && !opts.no_fetch && cfg.blocking.refresh > 0 {
+		wait := server.refresh_wait(retry^, cfg.blocking.refresh)
+		if time.diff(last_refresh^, time.now()) >= wait {
+			logx.infof("refreshing blocklists")
+			if server.reload_filters(s, true) {
+				retry^ = 0
+			} else {
+				retry^ = server.refresh_retry(retry^, cfg.blocking.refresh)
+				logx.warnf("blocklists: not every list is current; trying again in %v", retry^)
+			}
+			last_refresh^ = time.now()
+		}
+	}
+
+	if time.diff(last_report^, time.now()) >= 5 * time.Minute {
+		report(s, answers)
+		report_udp_drops(listeners, last_udp_drops)
+		last_report^ = time.now()
 	}
 }
 
@@ -1039,7 +1061,7 @@ report_udp_drops :: proc(l: ^server.Listeners, last: ^u64) {
 report :: proc(s: ^server.Server, answers: ^cache.Cache) {
 	st := server.stats_of(s)
 	cs := cache.stats(answers)
-	limited, slipped, conn_limited := server.rate_limit_stats(s.limiter)
+	limited, slipped, conn_limited := server.rate_limit_stats(server.live(s).limiter)
 	// Built by `server.stats_line`, for the reason every other reported line in
 	// this server is: a counter left out of it is a failing test there rather
 	// than a figure that reads zero forever here.

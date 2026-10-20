@@ -234,7 +234,7 @@ no route to reach for instead.
 */
 @(private)
 rebind_reads_answer :: proc(s: ^Server, q: dns.Question) -> bool {
-	if !s.cfg.rebind.enabled {
+	if !live(s).cfg.rebind.enabled {
 		return false
 	}
 	#partial switch q.type {
@@ -242,7 +242,7 @@ rebind_reads_answer :: proc(s: ^Server, q: dns.Question) -> bool {
 	case:
 		return false
 	}
-	return !rebind_exempt(s.cfg.rebind.allow_domains, q.name) && !is_zone_routed(s, q.name)
+	return !rebind_exempt(live(s).cfg.rebind.allow_domains, q.name) && !is_zone_routed(s, q.name)
 }
 
 /*
@@ -289,7 +289,7 @@ rebind_refusal :: proc(
 	// beside each address: `localhost.` earns the same latitude the setting
 	// grants, and one verdict per query is what keeps the two from drifting into
 	// meaning different things about the same address.
-	loopback_ok := s.cfg.rebind.allow_loopback || name_at_or_below(q.name, LOCALHOST_ZONE)
+	loopback_ok := live(s).cfg.rebind.allow_loopback || name_at_or_below(q.name, LOCALHOST_ZONE)
 
 	addr, v6, found := first_private_answer(msg, loopback_ok)
 	if !found {
@@ -434,7 +434,7 @@ rebind_nodata :: proc(
 	allocator: mem.Allocator,
 ) -> []u8 {
 	out_msg := dns.make_response(query, .No_Error, allocator)
-	out_msg.authority = synth_soa(q.name, s.cfg.blocking.block_ttl, allocator)
+	out_msg.authority = synth_soa(q.name, live(s).cfg.blocking.block_ttl, allocator)
 	attach_extended_error(&out_msg, EDE_BLOCKED, "rebind", allocator)
 
 	encoded, _, enc_err := dns.encode_message(out_msg, allocator, limit)

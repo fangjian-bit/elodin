@@ -157,6 +157,11 @@ Refresh :: struct {
 	// started for; see `start_prefetch`.
 	prefetch:   bool,
 	serial:     u64,
+	// The cache policy `key` was built under, and the cache it names an entry
+	// of, by `cache.identity` - the cache may be gone by the time this runs and
+	// another made where it was; see `Live.policy`.
+	policy:     u64,
+	cache_id:   u64,
 	mu:         sync.Mutex,
 	sema:       sync.Sema,
 	/*
@@ -248,7 +253,7 @@ start_refresh :: proc(
 
 	sync.mutex_lock(&s.refreshes.mu)
 	free_slot := -1
-	live := 0
+	in_flight := 0
 	for i in 0 ..< REFRESH_SLOTS {
 		held := s.refreshes.slots[i]
 		if held == nil {
@@ -257,7 +262,7 @@ start_refresh :: proc(
 			}
 			continue
 		}
-		live += 1
+		in_flight += 1
 		// Already being refreshed. The keys are the cache's own, so this is the
 		// same question with the same DO and CD bits and nothing else.
 		if held.key == key {
@@ -265,7 +270,7 @@ start_refresh :: proc(
 			return nil
 		}
 	}
-	if free_slot < 0 || live >= ceiling {
+	if free_slot < 0 || in_flight >= ceiling {
 		sync.mutex_unlock(&s.refreshes.mu)
 		return nil
 	}
@@ -282,12 +287,14 @@ start_refresh :: proc(
 	r.started = started
 	r.prefetch = prefetch
 	r.serial = serial
+	r.policy = live(s).policy
+	r.cache_id = cache.identity(live(s).answers)
 	// The waiter's, the table's and the job's, taken before the job can run.
 	r.refs = 3
 	s.refreshes.slots[free_slot] = r
 	sync.mutex_unlock(&s.refreshes.mu)
 
-	if pool.try_submit(s.handler_pool, refresh_job, r, s.cfg.server.max_pending) != .Accepted {
+	if pool.try_submit(s.handler_pool, refresh_job, r, live(s).cfg.server.max_pending) != .Accepted {
 		/*
 		The backlog is full or the pool is stopping, so nothing will run this.
 		The table's reference, the job's and the caller's all go here - the
@@ -423,9 +430,20 @@ refresh_job :: proc(data: rawptr) {
 	may read it after the frame this was built in is gone.
 	*/
 	s := r.server
+	// Before the deferred block below, so it is still pinned when that runs.
+	pin_scope(s)
 	prefetching = r.prefetch
-	if r.prefetch {
-		cache.note_prefetch(s.answers)
+	/*
+	Counted only under the policy the entry was stored with, in the cache it was
+	stored in. A reload that moved the policy between the claim and this job
+	leaves `r.key` naming an entry no query can find, and the answer below goes
+	under the new key, so `renewed` would read every such prefetch as one that
+	did not help; one that turned the cache off and on again leaves the policy
+	where it was and the entry in a cache that is gone.
+	*/
+	counted := r.prefetch && live(s).policy == r.policy && cache.identity(live(s).answers) == r.cache_id
+	if counted {
+		cache.note_prefetch(live(s).answers)
 	}
 	defer {
 		/*
@@ -433,8 +451,8 @@ refresh_job :: proc(data: rawptr) {
 		and still leave nothing to store, and then the old entry is what the
 		next client meets, and what it will meet until it expires.
 		*/
-		if r.prefetch && !cache.renewed(s.answers, r.key, r.serial) {
-			cache.note_prefetch_failed(s.answers)
+		if counted && !cache.renewed(live(s).answers, r.key, r.serial) {
+			cache.note_prefetch_failed(live(s).answers)
 		}
 		prefetching = false
 		finish_refresh(r)
@@ -460,7 +478,7 @@ refresh_job :: proc(data: rawptr) {
 	be a value read on one thread and used on another for no gain; this is a
 	hash of eight bytes.
 	*/
-	cookie := inspect_cookie(s.cookies, msg, r.client)
+	cookie := inspect_cookie(live(s).cookies, msg, r.client)
 
 	unanswered: bool
 	ede: u16

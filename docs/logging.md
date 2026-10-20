@@ -9,7 +9,7 @@ ts=2026-08-07T09:12:41Z level=info msg=query client=192.0.2.10 port=44188 proto=
 ts=2026-08-07T09:12:44Z level=warn msg="list steven-black: unavailable, skipping it"
 ```
 
-The lines meant for machines — `starting`, `sizing`, `ready`, `stats`, `query` —
+The lines meant for machines — `starting`, `sizing`, `ready`, `reloaded` ([signals](install.md#signals)), `stats`, `query` —
 keep a fixed `msg` and carry the rest in fields. Every other line is one human
 sentence in `msg`. In Loki, `| logfmt` is all it takes:
 

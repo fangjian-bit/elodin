@@ -125,6 +125,23 @@ bootstrap_resolve :: proc(
 	return nil, false
 }
 
+/*
+Treat every hostname resolved so far as expired, so the next lookup asks the
+bootstrap servers configured now.
+
+For a configuration reload that changes which upstreams are asked: the answer
+cache is emptied for that, and an address an earlier bootstrap gave for an
+upstream's hostname is the same kind of answer. Expired rather than removed, so
+the keys stay with the map that allocated them.
+*/
+bootstrap_forget :: proc() {
+	sync.mutex_lock(&bootstrap_cache.mu)
+	defer sync.mutex_unlock(&bootstrap_cache.mu)
+	for _, &entry in bootstrap_cache.entries {
+		entry.expires = {}
+	}
+}
+
 // Resolve a host that may already be an IP literal, for the HTTP fetcher.
 resolve_address :: proc(host: string, bootstrap: []string) -> (addr: net.Address, ok: bool) {
 	if literal := netx.parse_address(host); literal != nil {

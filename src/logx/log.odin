@@ -54,6 +54,42 @@ init :: proc(level: Level, path: string = "") -> bool {
 	return true
 }
 
+/*
+Open `path` afresh and write to it from here on, or to stderr when `path` is
+empty; what a SIGHUP does to the log.
+
+Opened by name every time, even when the name is the one already in use: that is
+what logrotate's default `create` arrangement relies on - it renames the file and
+sends the signal, and the process goes on appending to the renamed one until it
+opens the name again.
+
+Returns false, leaving the log where it was, when the file cannot be opened -
+most likely because privileges were dropped after the old one was opened as
+root. Nothing is lost that way, and the caller says so through the log that is
+still working.
+*/
+reopen :: proc(path: string) -> bool {
+	f: ^os.File
+	if path != "" {
+		err: os.Error
+		f, err = os.open(path, {.Write, .Create, .Append}, os.Permissions_Read_All + {.Write_User})
+		if err != nil {
+			return false
+		}
+	}
+
+	sync.mutex_lock(&state.mu)
+	old := state.file if state.to_file else nil
+	state.file = f
+	state.to_file = f != nil
+	sync.mutex_unlock(&state.mu)
+
+	if old != nil {
+		os.close(old)
+	}
+	return true
+}
+
 shutdown :: proc() {
 	sync.mutex_lock(&state.mu)
 	defer sync.mutex_unlock(&state.mu)
@@ -64,10 +100,9 @@ shutdown :: proc() {
 	}
 }
 
+// Atomic, because `enabled` reads it without the lock from every thread.
 set_level :: proc(level: Level) {
-	sync.mutex_lock(&state.mu)
-	defer sync.mutex_unlock(&state.mu)
-	state.level = level
+	sync.atomic_store(&state.level, level)
 }
 
 enabled :: proc(level: Level) -> bool {

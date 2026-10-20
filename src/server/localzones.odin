@@ -214,7 +214,7 @@ else here: the anchor has to sit on a label break, not merely be a string suffix
 */
 @(private)
 covered_by_local_anchor :: proc(s: ^Server, name: string) -> bool {
-	for zone in s.anchor_zones {
+	for zone in live(s).anchor_zones {
 		if name_at_or_below(name, zone) {
 			return true
 		}
@@ -424,7 +424,7 @@ special_use_zone :: proc(
 	zone: string,
 	kind: Special_Use,
 ) {
-	if !s.cfg.special_use.enabled {
+	if !live(s).cfg.special_use.enabled {
 		return "", .None
 	}
 	// The zones below are listed a second time in `config.check_route_reachable`,
@@ -442,16 +442,16 @@ special_use_zone :: proc(
 	}
 	// The three an operator can hand back to the upstream, each for a
 	// deployment that really is served there.
-	if s.cfg.special_use.onion && name_at_or_below(name, "onion.") {
+	if live(s).cfg.special_use.onion && name_at_or_below(name, "onion.") {
 		return "onion.", .Nonexistent
 	}
-	if s.cfg.special_use.local && name_at_or_below(name, "local.") {
+	if live(s).cfg.special_use.local && name_at_or_below(name, "local.") {
 		return "local.", .Nonexistent
 	}
-	if s.cfg.special_use.test && name_at_or_below(name, "test.") {
+	if live(s).cfg.special_use.test && name_at_or_below(name, "test.") {
 		return "test.", .Nonexistent
 	}
-	if s.cfg.special_use.home_arpa && name_at_or_below(name, "home.arpa.") {
+	if live(s).cfg.special_use.home_arpa && name_at_or_below(name, "home.arpa.") {
 		// The delegation's own DS, and only at the apex: a DS below it is a
 		// query about a name that exists nowhere but this network, and the
 		// answer to that one really is here.
@@ -465,7 +465,7 @@ special_use_zone :: proc(
 	// its LAN's PTRs is reached by routing the zone to it, and an operator who
 	// anchored the zone has real, signed data there. `home.arpa.` has its own key
 	// above and is not this one's to answer.
-	if s.cfg.special_use.private_reverse {
+	if live(s).cfg.special_use.private_reverse {
 		z, found := locally_served_zone(name)
 		if found && z != "home.arpa." {
 			at_apex := dns.name_equal_fold(name, z)
@@ -504,7 +504,7 @@ special_use_zone :: proc(
 // from its address; erring wide only turns an NXDOMAIN into a NODATA.
 @(private)
 has_zone_below :: proc(s: ^Server, name: string) -> bool {
-	for r in s.cfg.rewrites {
+	for r in live(s).cfg.rewrites {
 		// "*.x." is held as "x." and answers below it, so "x." is above a name.
 		if name_below(r.domain, name) || (r.wildcard && dns.name_equal_fold(r.domain, name)) {
 			return true
@@ -520,14 +520,14 @@ has_zone_below :: proc(s: ^Server, name: string) -> bool {
 			}
 		}
 	}
-	for route in s.routes {
+	for route in live(s).routes {
 		for domain in route.domains {
 			if name_below(domain, name) {
 				return true
 			}
 		}
 	}
-	for zone in s.anchor_zones {
+	for zone in live(s).anchor_zones {
 		if name_below(zone, name) {
 			return true
 		}
@@ -596,7 +596,7 @@ used, and it is bounded by both keys being explicit.
 */
 @(private)
 special_use_deferred :: proc(s: ^Server, name: string) -> bool {
-	if s.cfg.special_use.enabled && s.cfg.special_use.onion {
+	if live(s).cfg.special_use.enabled && live(s).cfg.special_use.onion {
 		return false
 	}
 	if !name_at_or_below(name, "onion.") {

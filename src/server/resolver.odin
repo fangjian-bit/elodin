@@ -194,45 +194,19 @@ Stats :: struct {
 }
 
 Server :: struct {
-	cfg:          ^config.Config,
-	// The default upstream: everything that no route in `routes` claims, plus
-	// every lookup the validator makes on its own account. See `routes.odin`.
-	group:        ^upstream.Group,
-	// The per-domain upstreams, in configuration order. Empty on a server that
-	// forwards everything to one place.
-	routes:       []Zone_Route,
 	/*
-	Which routed apexes the parent's group would not settle a `DS` for, and
-	until when.
-
-	Only the apex `DS` carve-out reads or writes it, and only to decide whether
-	to spend a client's query on a parent that has just proved it cannot answer
-	this question. `Apex_Memo` argues it in full; the zero value is no memory of
-	anything, which is what a `Server` built as a literal wants.
+	The configuration and everything built from it, as a test that builds this
+	struct as a literal sets it. A running server keeps these in generations
+	instead (`gens`) and leaves this zero; either way a request reads them
+	through `live`. See `generation.odin`.
 	*/
-	apex_memo:    Apex_Memo,
-	answers:      ^cache.Cache,
+	using live:   Live,
+	gens:         Generations,
 	filters:      ^filter.Engine,
 	// Which lists the rules in `filters` were built with, one slot per list as
 	// `build_filter_sets` numbers them; nil before the first load. The caller
 	// that built this `Server` frees it. See `reload_filters`.
 	lists_loaded: []bool,
-	validator:    ^dnssec.Validator,
-	/*
-	The operator's own trust anchors, as parsed.
-
-	Held here rather than left to the validator because the validator borrows
-	them: with none configured it points at `dnssec.root_anchors`, which is
-	static, so `destroy_validator` cannot free what it has and these would have
-	nobody to release them. Empty when the built-in anchors are in use.
-	*/
-	anchors:      []dnssec.Trust_Anchor,
-	// The zones of the operator's own trust anchors, root excluded, in canonical
-	// form. An anchor here is a deliberate request to validate the zone it names,
-	// which the locally-served bypass has to defer to; see `covered_by_local_anchor`.
-	// The strings are the anchors' own; only the slice belongs to this field.
-	anchor_zones: []string,
-	cookies:      ^Cookie_Keeper,
 	/*
 	What signs the Apple configuration profile, or nil when the DoH listener or
 	its profile endpoint is off.
@@ -244,8 +218,6 @@ Server :: struct {
 	identity instead. See `profile.odin`.
 	*/
 	profiles:     ^Profile_Signer,
-	// Nil when rate limiting is off; `rate_check` takes that as "allow".
-	limiter:      ^Rate_Limiter,
 	handler_pool: ^pool.Pool,
 	race_pool:    ^pool.Pool,
 	/*
@@ -312,6 +284,9 @@ handle_query :: proc(
 	outcome: Outcome,
 	ok: bool,
 ) {
+	// One generation from the first read of the configuration to the last,
+	// whatever transport brought the query; see `generation.odin`.
+	pin_scope(s)
 	started := time.now()
 	sync.atomic_add(&s.stats.queries, 1)
 
@@ -379,7 +354,7 @@ handle_query :: proc(
 		return advertise_udp_size(out, advertise, proto), .Failed, built
 	}
 
-	cookie := inspect_cookie(s.cookies, msg, client)
+	cookie := inspect_cookie(live(s).cookies, msg, client)
 
 	// A cookie of an impossible length is the one case RFC 7873 section 5.2.2
 	// answers with FORMERR, and the one response that carries no cookie back:
@@ -461,7 +436,7 @@ handle_query :: proc(
 		rest; see `match_client_opt`, where the difference is argued.
 		*/
 		response = match_client_opt(response, msg, advertise, limit, outcome, &spent, allocator)
-		response = attach_cookie(s.cookies, response, cookie, msg, limit, advertise, &spent, allocator)
+		response = attach_cookie(live(s).cookies, response, cookie, msg, limit, advertise, &spent, allocator)
 		// And this server's idle timeout, for a client on a connection that
 		// asked what it is. It writes into the same record the cookie does, so
 		// it sits behind that and ahead of everything below which measures the
@@ -505,7 +480,7 @@ leave resting on a convention held one package away.
 */
 @(private)
 udp_ceiling :: proc(s: ^Server) -> int {
-	return max(s.cfg.server.max_udp_response, config.MIN_UDP_RESPONSE)
+	return max(live(s).cfg.server.max_udp_response, config.MIN_UDP_RESPONSE)
 }
 
 /*
@@ -1159,7 +1134,7 @@ resolve_query :: proc(
 	and meant for use while an attack is actually happening (RFC 7873 section
 	5.2.3).
 	*/
-	if cookie_must_be_refused(s.cookies, cookie, proto) {
+	if cookie_must_be_refused(live(s).cookies, cookie, proto) {
 		out, built := dns.error_response(query, msg, .Bad_Cookie, allocator, limit)
 		log_query(s, client, proto, q, .Refused, "cookie", started)
 		return out, .Refused, built
@@ -1233,7 +1208,7 @@ resolve_query :: proc(
 		return out, .Rewritten, true
 	}
 
-	if s.cfg.blocking.enabled && s.filters != nil {
+	if live(s).cfg.blocking.enabled && s.filters != nil {
 		typed_only: bool
 		if filter.engine_match(s.filters, q.name, q.type, &typed_only) == .Blocked {
 			count_answer(&s.stats.blocked)
@@ -1355,14 +1330,17 @@ resolve_query :: proc(
 	// under a signed public parent that delegates nothing to it. The same
 	// anchor escape hatch applies, and for the same reason. See `routes.odin`.
 	validating :=
-		s.validator != nil &&
+		live(s).validator != nil &&
 		!msg.flags.cd &&
 		q.class == .IN &&
 		!served_locally(s, q.name) &&
 		!special_use_deferred(s, q.name)
 
+	// Under this generation's policy number, so an answer judged by rules a
+	// reload has since replaced is never found here; see `Live.policy`.
+	policy := live(s).policy
 	key_buf: [cache.KEY_MAX]u8
-	key := cache.make_key(key_buf[:], q.name, q.type, q.class, dns.edns_do(msg), msg.flags.cd)
+	key := cache.make_key(key_buf[:], q.name, q.type, q.class, dns.edns_do(msg), msg.flags.cd, policy = policy)
 	// Where a `Bogus` verdict for this question is remembered, if one was
 	// reached. A key of its own so that the memory costs the answer under the
 	// question's own key nothing; see `remember_bogus_verdict`.
@@ -1375,6 +1353,7 @@ resolve_query :: proc(
 		dns.edns_do(msg),
 		msg.flags.cd,
 		verdict = true,
+		policy = policy,
 	)
 
 	/*
@@ -1390,9 +1369,8 @@ resolve_query :: proc(
 	Not read at all unless both halves are on. The number exists to date a stored
 	answer against the rule sets, so with nothing stored, or no rule sets to date
 	it against, it is a second trip through the engine's lock on every query for a
-	value nothing reads. With blocking off the engine is never swapped at all -
-	`reload_filters` runs only under that flag - so the number would sit at zero
-	and match every entry's stamp for the life of the process.
+	value nothing reads. With blocking off there are no rules to have matched an
+	entry against, so the number would date nothing.
 	*/
 	generation := rules_generation(s)
 
@@ -1545,11 +1523,11 @@ resolve_query :: proc(
 	*/
 	if unanswered == nil &&
 	   stale_hit.wire != nil &&
-	   s.cfg.cache.stale_timeout > 0 &&
+	   live(s).cfg.cache.stale_timeout > 0 &&
 	   s.handler_pool != nil {
 		if r := start_refresh(s, key, query, proto, client, limit, started); r != nil {
 			defer refresh_release(r)
-			if out, refreshed, code, taken := refresh_take(r, s.cfg.cache.stale_timeout, allocator);
+			if out, refreshed, code, taken := refresh_take(r, live(s).cfg.cache.stale_timeout, allocator);
 			   taken {
 				if ede != nil {
 					ede^ = code
@@ -1564,7 +1542,7 @@ resolve_query :: proc(
 			rather than being failed at the timer.
 			*/
 			if !stale_usable(stale_hit) {
-				wait := question_span(s, q.name, q.type) - s.cfg.cache.stale_timeout
+				wait := question_span(s, q.name, q.type) - live(s).cfg.cache.stale_timeout
 				if out, refreshed, code, taken := refresh_take(r, max(wait, 0), allocator); taken {
 					if ede != nil {
 						ede^ = code
@@ -1932,7 +1910,7 @@ resolve_query :: proc(
 			// other rcode may be about the leader's own bytes, unless they were these.
 			if landed_with.answer != nil {
 				rcode := dns.peek_rcode(landed_with.answer)
-				if same || (s.cfg.cache.enabled && (rcode == .No_Error || rcode == .NX_Domain)) {
+				if same || (live(s).cfg.cache.enabled && (rcode == .No_Error || rcode == .NX_Domain)) {
 					shared := Cached_Answer {
 						wire      = landed_with.answer,
 						ede       = landed_with.ede,
@@ -2508,7 +2486,7 @@ resolve_query :: proc(
 	answer_ede: u16
 	if validating {
 		result := dnssec.validate(
-			s.validator,
+			live(s).validator,
 			q.name,
 			q.type,
 			resp,
@@ -2646,7 +2624,7 @@ resolve_query :: proc(
 	*/
 	// `signatures_lapse` reads no bound at all for a message that carries none.
 	signed_left, _ := dns.signatures_lapse(resp, u32(time.time_to_unix(time.now())))
-	dns.cap_ttls(resp, min(cache.ttl_ceiling(s.answers), signed_left))
+	dns.cap_ttls(resp, min(cache.ttl_ceiling(live(s).answers), signed_left))
 
 	/*
 	Decoded once for the three things below that read it: the rebinding check
@@ -2663,9 +2641,9 @@ resolve_query :: proc(
 	full is simply not stored, and a second attempt at it buys nothing.
 	*/
 	checking_rebind := rebind_reads_answer(s, q)
-	walking := s.cfg.blocking.enabled && s.filters != nil
+	walking := live(s).cfg.blocking.enabled && s.filters != nil
 	decoded: Decoded_Answer
-	if s.cfg.cache.enabled || walking || checking_rebind {
+	if live(s).cfg.cache.enabled || walking || checking_rebind {
 		decoded = decode_answer(resp, walking || checking_rebind, spent, allocator)
 	}
 
@@ -2871,11 +2849,11 @@ resolve_query :: proc(
 			routed zone is also not the case the memoisation above was written
 			for.
 			*/
-			if s.cfg.cache.enabled &&
+			if live(s).cfg.cache.enabled &&
 			   decoded.full &&
 			   !unproven_apex_ds &&
 			   cloak_verdict_worth_keeping(verdict) {
-				kept := cache.put(s.answers, key, resp, decoded.msg, generation, u8(verdict), ede = answer_ede)
+				kept := cache.put(live(s).answers, key, resp, decoded.msg, generation, u8(verdict), ede = answer_ede)
 				if flight != nil && kept {
 					flight.stored = .Cloak
 				}
@@ -2912,8 +2890,8 @@ resolve_query :: proc(
 	happened before any of this was memoised, and the one that reaches a parent
 	willing to speak stores what it said.
 	*/
-	if s.cfg.cache.enabled && decoded.full && !unproven_apex_ds {
-		cache.put(s.answers, key, resp, decoded.msg, generation, ede = answer_ede)
+	if live(s).cfg.cache.enabled && decoded.full && !unproven_apex_ds {
+		cache.put(live(s).answers, key, resp, decoded.msg, generation, ede = answer_ede)
 	}
 	/*
 	What was just stored, or would have been, handed over and landed before
@@ -2946,7 +2924,7 @@ Which rule sets an answer is matched against, read only where both halves are on
 */
 @(private)
 rules_generation :: proc(s: ^Server) -> u64 {
-	if s.cfg.cache.enabled && s.cfg.blocking.enabled && s.filters != nil {
+	if live(s).cfg.cache.enabled && live(s).cfg.blocking.enabled && s.filters != nil {
 		return filter.engine_generation(s.filters)
 	}
 	return 0
@@ -2966,10 +2944,10 @@ stored_answer :: proc(
 	stored: Cached_Answer,
 	found: bool,
 ) {
-	if !s.cfg.cache.enabled {
+	if !live(s).cfg.cache.enabled {
 		return
 	}
-	wire, hit, got := cache.get(s.answers, key, allocator, checked_against = generation, prefetch = prefetch)
+	wire, hit, got := cache.get(live(s).answers, key, allocator, checked_against = generation, prefetch = prefetch)
 	if !got {
 		return
 	}
@@ -2999,10 +2977,10 @@ stored_verdict :: proc(
 	remembered: Cached_Answer,
 	found: bool,
 ) {
-	if !s.cfg.cache.enabled {
+	if !live(s).cfg.cache.enabled {
 		return
 	}
-	wire, hit, got := cache.get(s.answers, verdict_key, allocator, probe = true)
+	wire, hit, got := cache.get(live(s).answers, verdict_key, allocator, probe = true)
 	if !got || hit.stale {
 		return
 	}
@@ -3476,7 +3454,7 @@ remember_bogus_verdict :: proc(
 ) -> (
 	stored: bool,
 ) {
-	if !s.cfg.cache.enabled || result.status != .Bogus || unproven_apex_ds {
+	if !live(s).cfg.cache.enabled || result.status != .Bogus || unproven_apex_ds {
 		return
 	}
 	asked := msg
@@ -3497,7 +3475,7 @@ remember_bogus_verdict :: proc(
 	if derr != .None {
 		return
 	}
-	return cache.put(s.answers, verdict_key, wire, refusal, bogus = true)
+	return cache.put(live(s).answers, verdict_key, wire, refusal, bogus = true)
 }
 
 /*
@@ -3640,7 +3618,7 @@ serve_from_cache :: proc(
 			of the two refusals it was, so the query log says the same thing for
 			this hit as it said for the walk that decided it.
 			*/
-			cache.note_withheld(s.answers)
+			cache.note_withheld(live(s).answers)
 			out := refuse_cloaked(s, "", verdict, msg, q, proto, client, limit, started, allocator)
 			return out, cloak_outcome(verdict), true
 		}
@@ -3679,11 +3657,11 @@ serve_from_cache :: proc(
 				the upstream never asked again.
 				*/
 				if cloak_verdict_worth_keeping(verdict) {
-					cache.note_checked(s.answers, hit.key, hit.serial, hit.checked, u8(verdict))
+					cache.note_checked(live(s).answers, hit.key, hit.serial, hit.checked, u8(verdict))
 				} else {
-					cache.forget(s.answers, hit.key, hit.serial)
+					cache.forget(live(s).answers, hit.key, hit.serial)
 				}
-				cache.note_withheld(s.answers)
+				cache.note_withheld(live(s).answers)
 				return out, cloak_outcome(verdict), true
 			}
 			// Inside the decode, not after it. An entry nothing could read has
@@ -3691,7 +3669,7 @@ serve_from_cache :: proc(
 			// is the one way this mechanism could come to skip a walk it owed.
 			// Unreachable as things stand, because both stores are guarded on
 			// `decoded.full`, and not a thing to leave resting on that.
-			cache.note_checked(s.answers, hit.key, hit.serial, hit.checked, u8(Cloak_Verdict.Clear))
+			cache.note_checked(live(s).answers, hit.key, hit.serial, hit.checked, u8(Cloak_Verdict.Clear))
 		} else {
 			/*
 			The stored bytes would not decode, so the walk it is owed cannot be
@@ -3709,8 +3687,8 @@ serve_from_cache :: proc(
 			as it lived; dropping it sends the next query upstream for an answer
 			that can be read.
 			*/
-			cache.forget(s.answers, hit.key, hit.serial)
-			cache.note_withheld(s.answers)
+			cache.forget(live(s).answers, hit.key, hit.serial)
+			cache.note_withheld(live(s).answers)
 			count_answer(&s.stats.failed)
 			out, built := dns.error_response(query, msg, .Serv_Fail, allocator, limit)
 			log_query(s, client, proto, q, .Failed, "cache-unreadable", started)
@@ -3730,7 +3708,7 @@ serve_from_cache :: proc(
 		ede^ = hit.ede
 	}
 	if hit.stale {
-		cache.note_stale_served(s.answers)
+		cache.note_stale_served(live(s).answers)
 	}
 	count_answer(&s.stats.cached)
 	if hit.coalesced {
@@ -3910,12 +3888,12 @@ build_block_response :: proc(
 	limit: int,
 	typed_only := false,
 ) -> []u8 {
-	ttl := s.cfg.blocking.block_ttl
+	ttl := live(s).cfg.blocking.block_ttl
 
 	rcode := dns.Rcode.No_Error
 	answers := make([dynamic]dns.Record, 0, 1, allocator)
 
-	switch s.cfg.blocking.response {
+	switch live(s).cfg.blocking.response {
 	case .NX_Domain:
 		/*
 		Unless only a `$dnstype` rule blocked it (`typed_only`): NXDOMAIN says the
@@ -3947,7 +3925,7 @@ build_block_response :: proc(
 					type = .A,
 					class = .IN,
 					ttl = ttl,
-					data = dns.Rdata_A{addr = s.cfg.blocking.custom_ipv4},
+					data = dns.Rdata_A{addr = live(s).cfg.blocking.custom_ipv4},
 				},
 			)
 		case .AAAA:
@@ -3958,7 +3936,7 @@ build_block_response :: proc(
 					type = .AAAA,
 					class = .IN,
 					ttl = ttl,
-					data = dns.Rdata_AAAA{addr = s.cfg.blocking.custom_ipv6},
+					data = dns.Rdata_AAAA{addr = live(s).cfg.blocking.custom_ipv6},
 				},
 			)
 		}
@@ -4074,11 +4052,11 @@ apply_rewrite :: proc(
 	from := 0
 	records_held := false
 	search: for {
-		i, found := find_rewrite_index(s.cfg.rewrites, q.name, from)
+		i, found := find_rewrite_index(live(s).cfg.rewrites, q.name, from)
 		if !found {
 			return nil, false, nil
 		}
-		rule := s.cfg.rewrites[i]
+		rule := live(s).cfg.rewrites[i]
 
 		answers := make([dynamic]dns.Record, 0, len(rule.answers), allocator)
 		blocked := false
@@ -4560,7 +4538,7 @@ log_query :: proc(
 	started: time.Time,
 ) {
 	// A prefetch is not a query anybody sent; see `prefetching`.
-	if !s.cfg.log.queries || prefetching {
+	if !live(s).cfg.log.queries || prefetching {
 		return
 	}
 	elapsed := time.diff(started, time.now())

@@ -1032,12 +1032,12 @@ prefix_key :: proc(r: ^Rate_Limiter, address: net.Address) -> u64 {
 	return h if h != 0 else 1
 }
 
-start_rate_limiter :: proc(s: ^Server) -> bool {
-	cfg := s.cfg.server.rate_limit
+start_rate_limiter :: proc(l: ^Live) -> bool {
+	cfg := l.cfg.server.rate_limit
 	if !cfg.enabled {
 		return true
 	}
-	s.limiter = make_rate_limiter(
+	l.limiter = make_rate_limiter(
 		cfg.responses_per_second,
 		cfg.slip,
 		cfg.overrides,
@@ -1053,7 +1053,7 @@ start_rate_limiter :: proc(s: ^Server) -> bool {
 			"rate limit: %d responses/s per client prefix (/24, /64), counted separately for datagrams, for queries on a connection and for connections opened; 1 in %d over the datagram budget answered truncated, up to %d truncated answers/s, and over a connection nothing is",
 			cfg.responses_per_second,
 			cfg.slip,
-			int(s.limiter.tiers[0].rate[.Slip]),
+			int(l.limiter.tiers[0].rate[.Slip]),
 		)
 	} else {
 		logx.infof(
@@ -1088,13 +1088,13 @@ start_rate_limiter :: proc(s: ^Server) -> bool {
 	if text, say := rate_limit_denomination_line(
 		cfg.responses_per_second,
 		cfg.response_size_estimate,
-		s.cfg.server.max_udp_response,
+		l.cfg.server.max_udp_response,
 		context.temp_allocator,
 	); say {
 		logx.infof("%s", text)
 	} else if warning, warn := response_size_estimate_warning(
 		cfg.response_size_estimate,
-		s.cfg.server.max_udp_response,
+		l.cfg.server.max_udp_response,
 		context.temp_allocator,
 	); warn {
 		// And the other side of that silence: a key that was written and does
@@ -1108,7 +1108,7 @@ start_rate_limiter :: proc(s: ^Server) -> bool {
 	for line in rate_limit_override_lines(
 		cfg.overrides,
 		cfg.response_size_estimate,
-		s.cfg.server.max_udp_response,
+		l.cfg.server.max_udp_response,
 		context.temp_allocator,
 	) {
 		logx.infof("%s", line)
@@ -1320,9 +1320,9 @@ rate_limit_override_lines :: proc(
 	return out[:]
 }
 
-stop_rate_limiter :: proc(s: ^Server) {
-	destroy_rate_limiter(s.limiter)
-	s.limiter = nil
+stop_rate_limiter :: proc(l: ^Live) {
+	destroy_rate_limiter(l.limiter)
+	l.limiter = nil
 }
 
 // Read for the periodic stats line and by tests.

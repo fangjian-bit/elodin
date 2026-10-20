@@ -200,6 +200,9 @@ main :: proc() {
 	section(&r, "tls certificate reload")
 	run_reload_cases(&r)
 
+	section(&r, "configuration reload")
+	run_config_reload_cases(&r)
+
 	section(&r, "blocking and sink lists")
 	run_blocking_cases(&r)
 

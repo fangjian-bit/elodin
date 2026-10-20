@@ -150,7 +150,7 @@ METRICS_REQUEST_BUF :: 2048
 
 @(private)
 start_metrics :: proc(s: ^Server, l: ^Listeners) -> bool {
-	cfg := s.cfg.metrics
+	cfg := startup_config(s).metrics
 	endpoint, ok := parse_bind(cfg.address, cfg.port)
 	if !ok {
 		logx.errorf("metrics.address: %q is not a valid bind address", cfg.address)
@@ -298,7 +298,7 @@ serve_metrics :: proc(s: ^Server, l: ^Listeners, socket: net.TCP_Socket, client:
 	deciding how long the next scrape waits - see the note at the top of this
 	file.
 	*/
-	if req.path != s.cfg.metrics.path {
+	if req.path != startup_config(s).metrics.path {
 		_ = send_http_error(conn, "metrics", 404, "not found", false)
 		return
 	}
@@ -341,6 +341,8 @@ can be a query apart - which is what every Prometheus exporter does, and what
 `rate()` over a counter is already tolerant of.
 */
 render_metrics :: proc(s: ^Server, l: ^Listeners, allocator := context.allocator) -> string {
+	// One generation for the whole scrape, so its figures add up.
+	pin_scope(s)
 	b := strings.builder_make(allocator)
 
 	metrics.family(&b, "elodin_build_info", .Gauge, "The version of the running binary, as a label.")
@@ -449,7 +451,7 @@ render_metrics :: proc(s: ^Server, l: ^Listeners, allocator := context.allocator
 		"elodin_connections_max",
 		.Gauge,
 		"What server.max_connections allows.",
-		i64(s.cfg.server.max_connections),
+		i64(startup_config(s).server.max_connections),
 	)
 	// Published beside the total because `_active` against `_max` alone cannot
 	// say whether a server refusing connections is full or is refusing one
@@ -460,7 +462,7 @@ render_metrics :: proc(s: ^Server, l: ^Listeners, allocator := context.allocator
 		"elodin_connections_max_per_prefix",
 		.Gauge,
 		"How many of server.max_connections one client prefix (/24, /64) may hold; equal to the total when there is no such cap.",
-		i64(s.cfg.server.max_connections_per_prefix),
+		i64(startup_config(s).server.max_connections_per_prefix),
 	)
 	/*
 	The cost of arriving, which the two series above cannot show.
@@ -485,7 +487,7 @@ render_metrics :: proc(s: ^Server, l: ^Listeners, allocator := context.allocator
 		st.handshakes,
 	)
 
-	limited, slipped, conn_limited := rate_limit_stats(s.limiter)
+	limited, slipped, conn_limited := rate_limit_stats(live(s).limiter)
 	metrics.scalar(
 		&b,
 		"elodin_connections_rate_limited_total",
@@ -582,7 +584,7 @@ render_metrics :: proc(s: ^Server, l: ^Listeners, allocator := context.allocator
 		"elodin_dnssec_queries_shed_total",
 		.Counter,
 		"Questions whose chain-of-trust walk stopped short of an upstream, because as many were already waiting on one as this server allows at once. One per question, however many of its walks were turned away.",
-		dnssec.queries_shed(s.validator),
+		dnssec.queries_shed(live(s).validator),
 	)
 	// The other half of what a flood does to validation, and the only sign of
 	// it: a zone whose DNSKEY set is too large to cache is validated and then
@@ -595,7 +597,7 @@ render_metrics :: proc(s: ^Server, l: ^Listeners, allocator := context.allocator
 		"elodin_dnssec_oversized_key_sets_total",
 		.Counter,
 		"DNSKEY sets the zone cache declined to store because they were larger than one zone may hold. The answer still validated; what is lost is the caching, so every question about such a zone walks the chain again.",
-		dnssec.oversized_key_sets(s.validator),
+		dnssec.oversized_key_sets(live(s).validator),
 	)
 
 	render_udp_metrics(&b, l)
@@ -685,9 +687,9 @@ entries does the cache hold".
 */
 @(private)
 render_cache_metrics :: proc(b: ^strings.Builder, s: ^Server) {
-	cs := cache.stats(s.answers)
-	metrics.scalar(b, "elodin_cache_entries", .Gauge, "Answers held in the cache.", i64(cache.len_entries(s.answers)))
-	metrics.scalar(b, "elodin_cache_bytes", .Gauge, "Bytes the cached answers occupy.", i64(cache.bytes_used(s.answers)))
+	cs := cache.stats(live(s).answers)
+	metrics.scalar(b, "elodin_cache_entries", .Gauge, "Answers held in the cache.", i64(cache.len_entries(live(s).answers)))
+	metrics.scalar(b, "elodin_cache_bytes", .Gauge, "Bytes the cached answers occupy.", i64(cache.bytes_used(live(s).answers)))
 	metrics.scalar(b, "elodin_cache_hits_total", .Counter, "Lookups answered from the cache.", cs.hits)
 	metrics.scalar(b, "elodin_cache_misses_total", .Counter, "Lookups the cache could not answer.", cs.misses)
 	metrics.scalar(
@@ -801,7 +803,7 @@ sees zero only once the server really has nowhere to send those names.
 */
 @(private)
 render_upstream_metrics :: proc(b: ^strings.Builder, s: ^Server) {
-	if s.group == nil && len(s.routes) == 0 {
+	if live(s).group == nil && len(live(s).routes) == 0 {
 		return
 	}
 
@@ -825,7 +827,7 @@ render_upstream_metrics :: proc(b: ^strings.Builder, s: ^Server) {
 		}
 		for u in g.servers {
 			us := upstream.stats_of(u)
-			live := upstream.healthy(u)
+			up := upstream.healthy(u)
 			if i, found := at[u.spec.name]; found {
 				all[i].queries += us.queries
 				all[i].failures += us.failures
@@ -835,7 +837,7 @@ render_upstream_metrics :: proc(b: ^strings.Builder, s: ^Server) {
 				for n, e in us.failure_kinds {
 					all[i].kinds[e] += n
 				}
-				if live {
+				if up {
 					all[i].up = true
 				}
 				continue
@@ -851,13 +853,13 @@ render_upstream_metrics :: proc(b: ^strings.Builder, s: ^Server) {
 					unreadable = us.unreadable_rcode,
 					swept = us.swept_rcode,
 					kinds = us.failure_kinds,
-					up = live,
+					up = up,
 				},
 			)
 		}
 	}
-	add(&all, &at, s.group)
-	for route in s.routes {
+	add(&all, &at, live(s).group)
+	for route in live(s).routes {
 		add(&all, &at, route.group)
 	}
 
