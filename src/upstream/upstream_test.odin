@@ -322,6 +322,58 @@ expect_caller_holds_nothing :: proc(t: ^testing.T, track: ^mem.Tracking_Allocato
 	}
 }
 
+/*
+Reading a body costs the body and the reader's buffer, not a buffer grown by
+doubling past the body's size, nor one still holding every chunk already
+copied out. 600 KB lands a doubling buffer at 1 MiB.
+*/
+@(test)
+test_a_body_costs_about_twice_its_size_to_read :: proc(t: ^testing.T) {
+	SIZE :: 600_000
+	sized := strings.builder_make()
+	defer strings.builder_destroy(&sized)
+	fmt.sbprintf(&sized, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", SIZE)
+	chunked := strings.builder_make()
+	defer strings.builder_destroy(&chunked)
+	strings.write_string(&chunked, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+	for _ in 0 ..< SIZE / 1000 {
+		strings.write_string(&chunked, "3e8\r\n")
+		for _ in 0 ..< 1000 {
+			strings.write_byte(&chunked, 'x')
+		}
+		strings.write_string(&chunked, "\r\n")
+	}
+	strings.write_string(&chunked, "0\r\n\r\n")
+	for _ in 0 ..< SIZE {
+		strings.write_byte(&sized, 'x')
+	}
+
+	for reply, framing in ([2]string{strings.to_string(sized), strings.to_string(chunked)}) {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		defer mem.tracking_allocator_destroy(&track)
+		{
+			context.allocator = mem.tracking_allocator(&track)
+			resp, err, ok := exchange_against(t, reply, &track)
+			if !ok {
+				return
+			}
+			testing.expect_value(t, err, Error.None)
+			testing.expect_value(t, len(resp.body), SIZE)
+			delete(resp.body)
+		}
+		testing.expectf(
+			t,
+			track.peak_memory_allocated < 2.1 * SIZE,
+			"%s: a %d-byte body peaked at %d bytes",
+			framing == 0 ? "Content-Length" : "chunked",
+			SIZE,
+			track.peak_memory_allocated,
+		)
+	}
+	free_all(context.temp_allocator)
+}
+
 @(test)
 test_redirect_location_is_not_the_callers_to_free :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
@@ -927,10 +979,10 @@ test_reader_exact_refuses_a_negative_count :: proc(t: ^testing.T) {
 
 /*
 `reader_line`'s 64 KB guard must measure the unconsumed remainder, not the
-whole buffer. `Buf_Reader` never compacts, so once a body has pushed `r.buf`
-past 64 KB, every consumed byte stays counted against the guard forever - the
-next line that needs a fresh socket read would be refused even with nothing
-outstanding to read.
+whole buffer. Consumed bytes stay in `r.buf` until the next read drops them,
+so a guard on the whole buffer, once a body has pushed it past 64 KB, would
+refuse the next line that needs a fresh socket read with nothing outstanding to
+read.
 
 `r.buf` is primed here to simulate exactly that: a chunk body already consumed
 past 64 KB, with the cursor at the end of it, as `read_chunked` leaves things

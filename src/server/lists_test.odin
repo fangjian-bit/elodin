@@ -602,9 +602,7 @@ test_a_refresh_leaves_no_download_in_scratch :: proc(t: ^testing.T) {
 	/*
 	Scratch is cleared only when the maintenance tick ends, so a download read
 	into it is held for the whole refresh, and every list's buffers pile up on
-	top of the old and new rule sets: the production lists' ~27 MB
-	of text peaked a refresh at 190 MB, where loading them from disk peaked at
-	41 MB.
+	top of the old and new rule sets.
 	*/
 	LISTS :: 8
 	listener, url, ok := listen_one_list(t)

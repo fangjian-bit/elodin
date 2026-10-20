@@ -132,6 +132,9 @@ Buf_Reader :: struct {
 	// The peer has closed: what `reader_to_end` waits for, and the only thing
 	// that ends a body with no framing.
 	closed:   bool,
+	// Bytes consumed and then dropped from the front of `buf` by
+	// `reader_fill`, so `buf` being empty does not read as nothing received.
+	dropped:  int,
 }
 
 @(private)
@@ -147,6 +150,15 @@ reader_fill :: proc(r: ^Buf_Reader) -> Error {
 			return .Timeout
 		}
 		stream_set_read_timeout(r.stream, wait)
+	}
+	// What has been read past is dropped before reading more, or a chunked
+	// body would be held twice: here, and in the body its chunks are copied to.
+	// A view into `buf` lasts only until the next read, so nothing points here.
+	if r.pos > 0 {
+		kept := copy(r.buf[:], r.buf[r.pos:])
+		resize(&r.buf, kept)
+		r.dropped += r.pos
+		r.pos = 0
 	}
 	chunk: [8192]u8
 	n, err := stream_read(r.stream, chunk[:])
@@ -169,7 +181,7 @@ reader_fill :: proc(r: ^Buf_Reader) -> Error {
 	*/
 	if n == 0 {
 		r.closed = true
-		return .Peer_Closed if len(r.buf) == 0 else .IO_Error
+		return .Peer_Closed if len(r.buf) + r.dropped == 0 else .IO_Error
 	}
 	append(&r.buf, ..chunk[:n])
 	return .None
@@ -386,12 +398,9 @@ http_exchange :: proc(
 		stream_write(stream, req.body, deadline, idle) or_return
 	}
 
-	/*
-	On the heap rather than in scratch. The buffer holds the whole response and
-	grows by doubling, and scratch keeps every block it outgrows until the
-	caller's `free_all`: a blocklist refresh held about three times every list's
-	size until its last list had loaded.
-	*/
+	// On the heap rather than in scratch, which keeps every block the buffer
+	// outgrows until the caller's `free_all` - for a blocklist refresh, every
+	// list's download until the last one has loaded.
 	r := Buf_Reader {
 		stream   = stream,
 		buf      = make([dynamic]u8, 0, 8192),
@@ -536,7 +545,10 @@ http_exchange :: proc(
 	case content_length == 0:
 		resp.body = nil
 	case content_length > 0:
-		// Already bounded where the header was read.
+		// Already bounded where the header was read. Reserved whole rather than
+		// grown by doubling past it; not zeroed, so a length the peer never
+		// sends costs pages nobody touches.
+		non_zero_reserve(&r.buf, r.pos + content_length)
 		data := reader_exact(&r, content_length) or_return
 		out := make([]u8, len(data), allocator)
 		copy(out, data)
