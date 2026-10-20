@@ -2147,11 +2147,12 @@ resolve_query :: proc(
 	NODATA is `home.arpa.`'s answer from `arpa.`, it is RFC 8375 section 4 item
 	4.B's whole subject, and it is the only thing the parent can tell a
 	validating client that the route cannot. An NXDOMAIN, a `DS` RRset, a NOERROR
-	carrying something that is neither, an undecodable reply and no reply at all
-	are each the route's to answer instead - a zone nothing public delegates, a
-	signed zone whose internal view is another view, and an outage out there that
-	must not take the chain out from under a zone that is answering perfectly
-	well.
+	carrying something that is neither, a NODATA whose NSEC or NSEC3 shows a name
+	the parent holds rather than delegates, an undecodable reply and no reply at
+	all are each the route's to answer instead - a zone nothing public delegates,
+	a signed zone whose internal view is another view, and an outage out there
+	that must not take the chain out from under a zone that is answering
+	perfectly well.
 
 	A reply that says nothing about the name - SERVFAIL, REFUSED - is read the
 	same way as no reply at all, which is where this parts company with how an
@@ -2182,7 +2183,7 @@ resolve_query :: proc(
 		`settled` is the second half of the same reading, and it decides only
 		whether the route's answer is kept: see the store below.
 		*/
-		proved, settled := parent_answers_apex_ds(resp, q.name, uerr == .None, spent, allocator)
+		proved, settled := parent_answers_apex_ds(resp, q.name, uerr == .None, spent, live(s).cfg.dnssec.max_nsec3_iterations, allocator)
 		/*
 		And what it managed to say is remembered, for the next query rather than
 		for this one. Settled or not is the whole of it - no answer is kept, and
@@ -2283,7 +2284,9 @@ resolve_query :: proc(
 	the ordinary reading of a client's question and the right one when the route
 	was asked second, but an internal authority that is up and failing must not
 	stand as the answer while the parent holds the proof. An NXDOMAIN, a `DS`
-	RRset, a NOERROR somebody rewrote: each is a statement about this delegation
+	RRset, a NOERROR somebody rewrote, a NODATA beside the zone's own apex NSEC -
+	SOA set, the child speaking for the parent's side of the cut, which RFC 6840
+	section 4.4 rules out: each is a statement about this delegation
 	that the parent, not the route, is the authority for, and the memory must not
 	be what decides that the route's version of it is the one the client gets.
 
@@ -2311,11 +2314,11 @@ resolve_query :: proc(
 	were answered - at four timeouts, twenty seconds, long after the stub left.
 	*/
 	if memoised_parent != nil {
-		route_proved, _ := parent_answers_apex_ds(resp, q.name, uerr == .None, spent, allocator)
+		route_proved, _ := parent_answers_apex_ds(resp, q.name, uerr == .None, spent, live(s).cfg.dnssec.max_nsec3_iterations, allocator)
 		if !route_proved {
 			dns.set_id_in_place(forwarded, dns.random_id())
 			again, second, perr := upstream.resolve_answerable(memoised_parent, forwarded, allocator, &deadline)
-			proved, settled := parent_answers_apex_ds(again, q.name, perr == .None, spent, allocator)
+			proved, settled := parent_answers_apex_ds(again, q.name, perr == .None, spent, live(s).cfg.dnssec.max_nsec3_iterations, allocator)
 			remember_apex_ds_parent(s, q.name, perr == .None, settled)
 			/*
 			And whether what is served from here is kept turns on what the parent

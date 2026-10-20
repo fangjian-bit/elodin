@@ -288,6 +288,7 @@ has no DS. Anything else goes to the route:
 | parent says | why the route answers instead |
 |---|---|
 | NXDOMAIN | the public tree does not delegate the zone; a signed denial would make a validating client (RFC 8020) treat every name under it as gone |
+| "no data", but its NSEC or NSEC3 shows no delegation at the apex: NS bit clear, SOA bit set, or the name absent | the parent holds the name itself (say `corp.example.com` published as an A record), so there is no insecure delegation to prove (RFC 4035 section 5.2, RFC 6840 section 4.4). Treated as the row below: not cached |
 | a DS record | split horizon: the internal view has no matching key, so the client would get bogus. To validate a mirror of a signed zone, anchor it |
 | SERVFAIL, REFUSED, a NOERROR whose answer is not a DS, or nothing | nothing about the delegation was established. The rest of the parent's group is asked first |
 
@@ -303,8 +304,12 @@ asked first for the next ten seconds. That memory holds up to eight apexes and
 skips anchored zones. An answer given because the parent said NXDOMAIN or sent a
 DS is cached normally.
 
-A parent also says "no data" about a name inside its own zone that is not a
-delegation — `corp.example.com` published as an A record there. elodin cannot
-tell that apart and passes the proof on, which makes a validating client treat
-the local answers below it as bogus, correctly. Anchor such a zone, or do not
-route a name the public tree publishes.
+A "no data" with no NSEC or NSEC3 beside it is kept: the parent is unsigned, so
+there is no chain below it to break. So is one whose NSEC3 records are past
+`dnssec.max_nsec3_iterations`, or that shows only an opt-out span, since neither
+shows the name is not a delegation. The records are read, not validated; the
+client validates what it is handed.
+
+A strict validating client still treats the route's unsigned answers below a name the
+signed parent holds as bogus, correctly. Anchor such a zone, or do not route a
+name the public tree publishes.

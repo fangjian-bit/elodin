@@ -719,3 +719,60 @@ nsec3_proves_no_delegation :: proc(
 	cover, covered := nsec3_covering(n3s, name, budget)
 	return covered && cover.rr.flags & NSEC3_FLAG_OPT_OUT == 0, false
 }
+
+/*
+Whether the NSEC or NSEC3 records in an authority section show that nothing is
+delegated at `name`, read without verifying them.
+
+For a caller that has to tell an insecure delegation's NODATA for a `DS` from a
+NODATA for a name the parent holds itself, and that is not deciding anything a
+client is told is authentic: the records travel on with their signatures, and
+the client checks them. RFC 4035 section 5.2 gives the delegation's proof as an
+NSEC at the name with NS set and DS clear, RFC 5155 section 8.9 the NSEC3 one,
+and RFC 6840 section 4.4 rules out the child's own apex record - SOA set -
+standing for it. So what this reports is the other side: a record at the name
+with NS clear or SOA set, or records showing the name absent, which a wildcard
+NODATA does.
+
+Only a positive showing counts. No denial records at all, records past
+`max_iterations` or the hashing allowance, and an opt-out span are each the
+reading saying nothing, and false - the caller keeps whatever it decided
+without them. The hashing is charged to an allowance of its own,
+`MAX_NSEC3_ROUNDS_PER_QUERY`, so each reading is bounded however many records
+the reply carries.
+*/
+denial_shows_no_cut :: proc(authority: []dns.Record, name: string, max_iterations: int, allocator: mem.Allocator) -> bool {
+	nsecs := make([dynamic]Nsec_Rr, 0, 4, allocator)
+	n3s := make([dynamic]Nsec3_Rr, 0, 4, allocator)
+	for r in authority {
+		rdata, is_raw := raw_rdata(r)
+		if !is_raw {
+			continue
+		}
+		if r.type == .NSEC {
+			parsed, perr := parse_nsec(rdata, allocator)
+			if perr == .None {
+				append(&nsecs, Nsec_Rr{owner = r.name, rr = parsed})
+			}
+		} else if r.type == .NSEC3 {
+			parsed, perr := parse_nsec3(rdata)
+			if perr != .None {
+				continue
+			}
+			hash := make([]u8, 32, allocator)
+			n, decoded := base32hex_decode(first_label(r.name), hash)
+			if decoded && n == len(parsed.next_hash) {
+				append(&n3s, Nsec3_Rr{hash = hash[:n], rr = parsed})
+			}
+		}
+	}
+	if len(nsecs) > 0 && nsec_proves_no_delegation(nsecs[:], name) {
+		return true
+	}
+	if len(n3s) == 0 {
+		return false
+	}
+	budget := Nsec3_Budget{max_iterations = max_iterations}
+	shown, _ := nsec3_proves_no_delegation(n3s[:], name, dns.name_parent(name), &budget)
+	return shown
+}

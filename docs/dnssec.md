@@ -114,6 +114,8 @@ The most hashing one NSEC3 record may ask for. A record above it is not computed
   they prove nothing, SERVFAIL with extended error 27;
 - the zone's signed records still validate, and a forged record, wildcard
   included, is still SERVFAIL.
+- the parent's NODATA for a routed zone's apex `DS` is not read as showing a
+  name the parent holds; see [DS at a route's apex](upstreams.md#ds-at-a-routes-apex).
 
 The cost: anyone on the path can make a name in such a zone look absent — and,
 for a zone that has moved off such a chain, for as long as the old chain's
