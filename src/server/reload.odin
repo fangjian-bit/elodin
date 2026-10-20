@@ -14,7 +14,8 @@ What a configuration reload did, for the caller's bookkeeping.
 Reload_Outcome :: struct {
 	// A new configuration is in effect.
 	applied:       bool,
-	// Its blocking section changed, so the rule sets were rebuilt.
+	// The rule sets were built again: the blocking section changed, or it
+	// names `file:` lists, which every SIGHUP reads again (`reads_list_files`).
 	blocking:      bool,
 	// Whether every list the rebuilt rule sets wanted was current; see
 	// `reload_filters`. True when nothing was rebuilt.
@@ -81,7 +82,14 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 		logx.warnf("reload: %s changed, which takes a restart; it keeps the value the process started with until then", key)
 	}
 	if !differs(cur.cfg^, g.config) {
-		logx.infof("reload: nothing a reload puts into effect has changed")
+		if !reads_list_files(cur.cfg) {
+			logx.infof("reload: nothing a reload puts into effect has changed")
+			return
+		}
+		// The file is the same, and the lists it names on disk may not be.
+		logx.infof("reload: the configuration is unchanged; reading the blocklist files again")
+		out.blocking = true
+		rebuild_rules(s, cur.cfg, allow_network, &out)
 		return
 	}
 
@@ -108,7 +116,7 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 	}
 
 	changed := changed_sections(cur.cfg, g.cfg, context.temp_allocator)
-	out.blocking = rules_changed(cur.cfg.blocking, g.cfg.blocking)
+	out.blocking = rules_changed(cur.cfg.blocking, g.cfg.blocking) || reads_list_files(g.cfg)
 	if out.blocking {
 		remap_lists_loaded(s, cur.cfg, g.cfg)
 	}
@@ -129,15 +137,7 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 	}
 
 	if out.blocking {
-		swapped := filter.engine_generation(s.filters)
-		pin(s)
-		if g.cfg.blocking.enabled {
-			out.lists_current = reload_filters(s, allow_network)
-		} else {
-			clear_filters(s)
-		}
-		unpin(s)
-		out.rules = filter.engine_generation(s.filters) != swapped
+		rebuild_rules(s, g.cfg, allow_network, &out)
 	}
 
 	rebuilt := parts_text(built, context.temp_allocator)
@@ -146,6 +146,45 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 	}
 	logx.eventf(.Info, "reloaded", "changed=%s rebuilt=%s cache=%s", logx.quote(changed), logx.quote(rebuilt), answers)
 	return
+}
+
+/*
+Whether a SIGHUP reads blocklists off the disk: a `file:` list is the operator's
+own, edited in place, and a SIGHUP is how dnsmasq is told to read its hosts files
+again - the habit an operator brings. A downloaded list is not fetched for it,
+unless its cached copy is older than `refresh` anyway; see `fetch_list`.
+*/
+@(private)
+reads_list_files :: proc(cfg: ^config.Config) -> bool {
+	if !cfg.blocking.enabled {
+		return false
+	}
+	for list in cfg.blocking.lists {
+		if list.file != "" {
+			return true
+		}
+	}
+	for list in cfg.blocking.allow_lists {
+		if list.file != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// Build the rule sets `cfg` asks for, or take them away, under the generation
+// now current; `out.rules` says whether the ones in effect were replaced.
+@(private)
+rebuild_rules :: proc(s: ^Server, cfg: ^config.Config, allow_network: bool, out: ^Reload_Outcome) {
+	swapped := filter.engine_generation(s.filters)
+	pin(s)
+	if cfg.blocking.enabled {
+		out.lists_current = reload_filters(s, allow_network)
+	} else {
+		clear_filters(s)
+	}
+	unpin(s)
+	out.rules = filter.engine_generation(s.filters) != swapped
 }
 
 /*
@@ -169,6 +208,12 @@ and is the one whose strings live as long as the process.
 @(private)
 keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.allocator) -> []string {
 	changed := make([dynamic]string, allocator)
+	// A reader count both files leave to the machine moves with the CPUs it can
+	// see, as `server.running_workers` does below, and nothing the operator
+	// wrote changed.
+	if boot.server.sizing.derived_udp_readers && cfg.server.sizing.derived_udp_readers {
+		cfg.listeners.udp.readers = boot.listeners.udp.readers
+	}
 	hold(&changed, "listeners.udp", boot.listeners.udp, &cfg.listeners.udp)
 	hold(&changed, "listeners.tcp", boot.listeners.tcp, &cfg.listeners.tcp)
 	hold(&changed, "listeners.dot", boot.listeners.dot, &cfg.listeners.dot)

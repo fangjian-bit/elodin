@@ -852,6 +852,18 @@ test_bootstrap_refresh_does_not_orphan_its_key :: proc(t: ^testing.T) {
 	)
 	testing.expect_value(t, len(bootstrap_cache.entries), 1)
 
+	// A reload that replaces the bootstrap servers forgets what the old ones
+	// said: the entry is expired, not served, and asking again refreshes it in
+	// place. Checked here because this test owns the package-global cache.
+	bootstrap_forget()
+	sync.mutex_lock(&bootstrap_cache.mu)
+	forgotten := time.diff(bootstrap_cache.entries[HOST].expires, time.now()) >= 0
+	sync.mutex_unlock(&bootstrap_cache.mu)
+	testing.expect(t, forgotten, "a forgotten entry would still be served")
+	_, ok3 := bootstrap_resolve(servers, HOST)
+	testing.expect(t, ok3, "the lookup after forgetting failed")
+	testing.expect_value(t, len(track.allocation_map), settled)
+
 	// The cache is a package global that outlives this test, and its keys point
 	// into the tracking allocator that is about to go away.
 	sync.mutex_lock(&bootstrap_cache.mu)

@@ -194,7 +194,13 @@ Cache :: struct {
 	serials:      u64,
 	allocator:    mem.Allocator,
 	stats:        Stats,
+	// Which cache this is, never reused within the process; see `identity`.
+	id:           u64,
 }
+
+// The last number `make_cache` handed out.
+@(private)
+caches_made: u64
 
 // TTL handed out with a stale answer so the client comes back soon.
 STALE_TTL :: 30
@@ -279,9 +285,20 @@ Options :: struct {
 make_cache :: proc(opts: Options, allocator := context.allocator) -> ^Cache {
 	c := new(Cache, allocator)
 	c.allocator = allocator
+	c.id = sync.atomic_add(&caches_made, 1) + 1
 	apply_options(c, opts)
 	c.entries = make(map[string]^Entry, max(opts.max_entries, 16), allocator)
 	return c
+}
+
+/*
+Which cache `c` is, or 0 for none: a number no other cache in this process has
+had or will have. For a caller holding on to something about one cache across a
+point where it may have been destroyed and another made, which an address
+cannot tell apart - the allocator may hand the new one the old one's memory.
+*/
+identity :: proc(c: ^Cache) -> u64 {
+	return c.id if c != nil else 0
 }
 
 /*

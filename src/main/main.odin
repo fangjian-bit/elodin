@@ -942,10 +942,12 @@ reload :: proc(
 	}
 
 	out := server.reload_config(s, opts.config_path, !opts.no_fetch)
-	if out.applied {
+	if out.applied || out.blocking {
 		server.pin(s)
 		cfg := server.live(s).cfg
-		log_config_warnings(cfg)
+		if out.applied {
+			log_config_warnings(cfg)
+		}
 		if out.blocking {
 			last_refresh^ = time.now()
 			retry^ = 0

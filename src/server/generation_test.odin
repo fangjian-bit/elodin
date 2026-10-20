@@ -368,6 +368,16 @@ test_a_restart_only_key_dropped_from_the_file_is_named :: proc(t: ^testing.T) {
 	named = keep_restart_only(&derived, &moved, context.temp_allocator)
 	testing.expectf(t, len(named) == 0, "named %v for a file that names no worker count", named)
 	testing.expect_value(t, moved.server.workers, derived.server.workers)
+
+	// UDP readers left to the machine, which shows more CPUs than at startup:
+	// held, and nothing the operator wrote to name.
+	readers := load(t, BASE, &arena)
+	more := load(t, BASE, &arena)
+	testing.expect(t, readers.server.sizing.derived_udp_readers, "BASE names a reader count, so nothing is tested")
+	more.listeners.udp.readers = readers.listeners.udp.readers + 1
+	named = keep_restart_only(&readers, &more, context.temp_allocator)
+	testing.expectf(t, len(named) == 0, "named %v for a file that names no reader count", named)
+	testing.expect_value(t, more.listeners.udp.readers, readers.listeners.udp.readers)
 }
 
 @(private = "file")
@@ -829,4 +839,33 @@ test_a_retired_group_still_in_use_closes_its_idle_connections :: proc(t: ^testin
 	sync.sema_post(&h.release)
 	thread.join(holder)
 	thread.destroy(holder)
+}
+
+@(test)
+test_a_sighup_reads_a_list_file_again_with_the_configuration_unchanged :: proc(t: ^testing.T) {
+	/*
+	A `file:` list is the operator's own, edited in place; SIGHUP is how they
+	ask for it to be read, the way dnsmasq's SIGHUP reads its hosts files. Not
+	waiting for `blocking.refresh`, which is a day by default.
+	*/
+	list := fmt.tprintf("/tmp/elodin-server-generation-test-list-%d.txt", os.get_pid())
+	testing.expect(t, os.write_entire_file(list, "||one.example^\n") == nil)
+	defer os.remove(list)
+	text := swap(BASE, "blocking: { enabled: false }", fmt.tprintf("blocking: {{ enabled: true, lists: [{{ name: own, file: %q }}] }}", list))
+	f, ok := boot_fixture(t, "list-file", text)
+	if !ok {
+		return
+	}
+	defer close_fixture(f)
+	pin(&f.s)
+	reload_filters(&f.s, false)
+	unpin(&f.s)
+	testing.expect_value(t, filter.engine_match(f.s.filters, "one.example", .A), filter.Decision.Blocked)
+
+	testing.expect(t, os.write_entire_file(list, "||two.example^\n") == nil)
+	out := reload_from(t, f, text)
+	testing.expect(t, !out.applied, "an unchanged configuration made a new generation")
+	testing.expect(t, out.blocking && out.rules, "the list file was not read again")
+	testing.expect_value(t, filter.engine_match(f.s.filters, "two.example", .A), filter.Decision.Blocked)
+	testing.expect(t, filter.engine_match(f.s.filters, "one.example", .A) != .Blocked, "a line taken out of the file still blocks")
 }

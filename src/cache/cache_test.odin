@@ -850,3 +850,17 @@ test_a_denial_whose_soa_ttl_has_the_top_bit_set_is_not_cached :: proc(t: ^testin
 	testing.expect(t, !put(c, key_for(kb[:], "nx.example.test."), w, m), "a denial with a top-bit SOA TTL was cached")
 	free_all(context.temp_allocator)
 }
+
+@(test)
+test_a_cache_made_where_another_was_is_not_that_cache :: proc(t: ^testing.T) {
+	// The allocator is free to hand a new cache the memory of one just
+	// destroyed; `identity` is what tells them apart.
+	a := make_cache(Options{max_entries = 4})
+	first := identity(a)
+	destroy(a)
+	b := make_cache(Options{max_entries = 4})
+	defer destroy(b)
+	testing.expect(t, first != 0 && identity(b) != 0, "a cache has no identity")
+	testing.expect(t, identity(b) != first, "a new cache took an old one's identity")
+	testing.expect_value(t, identity(nil), u64(0))
+}

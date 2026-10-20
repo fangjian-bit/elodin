@@ -158,9 +158,10 @@ Refresh :: struct {
 	prefetch:   bool,
 	serial:     u64,
 	// The cache policy `key` was built under, and the cache it names an entry
-	// of; see `Live.policy`. The cache is compared, never read through.
+	// of, by `cache.identity` - the cache may be gone by the time this runs and
+	// another made where it was; see `Live.policy`.
 	policy:     u64,
-	answers:    ^cache.Cache,
+	answers:    u64,
 	mu:         sync.Mutex,
 	sema:       sync.Sema,
 	/*
@@ -287,7 +288,7 @@ start_refresh :: proc(
 	r.prefetch = prefetch
 	r.serial = serial
 	r.policy = live(s).policy
-	r.answers = live(s).answers
+	r.answers = cache.identity(live(s).answers)
 	// The waiter's, the table's and the job's, taken before the job can run.
 	r.refs = 3
 	s.refreshes.slots[free_slot] = r
@@ -440,7 +441,7 @@ refresh_job :: proc(data: rawptr) {
 	did not help; one that turned the cache off and on again leaves the policy
 	where it was and the entry in a cache that is gone.
 	*/
-	counted := r.prefetch && live(s).policy == r.policy && live(s).answers == r.answers
+	counted := r.prefetch && live(s).policy == r.policy && cache.identity(live(s).answers) == r.answers
 	if counted {
 		cache.note_prefetch(live(s).answers)
 	}

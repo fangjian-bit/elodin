@@ -381,6 +381,12 @@ build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built, carried: Parts,
 	if prev == nil ||
 	   differs(prev.cfg.upstream, cfg.upstream) ||
 	   prev.cfg.cookies.upstream != cfg.cookies.upstream {
+		// The hostnames too, before the new groups resolve theirs: an address
+		// the old bootstrap servers gave is otherwise dialled for up to
+		// `BOOTSTRAP_TTL` after a reload that replaced them.
+		if prev != nil && upstreams_asked_changed(prev.cfg.upstream, cfg.upstream) {
+			upstream.bootstrap_forget()
+		}
 		if !build_upstreams(s, l) {
 			return
 		}
