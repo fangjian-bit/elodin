@@ -1057,6 +1057,17 @@ the same shape stopped one layer further out, on the paths no validator
 		}
 	}
 
+	now := time.now()
+	now_unix := time.time_to_unix(now)
+	signed_left, signed := dns.signatures_lapse(wire, u32(now_unix))
+	// A message whose signature has already lapsed is not stored at all, past
+	// `min_ttl`, which is a floor on what records claim and not on what their
+	// signatures allow. A live one caps the lifetime below, at the expiration
+	// second. Above the SOA check, so a lapsed denial keeps the copy too.
+	if signed && signed_left == 0 {
+		return false
+	}
+
 	/*
 	A denial without a SOA is not an answer to remember either.
 
@@ -1121,9 +1132,6 @@ thing in both directions.
 	for the upstream's figure. `signed_left` is no bound at all for a message
 	that carries none.
 	*/
-	now := time.now()
-	now_unix := time.time_to_unix(now)
-	signed_left, signed := dns.signatures_lapse(wire, u32(now_unix))
 	// Read once each, atomically: this runs outside the lock `reconfigure`
 	// writes them under.
 	min_ttl := sync.atomic_load(&c.min_ttl)
@@ -1167,15 +1175,6 @@ thing in both directions.
 			effective = v if has else 0
 		}
 		effective = clamp(effective, min_ttl, max_ttl)
-	}
-	// A message whose signature has already lapsed is not stored at all, past
-	// `min_ttl`, which is a floor on what records claim and not on what their
-	// signatures allow. A live one caps the lifetime below, at the expiration
-	// second.
-	if signed && signed_left == 0 {
-		delete(offsets, c.allocator)
-		delete(ttls, c.allocator)
-		return false
 	}
 	if effective == 0 {
 		delete(offsets, c.allocator)

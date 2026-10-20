@@ -71,6 +71,7 @@ test_a_refused_answer_forgets_the_entry_it_supersedes :: proc(t: ^testing.T) {
 		{name = "a SERVFAIL", msg = supersede_msg(.Serv_Fail)},
 		{name = "a truncated answer", msg = truncated},
 		{name = "an answer whose signature lapsed", msg = supersede_msg(.No_Error, supersede_a(300), lapsed_rrsig())},
+		{name = "a NODATA without a SOA whose signature lapsed", msg = supersede_msg(.No_Error, lapsed_rrsig())},
 	}
 	for c in cases {
 		answers := make_cache(Options{max_entries = 8, max_ttl = 3600, serve_stale = true})

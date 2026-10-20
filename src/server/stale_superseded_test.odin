@@ -1,6 +1,7 @@
 package server
 
 import "core:net"
+import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -180,15 +181,17 @@ run_superseded :: proc(t: ^testing.T, c: Superseded_Case, detached: bool) {
 		return
 	}
 
-	// Late for the detached road, so the client is lent the copy and the
-	// reply reaches the cache alone; prompt where the client waits for it.
+	// On the detached road the reply waits for the client to have been lent
+	// the copy, so it reaches the cache alone; prompt where the client waits.
+	lent: sync.Sema
 	x := Stale_Exchange {
 		socket = socket,
 		reply  = c.reply,
-		delay  = 400 * time.Millisecond if detached else 0,
+		hold   = &lent if detached else nil,
 	}
 	mock := thread.create_and_start_with_poly_data(&x, serve_one_stale)
 	_, outcome, ok := handle_query(&s, stale_query(true), .UDP, "127.0.0.1:5555", context.temp_allocator)
+	sync.sema_post(&lent)
 	thread.join(mock)
 	thread.destroy(mock)
 	testing.expectf(t, ok, "%s: nothing came back", c.name)
