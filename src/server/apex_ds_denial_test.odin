@@ -141,6 +141,25 @@ test_an_apex_ds_nodata_is_the_proof_unless_the_denial_shows_no_delegation :: pro
 		testing.expectf(t, settled == c.proved, "%s: settled %v", c.what, settled)
 	}
 
+	/*
+	RFC 9824's compact denial: an NSEC at the name with only RRSIG, NSEC and
+	NXNAME, which a parent sends for a name it does not have. Not the proof, and
+	settled as the NXDOMAIN it stands for, so the route's answer is kept.
+	*/
+	{
+		spent := 0
+		proved, settled := parent_answers_apex_ds(
+			ds_nodata(APEX, nsec_at(APEX, "example.", .RRSIG, .NSEC, .NXNAME)),
+			APEX,
+			true,
+			&spent,
+			100,
+			context.temp_allocator,
+		)
+		testing.expect(t, !proved, "a compact denial was read as an insecure delegation")
+		testing.expect(t, settled, "a compact denial did not settle as the NXDOMAIN it stands for")
+	}
+
 	// A configured ceiling of zero is the validator's default, not zero: a
 	// record at ten iterations is read.
 	spent := 0

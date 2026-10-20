@@ -40,7 +40,7 @@ fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
 	}
 
 	if m, err := dns.decode_message(data[:size]); err == .None && len(m.question) == 1 {
-		_ = dnssec.denial_shows_no_cut(m.authority, m.question[0].name, 100, context.allocator)
+		_, _ = dnssec.denial_shows_no_cut(m.authority, m.question[0].name, 100, context.allocator)
 	}
 
 	split := (int(data[1]) << 8 | int(data[2])) % (len(rest) + 1)

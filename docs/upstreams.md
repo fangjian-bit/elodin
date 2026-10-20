@@ -288,7 +288,7 @@ has no DS. Anything else goes to the route:
 | parent says | why the route answers instead |
 |---|---|
 | NXDOMAIN | the public tree does not delegate the zone; a signed denial would make a validating client (RFC 8020) treat every name under it as gone |
-| "no data", but its NSEC or NSEC3 shows no delegation at the apex: NS bit clear, SOA bit set, or the name absent | the parent holds the name itself (say `corp.example.com` published as an A record), so there is no insecure delegation to prove (RFC 4035 section 5.2, RFC 6840 section 4.4). Treated as the row below: not cached |
+| "no data", but its NSEC or NSEC3 shows no delegation at the apex: NS bit clear, SOA bit set, or the name absent | the parent holds the name itself (say `corp.example.com` published as an A record), so there is no insecure delegation to prove (RFC 4035 section 5.2, RFC 6840 section 4.4). The route's answer is not cached, the records being unvalidated — except a compact denial (an NSEC with NXNAME, RFC 9824), which is cached like NXDOMAIN |
 | a DS record | split horizon: the internal view has no matching key, so the client would get bogus. To validate a mirror of a signed zone, anchor it |
 | SERVFAIL, REFUSED, a NOERROR whose answer is not a DS, or nothing | nothing about the delegation was established. The rest of the parent's group is asked first |
 

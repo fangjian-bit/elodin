@@ -468,9 +468,10 @@ parent_answers_apex_ds :: proc(
 	if len(msg.answer) != 0 {
 		return false, false
 	}
-	// A name the parent holds itself, not a delegation (issue #244).
-	if dnssec.denial_shows_no_cut(msg.authority, name, max_nsec3_iterations, allocator) {
-		return false, false
+	// A name the parent holds itself, not a delegation (issue #244) - or, under
+	// RFC 9824's compact denial, no name at all, which settles as NXDOMAIN does.
+	if held, absent := dnssec.denial_shows_no_cut(msg.authority, name, max_nsec3_iterations, allocator); held {
+		return false, absent
 	}
 	return true, true
 }

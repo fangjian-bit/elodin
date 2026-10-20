@@ -740,22 +740,35 @@ reading saying nothing, and false - the caller keeps whatever it decided
 without them. The hashing is charged to an allowance of its own,
 `MAX_NSEC3_ROUNDS_PER_QUERY`, so each reading is bounded however many records
 the reply carries.
+
+`absent` is the one showing that says more: an NSEC at the name with NXNAME in
+its bitmap, which is RFC 9824's compact denial standing for an NXDOMAIN - the
+name is not there at all. It implies `shown`.
 */
-denial_shows_no_cut :: proc(authority: []dns.Record, name: string, max_iterations: int, allocator: mem.Allocator) -> bool {
+denial_shows_no_cut :: proc(
+	authority: []dns.Record,
+	name: string,
+	max_iterations: int,
+	allocator: mem.Allocator,
+) -> (
+	shown: bool,
+	absent: bool,
+) {
 	nsecs := make([dynamic]Nsec_Rr, 0, 4, allocator)
 	n3s := make([dynamic]Nsec3_Rr, 0, 4, allocator)
 	for r in authority {
 		append_denial_record(r, &nsecs, &n3s, allocator)
 	}
 	if len(nsecs) > 0 && nsec_proves_no_delegation(nsecs[:], name) {
-		return true
+		match, found := nsec_matching(nsecs[:], name)
+		return true, found && bitmap_has(match.rr.types, .NXNAME)
 	}
 	if len(n3s) == 0 {
-		return false
+		return false, false
 	}
 	budget := Nsec3_Budget{max_iterations = nsec3_iterations_ceiling(max_iterations)}
-	shown, _ := nsec3_proves_no_delegation(n3s[:], name, dns.name_parent(name), &budget)
-	return shown
+	shown, _ = nsec3_proves_no_delegation(n3s[:], name, dns.name_parent(name), &budget)
+	return shown, false
 }
 
 /*
