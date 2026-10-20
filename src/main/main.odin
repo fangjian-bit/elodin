@@ -829,7 +829,9 @@ whoever it becomes.
 The blocklist cache goes over first. It is the one path still opened by name
 afterwards - the lists were downloaded above, as root, and a refresh some hours
 later reopens them - so without this the cache would silently stop being
-written the moment its owner changed.
+written the moment its owner changed. Whether or not blocking is on: a reload
+can turn it on once root is gone, and nothing could hand the directory over
+then.
 
 A drop that was asked for and did not happen ends the process. Carrying on
 would leave it as root while the log said otherwise, which is worse than not
@@ -849,7 +851,7 @@ drop_privileges :: proc(cfg: ^config.Config, service: privdrop.Identity) {
 		return
 	}
 
-	if cfg.blocking.enabled && cfg.blocking.cache_dir != "" {
+	if cfg.blocking.cache_dir != "" {
 		if !privdrop.hand_over(cfg.blocking.cache_dir, service) {
 			logx.warnf(
 				"could not give %q to %s; the lists are in effect but will be re-downloaded on each start",

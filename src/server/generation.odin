@@ -239,7 +239,7 @@ live_config :: proc(s: ^Server) -> ^config.Config {
 	if g := sync.atomic_load(&s.gens.current); g != nil {
 		return g.cfg
 	}
-	return s.cfg
+	return live(s).cfg
 }
 
 /*
@@ -487,14 +487,32 @@ policy_changed :: proc(prev, cfg: ^config.Config) -> bool {
 
 @(private)
 upstreams_asked_changed :: proc(a, b: config.Upstream_Config) -> bool {
-	if differs(a.servers, b.servers) || differs(a.bootstrap, b.bootstrap) || len(a.zones) != len(b.zones) {
+	if servers_asked_changed(a.servers, b.servers) || differs(a.bootstrap, b.bootstrap) || len(a.zones) != len(b.zones) {
 		return true
 	}
 	for zone, i in a.zones {
 		other := b.zones[i]
 		if differs(zone.domains, other.domains) ||
-		   differs(zone.upstream.servers, other.upstream.servers) ||
+		   servers_asked_changed(zone.upstream.servers, other.upstream.servers) ||
 		   differs(zone.upstream.bootstrap, other.upstream.bootstrap) {
+			return true
+		}
+	}
+	return false
+}
+
+// Everything but the name a server is logged and counted under, which changes
+// nothing about the answers it gives.
+@(private)
+servers_asked_changed :: proc(a, b: []config.Upstream_Spec) -> bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for x, i in a {
+		x, y := x, b[i]
+		x.name, x.named = "", false
+		y.name, y.named = "", false
+		if differs(x, y) {
 			return true
 		}
 	}

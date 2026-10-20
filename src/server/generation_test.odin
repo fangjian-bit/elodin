@@ -205,6 +205,15 @@ test_a_reload_moves_the_policy_for_rebind_and_dnssec_but_not_rewrites :: proc(t:
 	testing.expect(t, cur.policy != after_rebind, "turning validation on left unvalidated answers cached")
 	testing.expect(t, cur.validator != nil, "turning validation on built no validator")
 	testing.expect(t, .Validator in cur.owns, "the new validator is nobody's to release")
+
+	// Nor does the name a server is logged under.
+	named :: proc(name: string) -> string {
+		return swap(BASE, "servers: [\"127.0.0.1:1\"]", fmt.tprintf("servers: [{{ name: %s, address: 127.0.0.1, port: 1 }}]", name))
+	}
+	testing.expect(t, reload_from(t, f, named("one")).applied, "the named server did not load")
+	before = f.s.gens.current.policy
+	testing.expect(t, reload_from(t, f, named("two")).applied, "the rename did not load")
+	testing.expect_value(t, f.s.gens.current.policy, before)
 }
 
 @(test)
@@ -293,9 +302,20 @@ test_a_reload_holds_restart_only_keys_at_their_starting_values :: proc(t: ^testi
 	testing.expect(t, f.s.gens.current == old, "the running generation was replaced")
 
 	// With something else beside them, the rest is applied and they are held.
-	out = reload_from(t, f, BASE + "listeners: { udp: { port: 5301 } }\nrewrites:\n  - { domain: h.test, answer: 192.0.2.1 }\n")
+	out = reload_from(
+		t,
+		f,
+		strings.concatenate(
+			{
+				swap(BASE, "blocking: { enabled: false }", "blocking: { enabled: false, cache_dir: /var/tmp/elsewhere }"),
+				"listeners: { udp: { port: 5301 } }\nrewrites:\n  - { domain: h.test, answer: 192.0.2.1 }\n",
+			},
+			context.temp_allocator,
+		),
+	)
 	testing.expect(t, out.applied, "the reloadable part was not applied")
 	testing.expect_value(t, f.s.gens.current.cfg.listeners.udp.port, 5300)
+	testing.expect_value(t, f.s.gens.current.cfg.blocking.cache_dir, old.cfg.blocking.cache_dir)
 	testing.expect_value(t, f.s.gens.current.cfg.server.workers, workers)
 	testing.expect_value(t, len(f.s.gens.current.cfg.rewrites), 1)
 }

@@ -24,8 +24,9 @@ scrape_configs:
   per-name label.
 - It runs on one thread of its own: it takes no worker, no `max_connections`
   slot and no rate-limit budget from DNS clients.
-- A [reload](install.md#signals) that rebuilds the upstreams or the rate limiter
-  starts their counters again from zero, which `rate()` reads as a counter reset.
+- A [reload](install.md#signals) that rebuilds the upstreams, the rate limiter,
+  the DNSSEC validator or the cache (turned off and on again) starts their
+  counters again from zero, which `rate()` reads as a counter reset.
 
 | metric | type | what it is |
 |---|---|---|

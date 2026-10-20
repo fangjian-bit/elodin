@@ -301,19 +301,18 @@ reconfigure :: proc(c: ^Cache, opts: Options) {
 	sync.mutex_lock(&c.mu)
 	defer sync.mutex_unlock(&c.mu)
 	apply_options(c, opts)
-	for (len(c.entries) > c.max_entries || c.bytes > c.max_bytes) && c.tail != nil {
-		remove_entry(c, c.tail)
-		c.stats.evictions += 1
-	}
+	evict_over_limits(c)
 }
 
 @(private)
 apply_options :: proc(c: ^Cache, opts: Options) {
 	c.max_entries = max(opts.max_entries, 1)
-	c.max_bytes = opts.max_bytes if opts.max_bytes > 0 else DEFAULT_MAX_BYTES
-	c.min_ttl = opts.min_ttl
+	sync.atomic_store(&c.max_bytes, opts.max_bytes if opts.max_bytes > 0 else DEFAULT_MAX_BYTES)
+	// The three lifetimes and the byte budget atomically: `put` reads them
+	// before it takes the lock, and `ttl_ceiling` without it.
+	sync.atomic_store(&c.min_ttl, opts.min_ttl)
 	sync.atomic_store(&c.max_ttl, opts.max_ttl if opts.max_ttl > 0 else 86400)
-	c.negative_ttl = opts.negative_ttl
+	sync.atomic_store(&c.negative_ttl, opts.negative_ttl)
 	c.serve_stale = opts.serve_stale
 	c.prefetch = opts.prefetch
 	c.prefetch_min = time.Duration(opts.prefetch_min_ttl) * time.Second
@@ -1095,8 +1094,13 @@ thing in both directions.
 	now := time.now()
 	now_unix := time.time_to_unix(now)
 	signed_left, signed := dns.signatures_lapse(wire, u32(now_unix))
+	// Read once each, atomically: this runs outside the lock `reconfigure`
+	// writes them under.
+	min_ttl := sync.atomic_load(&c.min_ttl)
+	max_ttl := sync.atomic_load(&c.max_ttl)
+	negative_ttl := sync.atomic_load(&c.negative_ttl)
 	for &t in ttls {
-		t = min(t, c.max_ttl, signed_left)
+		t = min(t, max_ttl, signed_left)
 	}
 
 	effective: u32
@@ -1105,7 +1109,7 @@ thing in both directions.
 		// `min_ttl`: that floor is how long the shortest *answer* is good for,
 		// and stretching a verdict to meet it would hold a zone broken past the
 		// minute this is allowed to.
-		effective = min(u32(BOGUS_TTL), c.max_ttl)
+		effective = min(u32(BOGUS_TTL), max_ttl)
 	} else {
 		if negative {
 			/*
@@ -1125,14 +1129,14 @@ thing in both directions.
 					effective = min(effective, dns.sane_ttl(r.ttl))
 				}
 			}
-			if c.negative_ttl > 0 {
-				effective = min(effective, c.negative_ttl)
+			if negative_ttl > 0 {
+				effective = min(effective, negative_ttl)
 			}
 		} else {
 			v, has := dns.min_ttl(ttls)
 			effective = v if has else 0
 		}
-		effective = clamp(effective, c.min_ttl, c.max_ttl)
+		effective = clamp(effective, min_ttl, max_ttl)
 	}
 	// A message whose signature has already lapsed is not stored at all, past
 	// `min_ttl`, which is a floor on what records claim and not on what their
@@ -1157,7 +1161,7 @@ thing in both directions.
 	response can be.
 	*/
 	size := sizeof_entry(key, wire, offsets, ttls)
-	if size > c.max_bytes {
+	if size > sync.atomic_load(&c.max_bytes) {
 		delete(offsets, c.allocator)
 		delete(ttls, c.allocator)
 		return false
@@ -1215,11 +1219,17 @@ thing in both directions.
 	// Both bounds, because the count alone is not one: see DEFAULT_MAX_BYTES. The
 	// entry just inserted is at the head and was refused above if it could not
 	// fit by itself, so this cannot come round to evicting it.
+	evict_over_limits(c)
+	return true
+}
+
+// Evict from the tail until both bounds hold. The caller holds `c.mu`.
+@(private)
+evict_over_limits :: proc(c: ^Cache) {
 	for (len(c.entries) > c.max_entries || c.bytes > c.max_bytes) && c.tail != nil {
 		remove_entry(c, c.tail)
 		c.stats.evictions += 1
 	}
-	return true
 }
 
 // Drop everything, e.g. after a configuration reload.

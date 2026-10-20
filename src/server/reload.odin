@@ -155,7 +155,8 @@ privileges were dropped: a port below 1024 cannot be bound again, and the worker
 threads that serve them are started once. The pool sizes and the connection
 table, because pools are not resized in place, and the DNSSEC chain-walk bounds
 derived from them would otherwise describe pools that do not exist. And the
-account, because root, once given up, cannot be had back. The certificates under
+account, because root, once given up, cannot be had back - nor, with it, the
+handover of the blocklist cache directory to that account. The certificates under
 `listeners.dot` and `listeners.doh` are still read again on every SIGHUP, from
 the paths the process started with.
 
@@ -197,6 +198,9 @@ keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.alloca
 	)
 	hold(&changed, "server.user", boot.server.user, &cfg.server.user)
 	hold(&changed, "server.group", boot.server.group, &cfg.server.group)
+	// Handed to `server.user` at startup, as root; a directory named afterwards
+	// would be one the process cannot write its cached lists into.
+	hold(&changed, "blocking.cache_dir", boot.blocking.cache_dir, &cfg.blocking.cache_dir)
 
 	/*
 	What the loader derives from those keys where the file leaves a figure unset

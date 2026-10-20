@@ -144,7 +144,7 @@ ts=2026-10-19T19:35:57Z level=info msg=reloaded changed=upstream,rewrites rebuil
 | `dnssec` | a change rebuilds the validator, which fetches its zone keys again |
 | `cookies` | applied; the secret is kept unless `cookies.secret` changes |
 | `blocking` | a change rebuilds the rule sets; a list whose cached copy is within `refresh` is not downloaded again |
-| `listeners`, `metrics`, `server.workers`, `upstream_workers`, `running_workers`, `max_connections`, `max_connections_per_prefix`, `user`, `group` | need a restart; each one changed is named in a warning and keeps the value it started with |
+| `listeners`, `metrics`, `server.workers`, `upstream_workers`, `running_workers`, `max_connections`, `max_connections_per_prefix`, `user`, `group`, `blocking.cache_dir` | need a restart; each one changed is named in a warning and keeps the value it started with |
 
 A change to which upstreams are asked (`upstream.servers`, `upstream.bootstrap`,
 `upstream.zones` and their servers), to `dnssec` or `rebind`, or to `cache.min_ttl`,

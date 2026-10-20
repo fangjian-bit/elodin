@@ -157,6 +157,8 @@ Refresh :: struct {
 	// started for; see `start_prefetch`.
 	prefetch:   bool,
 	serial:     u64,
+	// The cache policy `key` was built under; see `Live.policy`.
+	policy:     u64,
 	mu:         sync.Mutex,
 	sema:       sync.Sema,
 	/*
@@ -282,6 +284,7 @@ start_refresh :: proc(
 	r.started = started
 	r.prefetch = prefetch
 	r.serial = serial
+	r.policy = live(s).policy
 	// The waiter's, the table's and the job's, taken before the job can run.
 	r.refs = 3
 	s.refreshes.slots[free_slot] = r
@@ -426,7 +429,14 @@ refresh_job :: proc(data: rawptr) {
 	// Before the deferred block below, so it is still pinned when that runs.
 	pin_scope(s)
 	prefetching = r.prefetch
-	if r.prefetch {
+	/*
+	Counted only under the policy the entry was stored with. A reload that moved
+	it between the claim and this job leaves `r.key` naming an entry no query
+	can find, and the answer below goes under the new key, so `renewed` would
+	read every such prefetch as one that did not help.
+	*/
+	counted := r.prefetch && live(s).policy == r.policy
+	if counted {
 		cache.note_prefetch(live(s).answers)
 	}
 	defer {
@@ -435,7 +445,7 @@ refresh_job :: proc(data: rawptr) {
 		and still leave nothing to store, and then the old entry is what the
 		next client meets, and what it will meet until it expires.
 		*/
-		if r.prefetch && !cache.renewed(live(s).answers, r.key, r.serial) {
+		if counted && !cache.renewed(live(s).answers, r.key, r.serial) {
 			cache.note_prefetch_failed(live(s).answers)
 		}
 		prefetching = false
