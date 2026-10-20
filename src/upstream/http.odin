@@ -132,9 +132,8 @@ Buf_Reader :: struct {
 	// The peer has closed: what `reader_to_end` waits for, and the only thing
 	// that ends a body with no framing.
 	closed:   bool,
-	// Bytes have been read past and dropped from `buf`, so its being empty
-	// does not mean nothing arrived.
-	dropped:  bool,
+	// Some of the response has arrived, whether or not `buf` still holds it.
+	received: bool,
 }
 
 /*
@@ -162,7 +161,6 @@ reader_fill :: proc(r: ^Buf_Reader, unread := 0) -> Error {
 	if r.pos > 0 {
 		kept := copy(r.buf[:], r.buf[r.pos:])
 		resize(&r.buf, kept)
-		r.dropped = true
 		r.pos = 0
 	}
 	chunk: [8192]u8
@@ -178,22 +176,25 @@ reader_fill :: proc(r: ^Buf_Reader, unread := 0) -> Error {
 	keep-alive` costs when the server's idle timer is shorter than ours - and
 	is the one thing `record_failure` must not read as an outage. Once a byte
 	of the response has arrived the same close is a reply cut in half, which is
-	the server breaking and has to be counted as one; `r.buf` is per exchange,
-	so its being empty is exactly that question.
+	the server breaking and has to be counted as one, which is what `received`
+	answers.
 
 	`reader_to_end` reaches here for the opposite reason, as the close that
 	ends a body with no length, and discards whichever of the two it gets.
 	*/
 	if n == 0 {
 		r.closed = true
-		return .Peer_Closed if len(r.buf) == 0 && !r.dropped else .IO_Error
+		return .Peer_Closed if !r.received else .IO_Error
 	}
-	// Grown only as bytes arrive, never past what a waiting read needs: a
-	// length the peer declares and never sends reserves nothing.
+	r.received = true
+	// Doubled as bytes arrive, but never past what a waiting read needs - the
+	// cursor is at zero once consumed bytes are dropped, so that is `unread`.
+	// Not reserved to `unread` outright: a length the peer declares and never
+	// sends must not cost more than twice what it did send.
 	if need := len(r.buf) + n; need > cap(r.buf) {
 		grow := max(2 * cap(r.buf), need)
 		if unread > 0 {
-			grow = min(grow, max(r.pos + unread, need))
+			grow = min(grow, max(unread, need))
 		}
 		reserve(&r.buf, grow)
 	}
@@ -337,9 +338,9 @@ MAX_HTTP_BODY :: 64 * 1024 * 1024
 /*
 How many header fields — or trailer fields, which are read by the same loop —
 one exchange may carry. Interim (1xx) responses draw on the headers' budget,
-each one costing a field on top of its own: the reader keeps every line it has
-read for the whole exchange, so a budget per response would let a run of interim
-responses hold a hundred times as much. Trailers have a budget of their own.
+each one costing a field on top of its own, so a budget per response would let a
+run of interim responses go on a hundred times as long. Trailers have a budget
+of their own.
 
 `reader_line` bounds a line at 64 KB but says nothing about how many lines
 follow, so a peer sending short fields forever was answered for as long as it
