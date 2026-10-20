@@ -132,6 +132,28 @@ run_config_reload_cases :: proc(r: ^Runner) {
 	}
 	end_case(r)
 
+	// The accept loop checks `server.allow_from` once, so a reload that narrows
+	// it has to reach the connections already open as well.
+	start_case(r, "config reload: a connection held across a reload that drops its network from allow_from is refused")
+	{
+		socket, derr := net.dial_tcp_from_endpoint(net.Endpoint{address = net.IP4_Loopback, port = udp_port})
+		if check(r, derr == nil, "cannot connect over tcp") {
+			defer net.close(socket)
+			_ = net.set_option(socket, .Receive_Timeout, CLIENT_TIMEOUT)
+			_ = net.set_option(socket, .Send_Timeout, CLIENT_TIMEOUT)
+			conn := Test_Conn {
+				socket = socket,
+			}
+			check(r, stream_query(&conn, build_query("rw.reload.test.", u16(dns.Type.A)), context.temp_allocator).ok, "no answer before the reload")
+			narrowed := config_reload_text(udp_port, a_port, "  allow_from: [\"192.0.2.0/24\"]\n")
+			if check(r, reload_to(r, &srv, narrowed, "msg=reloaded"), "the reload was never logged") {
+				after := stream_query(&conn, build_query("rw.reload.test.", u16(dns.Type.A)), context.temp_allocator)
+				check(r, !after.ok, "a source allow_from no longer admits was answered on its held connection")
+			}
+		}
+	}
+	end_case(r)
+
 	start_case(r, "config reload: a changed upstream is asked from then on, and its predecessor's cached answers are not served")
 	{
 		if check(r, reload_to(r, &srv, config_reload_text(udp_port, b_port, REWRITE), "msg=reloaded"), "the reload was never logged") {

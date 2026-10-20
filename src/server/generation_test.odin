@@ -378,6 +378,15 @@ test_a_restart_only_key_dropped_from_the_file_is_named :: proc(t: ^testing.T) {
 	named = keep_restart_only(&readers, &more, context.temp_allocator)
 	testing.expectf(t, len(named) == 0, "named %v for a file that names no reader count", named)
 	testing.expect_value(t, more.listeners.udp.readers, readers.listeners.udp.readers)
+
+	// A per-prefix share neither file writes moves with `max_connections`, which
+	// is the one key the operator changed and the one to name.
+	table := load(t, BASE, &arena)
+	halved := load(t, swap(BASE, "server:\n", fmt.tprintf("server:\n  max_connections: %d\n", table.server.max_connections / 2)), &arena)
+	testing.expect(t, halved.server.max_connections_per_prefix != table.server.max_connections_per_prefix, "the share did not move, so nothing is tested")
+	named = keep_restart_only(&table, &halved, context.temp_allocator)
+	testing.expectf(t, len(named) == 1 && named[0] == "server.max_connections", "named %v", named)
+	testing.expect_value(t, halved.server.max_connections_per_prefix, table.server.max_connections_per_prefix)
 }
 
 @(private = "file")
@@ -868,4 +877,27 @@ test_a_sighup_reads_a_list_file_again_with_the_configuration_unchanged :: proc(t
 	testing.expect(t, out.blocking && out.rules, "the list file was not read again")
 	testing.expect_value(t, filter.engine_match(f.s.filters, "two.example", .A), filter.Decision.Blocked)
 	testing.expect(t, filter.engine_match(f.s.filters, "one.example", .A) != .Blocked, "a line taken out of the file still blocks")
+}
+
+/*
+`server.allow_from` is checked at accept, and again before every query on a
+connection, so a reload that narrows it reaches the connections already held.
+*/
+@(test)
+test_a_held_connection_is_read_against_the_allow_list_in_effect :: proc(t: ^testing.T) {
+	cfg := config.default_config()
+	s := Server {
+		cfg = &cfg,
+	}
+	peer := net.Endpoint {
+		address = net.IP4_Loopback,
+		port    = 5300,
+	}
+	testing.expect(t, stream_source_allowed(&s, peer, .TCP), "loopback refused under the default list")
+
+	narrowed, ok := config.parse_prefix("192.0.2.0/24")
+	testing.expect(t, ok, "the prefix did not parse")
+	cfg.server.allow_from = []config.Prefix{narrowed}
+	testing.expect(t, !stream_source_allowed(&s, peer, .TCP), "a source the list no longer names was admitted")
+	testing.expect_value(t, s.stats.refused, 1)
 }

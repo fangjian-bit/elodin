@@ -1851,6 +1851,9 @@ serve_dns_stream :: proc(s: ^Server, conn: Conn, proto: Protocol, client: string
 		buy nothing and cost up to `STREAM_LINGER_TIMEOUT` of one of
 		`max_connections`, which is the slot this close exists to hand back.
 		*/
+		if !stream_source_allowed(s, conn.peer, proto) {
+			return
+		}
 		if !stream_admits(s, conn.peer) {
 			report_rate_limited(client, proto, true)
 			if answered {

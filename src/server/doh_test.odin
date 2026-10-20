@@ -1894,11 +1894,12 @@ test_doh_a_slow_answer_does_not_count_against_the_connection :: proc(t: ^testing
 	// What ends `serve_doh` once both are answered.
 	net.shutdown(client, .Send)
 
-	accepted, _, aerr := net.accept_tcp(listener)
+	accepted, peer, aerr := net.accept_tcp(listener)
 	if !testing.expectf(t, aerr == nil, "nothing connected: %v", aerr) {
 		return
 	}
-	serve_doh(&s, Conn{socket = accepted}, "test")
+	// With its peer, which `server.allow_from` is read against per request.
+	serve_doh(&s, Conn{socket = accepted, peer = peer}, "test")
 	// Closed now so the read below ends at EOF, not at its timeout.
 	net.close(accepted)
 

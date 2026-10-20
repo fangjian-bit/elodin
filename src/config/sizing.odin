@@ -113,6 +113,8 @@ Sizing :: struct {
 	derived_connection_walks: bool,
 	derived_udp_readers:      bool,
 	derived_max_pending:      bool,
+	// `server.max_connections_per_prefix`, from `max_connections`.
+	derived_per_prefix:       bool,
 }
 
 /*

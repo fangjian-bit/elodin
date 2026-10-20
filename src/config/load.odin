@@ -3016,6 +3016,7 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 	*/
 	if cfg.server.max_connections_per_prefix == 0 {
 		cfg.server.max_connections_per_prefix = max(cfg.server.max_connections / 2, 1)
+		cfg.server.sizing.derived_per_prefix = true
 	}
 	cfg.server.max_connections_per_prefix = min(
 		cfg.server.max_connections_per_prefix,

@@ -959,9 +959,8 @@ reload :: proc(
 		server.unpin(s)
 	}
 
-	server.pin(s)
+	// From the paths the process started with, which need no pin.
 	server.reload_tls(s, listeners)
-	server.unpin(s)
 }
 
 // Everything the maintenance loop does on an ordinary tick, under the

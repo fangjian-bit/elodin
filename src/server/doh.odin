@@ -711,6 +711,9 @@ serve_doh_request :: proc(
 	`client_timeout` between requests and by `max_connections` across them. A
 	flooder occupies the same one slot either way.
 	*/
+	if !stream_source_allowed(s, conn.peer, .DoH) {
+		return send_http_error(conn, "doh", 403, "forbidden", false)
+	}
 	asked^ = true
 	if !stream_admits(s, conn.peer) {
 		report_rate_limited(client, .DoH, !req.keep_alive)

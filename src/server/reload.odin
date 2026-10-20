@@ -247,11 +247,14 @@ keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.alloca
 		boot.server.sizing.derived_running_workers && cfg.server.sizing.derived_running_workers,
 	)
 	hold(&changed, "server.max_connections", boot.server.max_connections, &cfg.server.max_connections)
+	// Unnamed when both files leave it to be derived: it moves with
+	// `max_connections`, which is already the key to name.
 	hold(
 		&changed,
 		"server.max_connections_per_prefix",
 		boot.server.max_connections_per_prefix,
 		&cfg.server.max_connections_per_prefix,
+		boot.server.sizing.derived_per_prefix && cfg.server.sizing.derived_per_prefix,
 	)
 	hold(&changed, "server.user", boot.server.user, &cfg.server.user)
 	hold(&changed, "server.group", boot.server.group, &cfg.server.group)

@@ -44,9 +44,10 @@ Live :: struct {
 	anything, which is what a `Server` built as a literal wants.
 
 	One per generation because the names in it are the routes' own strings,
-	which live exactly as long as the configuration they were read from. A
-	reload starts with no memory, which costs at most one cooldown's worth of
-	queries to a parent that is still not settling.
+	which live as long as the generation that owns the routes - this one, or a
+	newer one they were handed to, which is released after it. A reload starts
+	with no memory, which costs at most one cooldown's worth of queries to a
+	parent that is still not settling.
 	*/
 	apex_memo:    Apex_Memo,
 	// Nil when `cache.enabled` is off.
@@ -259,6 +260,30 @@ client_timeout :: proc(s: ^Server) -> time.Duration {
 stream_admits :: proc(s: ^Server, peer: net.Endpoint) -> bool {
 	pin_scope(s)
 	return stream_rate_check(live(s).limiter, peer, time.tick_now())
+}
+
+/*
+Whether a connection's peer is still inside `server.allow_from`, asked before
+each query on it. The accept loop checks the list once, and a reload that
+narrows it has to cut off the connections already held as well: a client kept
+on one would otherwise be answered for as long as it kept asking.
+
+Logged at debug rather than through `report_refusal`, which releases the
+calling thread's temp arena - one a connection thread is still reading its
+request out of here.
+*/
+stream_source_allowed :: proc(s: ^Server, peer: net.Endpoint, proto: Protocol) -> bool {
+	pin_scope(s)
+	if config.source_allowed(live(s).cfg.server.allow_from, peer.address) {
+		return true
+	}
+	sync.atomic_add(&s.stats.refused, 1)
+	logx.debugf(
+		"%s: refusing a query from %s, which server.allow_from no longer admits",
+		proto_name(proto),
+		net.endpoint_to_string(peer, context.temp_allocator),
+	)
+	return false
 }
 
 // Whether two values of one type differ anywhere, slices and strings included.
