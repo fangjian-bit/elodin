@@ -310,6 +310,6 @@ there is no chain below it to break. So is one whose NSEC3 records are past
 shows the name is not a delegation. The records are read, not validated; the
 client validates what it is handed.
 
-A strict validating client still treats the route's unsigned answers below a name the
+A strict validating client treats the route's unsigned answers below a name the
 signed parent holds as bogus, correctly. Anchor such a zone, or do not route a
 name the public tree publishes.

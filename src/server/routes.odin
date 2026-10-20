@@ -450,7 +450,7 @@ parent_answers_apex_ds :: proc(
 		return false, false
 	}
 	// The authority section too, for the denial records below; a reply whose
-	// later sections would not decode is read as far as its answer, as before.
+	// later sections would not decode is read as far as its answer.
 	msg, err := dns.decode_message(resp, allocator, spent)
 	if err != .None {
 		msg, err = dns.decode_through_answer(resp, allocator, spent)

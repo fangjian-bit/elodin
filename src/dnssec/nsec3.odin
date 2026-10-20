@@ -745,26 +745,7 @@ denial_shows_no_cut :: proc(authority: []dns.Record, name: string, max_iteration
 	nsecs := make([dynamic]Nsec_Rr, 0, 4, allocator)
 	n3s := make([dynamic]Nsec3_Rr, 0, 4, allocator)
 	for r in authority {
-		rdata, is_raw := raw_rdata(r)
-		if !is_raw {
-			continue
-		}
-		if r.type == .NSEC {
-			parsed, perr := parse_nsec(rdata, allocator)
-			if perr == .None {
-				append(&nsecs, Nsec_Rr{owner = r.name, rr = parsed})
-			}
-		} else if r.type == .NSEC3 {
-			parsed, perr := parse_nsec3(rdata)
-			if perr != .None {
-				continue
-			}
-			hash := make([]u8, 32, allocator)
-			n, decoded := base32hex_decode(first_label(r.name), hash)
-			if decoded && n == len(parsed.next_hash) {
-				append(&n3s, Nsec3_Rr{hash = hash[:n], rr = parsed})
-			}
-		}
+		append_denial_record(r, &nsecs, &n3s, allocator)
 	}
 	if len(nsecs) > 0 && nsec_proves_no_delegation(nsecs[:], name) {
 		return true
@@ -772,7 +753,47 @@ denial_shows_no_cut :: proc(authority: []dns.Record, name: string, max_iteration
 	if len(n3s) == 0 {
 		return false
 	}
-	budget := Nsec3_Budget{max_iterations = max_iterations}
+	budget := Nsec3_Budget{max_iterations = nsec3_iterations_ceiling(max_iterations)}
 	shown, _ := nsec3_proves_no_delegation(n3s[:], name, dns.name_parent(name), &budget)
 	return shown
+}
+
+/*
+The iteration ceiling a configured `dnssec.max_nsec3_iterations` stands for:
+zero is `DEFAULT_MAX_NSEC3_ITERATIONS`, and anything past
+`MAX_NSEC3_ITERATIONS_LIMIT` is held down to it. `make_validator` and
+`denial_shows_no_cut` both read the option through this, so the two agree on
+which records are past it.
+*/
+nsec3_iterations_ceiling :: proc(configured: int) -> int {
+	n := configured if configured > 0 else DEFAULT_MAX_NSEC3_ITERATIONS
+	return min(n, MAX_NSEC3_ITERATIONS_LIMIT)
+}
+
+/*
+Parse one NSEC or NSEC3 record onto the matching list, dropping one that will
+not parse - or an NSEC3 whose owner label is not a hash the width of its next
+hash - and ignoring every other type.
+*/
+@(private)
+append_denial_record :: proc(r: dns.Record, nsecs: ^[dynamic]Nsec_Rr, n3s: ^[dynamic]Nsec3_Rr, allocator: mem.Allocator) {
+	rdata, is_raw := raw_rdata(r)
+	if !is_raw {
+		return
+	}
+	#partial switch r.type {
+	case .NSEC:
+		if parsed, perr := parse_nsec(rdata, allocator); perr == .None {
+			append(nsecs, Nsec_Rr{owner = r.name, rr = parsed})
+		}
+	case .NSEC3:
+		parsed, perr := parse_nsec3(rdata)
+		if perr != .None {
+			return
+		}
+		hash := make([]u8, 32, allocator)
+		if n, decoded := base32hex_decode(first_label(r.name), hash); decoded && n == len(parsed.next_hash) {
+			append(n3s, Nsec3_Rr{hash = hash[:n], rr = parsed})
+		}
+	}
 }

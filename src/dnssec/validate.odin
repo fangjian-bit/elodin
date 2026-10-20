@@ -834,14 +834,13 @@ make_validator :: proc(
 	rather than refused, and said out loud, because refusing is a resolver that
 	does not come up after an upgrade, which is worse than either.
 	*/
-	v.max_nsec3_iterations = opts.max_nsec3_iterations if opts.max_nsec3_iterations > 0 else DEFAULT_MAX_NSEC3_ITERATIONS
-	if v.max_nsec3_iterations > MAX_NSEC3_ITERATIONS_LIMIT {
+	v.max_nsec3_iterations = nsec3_iterations_ceiling(opts.max_nsec3_iterations)
+	if opts.max_nsec3_iterations > MAX_NSEC3_ITERATIONS_LIMIT {
 		logx.warnf(
 			"dnssec: max_nsec3_iterations %d is past what one query's hashing allowance can pay for; using %d",
-			v.max_nsec3_iterations,
+			opts.max_nsec3_iterations,
 			MAX_NSEC3_ITERATIONS_LIMIT,
 		)
-		v.max_nsec3_iterations = MAX_NSEC3_ITERATIONS_LIMIT
 	}
 	v.max_cached_zones = opts.max_cached_zones if opts.max_cached_zones > 0 else DEFAULT_MAX_CACHED_ZONES
 	v.max_walks[.Shared] = opts.max_chain_walks if opts.max_chain_walks > 0 else DEFAULT_MAX_CHAIN_WALKS
@@ -3241,28 +3240,7 @@ validated_denial_records :: proc(
 		)
 
 		for r in records {
-			rdata, is_raw := raw_rdata(r)
-			if !is_raw {
-				continue
-			}
-			if r.type == .NSEC {
-				parsed, perr := parse_nsec(rdata, allocator)
-				if perr != .None {
-					continue
-				}
-				append(&out_nsec, Nsec_Rr{owner = r.name, rr = parsed})
-			} else {
-				parsed, perr := parse_nsec3(rdata)
-				if perr != .None {
-					continue
-				}
-				hash := make([]u8, 32, allocator)
-				n, decoded := base32hex_decode(first_label(r.name), hash)
-				if !decoded || n != len(parsed.next_hash) {
-					continue
-				}
-				append(&out_nsec3, Nsec3_Rr{hash = hash[:n], rr = parsed})
-			}
+			append_denial_record(r, &out_nsec, &out_nsec3, allocator)
 		}
 	}
 	return out_nsec[:], out_nsec3[:], out_verified[:], exhausted

@@ -220,31 +220,6 @@ route_reply_nodata :: proc(name: string, type: dns.Type, rcode := dns.Rcode.No_E
 }
 
 /*
-A NODATA for `name`'s `DS` beside the zone's own apex NSEC: NS, SOA, RRSIG, NSEC
-and DNSKEY in the bitmap, which is the child's side of the cut answering for the
-parent's. RFC 6840 section 4.4 rules it out as a DS denial (issue #244).
-*/
-@(private = "file")
-route_reply_child_apex :: proc(name: string) -> []u8 {
-	// The next name is the root; window 0 holds NS, SOA (byte 0), RRSIG, NSEC
-	// (byte 5) and DNSKEY (byte 6).
-	nsec := []u8{0, 0, 7, 0x22, 0, 0, 0, 0, 0x03, 0x80}
-	authority := make([]dns.Record, 1, context.temp_allocator)
-	authority[0] = dns.Record{name = name, type = .NSEC, class = .IN, ttl = 300, data = dns.Rdata_Raw{data = nsec}}
-	question := make([]dns.Question, 1, context.temp_allocator)
-	question[0] = dns.Question{name = name, type = .DS, class = .IN}
-	msg := dns.Message{question = question, authority = authority}
-	msg.flags.qr = true
-	msg.flags.rd = true
-	msg.flags.ra = true
-	wire, _, err := dns.encode_message(msg, context.temp_allocator)
-	if err != .None {
-		return nil
-	}
-	return wire
-}
-
-/*
 A `DS` answer, which is the reply a parent that does signs its delegation gives.
 
 `Rdata_Raw` rather than a modelled DS: what the carve-out reads is the record's
@@ -2162,7 +2137,9 @@ test_the_memo_still_asks_the_parent_unless_the_route_answered_the_nodata :: proc
 		if c.signed {
 			route_reply = route_reply_ds("corp.example.")
 		} else if c.apex {
-			route_reply = route_reply_child_apex("corp.example.")
+			// The zone's own apex NSEC: RFC 6840 section 4.4 rules it out as a
+			// DS denial.
+			route_reply = ds_nodata("corp.example.", nsec_at("corp.example.", "example.", .NS, .SOA, .RRSIG, .NSEC, .DNSKEY))
 		}
 		failing := Route_Mock {
 			socket = route_socket,

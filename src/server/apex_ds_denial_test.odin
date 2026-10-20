@@ -31,7 +31,6 @@ type_bitmap :: proc(types: ..dns.Type) -> []u8 {
 }
 
 // An NSEC at `owner` whose next name is `next`.
-@(private = "file")
 nsec_at :: proc(owner, next: string, types: ..dns.Type) -> dns.Record {
 	rdata := make([dynamic]u8, context.temp_allocator)
 	for label in strings.split(strings.trim_suffix(next, "."), ".", context.temp_allocator) {
@@ -68,10 +67,10 @@ nsec3_at :: proc(from, to: []u8, flags: u8, iterations: u16, types: ..dns.Type) 
 	}
 }
 
-@(private = "file")
-nodata :: proc(authority: ..dns.Record) -> []u8 {
+// A NODATA for `name`'s `DS` carrying `authority`.
+ds_nodata :: proc(name: string, authority: ..dns.Record) -> []u8 {
 	question := make([]dns.Question, 1, context.temp_allocator)
-	question[0] = dns.Question{name = APEX, type = .DS, class = .IN}
+	question[0] = dns.Question{name = name, type = .DS, class = .IN}
 	msg := dns.Message{question = question, authority = authority}
 	msg.flags.qr = true
 	msg.flags.rd = true
@@ -109,16 +108,16 @@ test_an_apex_ds_nodata_is_the_proof_unless_the_denial_shows_no_delegation :: pro
 		proved: bool,
 	}
 	cases := []Case {
-		{"no denial records", nodata(), true},
-		{"an NSEC with NS", nodata(nsec_at(APEX, "example.", .NS, .RRSIG, .NSEC)), true},
-		{"an NSEC without NS", nodata(nsec_at(APEX, "example.", .A, .RRSIG, .NSEC)), false},
-		{"the child's apex NSEC", nodata(nsec_at(APEX, "example.", .NS, .SOA, .RRSIG, .NSEC, .DNSKEY)), false},
-		{"an empty non-terminal", nodata(nsec_at("example.com.", "vpn.corp.example.com.", .NS, .SOA, .RRSIG, .NSEC)), false},
-		{"an NSEC3 with NS", nodata(nsec3_at(nil, zero, 0, 0, .NS)), true},
-		{"an NSEC3 without NS", nodata(nsec3_at(nil, zero, 0, 0, .A, .RRSIG)), false},
-		{"an NSEC3 past the ceiling", nodata(nsec3_at(nil, zero, 0, 150, .A, .RRSIG)), true},
-		{"an opt-out span", nodata(nsec3_at(zero, ones, 1, 0, .NS, .SOA)), true},
-		{"a span that is not opt-out", nodata(nsec3_at(zero, ones, 0, 0, .NS, .SOA)), false},
+		{"no denial records", ds_nodata(APEX), true},
+		{"an NSEC with NS", ds_nodata(APEX, nsec_at(APEX, "example.", .NS, .RRSIG, .NSEC)), true},
+		{"an NSEC without NS", ds_nodata(APEX, nsec_at(APEX, "example.", .A, .RRSIG, .NSEC)), false},
+		{"the child's apex NSEC", ds_nodata(APEX, nsec_at(APEX, "example.", .NS, .SOA, .RRSIG, .NSEC, .DNSKEY)), false},
+		{"an empty non-terminal", ds_nodata(APEX, nsec_at("example.com.", "vpn.corp.example.com.", .NS, .SOA, .RRSIG, .NSEC)), false},
+		{"an NSEC3 with NS", ds_nodata(APEX, nsec3_at(nil, zero, 0, 0, .NS)), true},
+		{"an NSEC3 without NS", ds_nodata(APEX, nsec3_at(nil, zero, 0, 0, .A, .RRSIG)), false},
+		{"an NSEC3 past the ceiling", ds_nodata(APEX, nsec3_at(nil, zero, 0, 150, .A, .RRSIG)), true},
+		{"an opt-out span", ds_nodata(APEX, nsec3_at(zero, ones, 1, 0, .NS, .SOA)), true},
+		{"a span that is not opt-out", ds_nodata(APEX, nsec3_at(zero, ones, 0, 0, .NS, .SOA)), false},
 	}
 
 	// The premise: each reply is a NODATA whose authority the decoder hands over.
@@ -129,7 +128,7 @@ test_an_apex_ds_nodata_is_the_proof_unless_the_denial_shows_no_delegation :: pro
 		}
 		testing.expectf(t, len(m.answer) == 0 && dns.Rcode(m.flags.rcode) == .No_Error, "%s is not a NODATA", c.what)
 	}
-	nsec := nodata(nsec_at(APEX, "example.", .A, .RRSIG, .NSEC))
+	nsec := ds_nodata(APEX, nsec_at(APEX, "example.", .A, .RRSIG, .NSEC))
 	m, _ := dns.decode_message(nsec, context.temp_allocator)
 	types := m.authority[0].data.(dns.Rdata_Raw).data[9:]
 	testing.expect(t, !dnssec.bitmap_has(types, .NS) && dnssec.bitmap_has(types, .A), "the held name's NSEC has the NS bit")
@@ -141,5 +140,11 @@ test_an_apex_ds_nodata_is_the_proof_unless_the_denial_shows_no_delegation :: pro
 		// The proof is settled; what is not the proof is no fact to store against.
 		testing.expectf(t, settled == c.proved, "%s: settled %v", c.what, settled)
 	}
+
+	// A configured ceiling of zero is the validator's default, not zero: a
+	// record at ten iterations is read.
+	spent := 0
+	proved, _ := parent_answers_apex_ds(ds_nodata(APEX, nsec3_at(nil, zero, 0, 10, .A, .RRSIG)), APEX, true, &spent, 0, context.temp_allocator)
+	testing.expect(t, !proved, "a ceiling of zero refused a ten-iteration NSEC3 the validator would read")
 	free_all(context.temp_allocator)
 }
