@@ -1092,10 +1092,11 @@ resolve_race :: proc(
 	return out, st.winner, .None
 }
 
-// Close idle connections that have been sitting around too long.
-groom :: proc(g: ^Group) -> (closed: int) {
+// Close idle connections that have been sitting around too long, or every idle
+// one when `all` - for a group a reload has replaced, which nothing new will ask.
+groom :: proc(g: ^Group, all := false) -> (closed: int) {
 	for u in g.servers {
-		closed += close_idle(u)
+		closed += close_idle(u, all)
 	}
 	return
 }

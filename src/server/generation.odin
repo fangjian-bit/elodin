@@ -606,6 +606,22 @@ reap_generations :: proc(s: ^Server) -> (released: int) {
 		destroy_generation(g)
 		released += 1
 	}
+	/*
+	What is left is held by a request or a race worker still running, which may
+	go on for a while. The idle connections of the groups those generations own
+	are closed now rather than then: no new request can reach a retired group,
+	so they are only sockets held open to servers the file may no longer name.
+	A connection in use is not idle and is left to finish.
+	*/
+	for g := s.gens.retired; g != nil; g = g.next {
+		if .Upstreams not_in g.owns {
+			continue
+		}
+		upstream.groom(g.group, all = true)
+		for route in g.routes {
+			upstream.groom(route.group, all = true)
+		}
+	}
 	return
 }
 

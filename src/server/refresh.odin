@@ -157,8 +157,10 @@ Refresh :: struct {
 	// started for; see `start_prefetch`.
 	prefetch:   bool,
 	serial:     u64,
-	// The cache policy `key` was built under; see `Live.policy`.
+	// The cache policy `key` was built under, and the cache it names an entry
+	// of; see `Live.policy`. The cache is compared, never read through.
 	policy:     u64,
+	answers:    ^cache.Cache,
 	mu:         sync.Mutex,
 	sema:       sync.Sema,
 	/*
@@ -285,6 +287,7 @@ start_refresh :: proc(
 	r.prefetch = prefetch
 	r.serial = serial
 	r.policy = live(s).policy
+	r.answers = live(s).answers
 	// The waiter's, the table's and the job's, taken before the job can run.
 	r.refs = 3
 	s.refreshes.slots[free_slot] = r
@@ -430,12 +433,14 @@ refresh_job :: proc(data: rawptr) {
 	pin_scope(s)
 	prefetching = r.prefetch
 	/*
-	Counted only under the policy the entry was stored with. A reload that moved
-	it between the claim and this job leaves `r.key` naming an entry no query
-	can find, and the answer below goes under the new key, so `renewed` would
-	read every such prefetch as one that did not help.
+	Counted only under the policy the entry was stored with, in the cache it was
+	stored in. A reload that moved the policy between the claim and this job
+	leaves `r.key` naming an entry no query can find, and the answer below goes
+	under the new key, so `renewed` would read every such prefetch as one that
+	did not help; one that turned the cache off and on again leaves the policy
+	where it was and the entry in a cache that is gone.
 	*/
-	counted := r.prefetch && live(s).policy == r.policy
+	counted := r.prefetch && live(s).policy == r.policy && live(s).answers == r.answers
 	if counted {
 		cache.note_prefetch(live(s).answers)
 	}

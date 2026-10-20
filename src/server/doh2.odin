@@ -156,8 +156,6 @@ serve_doh2 :: proc(s: ^Server, conn: ^tlsx.Conn, client: string, peer: net.Endpo
 @(private)
 h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 	ctx := cast(^H2_Context)hc.user
-	// For the charge and the queueing below, which wait on nothing.
-	pin_scope(ctx.server)
 
 	/*
 	Charged before the request is queued, which is the order the UDP loop charges
@@ -182,11 +180,26 @@ h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 	and telling them apart would be the base64 decode the note above avoids.
 	*/
 	now := time.tick_now()
-	asked := live(ctx.server).limiter == nil || h2_charged(ctx, req)
-	if asked {
-		sync.atomic_store(&ctx.last_question._nsec, now._nsec)
+	asked, limited: bool
+	max_pending: int
+	{
+		/*
+		Pinned for the charge and the backlog figure, and let go before anything
+		below writes to the client. A 429 or a 503 is a HEADERS frame written on
+		this thread, which waits on a client that is not reading for up to the
+		write timeout, and a generation pinned across that wait is one a reload
+		cannot release - for as long as the client keeps it up.
+		*/
+		pin_scope(ctx.server)
+		limiter := live(ctx.server).limiter
+		asked = limiter == nil || h2_charged(ctx, req)
+		if asked {
+			sync.atomic_store(&ctx.last_question._nsec, now._nsec)
+		}
+		limited = limiter != nil && asked && !stream_rate_check(limiter, ctx.peer, now)
+		max_pending = live(ctx.server).cfg.server.max_pending
 	}
-	if live(ctx.server).limiter != nil && asked && !stream_rate_check(live(ctx.server).limiter, ctx.peer, now) {
+	if limited {
 		h2_rate_limited(ctx, hc, req)
 		return
 	}
@@ -220,12 +233,7 @@ h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 	thread per connection here, and a gap between the two is one all of them can
 	pass through at once.
 	*/
-	switch pool.try_submit(
-		ctx.server.handler_pool,
-		h2_job,
-		job,
-		live(ctx.server).cfg.server.max_pending,
-	) {
+	switch pool.try_submit(ctx.server.handler_pool, h2_job, job, max_pending) {
 	case .Accepted:
 	case .Full:
 		if asked {
@@ -233,7 +241,7 @@ h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 		}
 		h2.conn_unref(hc)
 		free(job)
-		h2_shed(ctx, hc, req)
+		h2_shed(ctx, hc, req, max_pending)
 	case .Stopped:
 		// Shutting down: answer inline rather than dropping the stream - on this
 		// reader thread rather than a pool worker, which is what `on_pool` says.
@@ -261,7 +269,7 @@ Nothing is freed here beyond the request: this runs on the arena `h2.serve` is
 still working through, which is also why it is not reached through `h2_job`.
 */
 @(private)
-h2_shed :: proc(ctx: ^H2_Context, hc: ^h2.Conn, req: ^h2.Request) {
+h2_shed :: proc(ctx: ^H2_Context, hc: ^h2.Conn, req: ^h2.Request, max_pending: int) {
 	// Counted as a query the server dropped only when it was going to be one. A
 	// request for some other path was never going to reach the resolver, and
 	// `dropped` counts refused queries rather than turned-away streams.
@@ -281,7 +289,7 @@ h2_shed :: proc(ctx: ^H2_Context, hc: ^h2.Conn, req: ^h2.Request) {
 	logx.debugf(
 		"doh/h2: shedding a request from %s, server.max_pending (%d) is reached",
 		ctx.client,
-		live(ctx.server).cfg.server.max_pending,
+		max_pending,
 	)
 	h2.respond(hc, req.stream_id, h2.Response{status = 503})
 	h2.request_destroy(hc, req)

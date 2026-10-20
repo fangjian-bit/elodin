@@ -2,11 +2,13 @@ package server
 
 import "core:fmt"
 import "core:mem/virtual"
+import "core:net"
 import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
 import "core:thread"
+import "core:time"
 import "elodin:cache"
 import "elodin:config"
 import "elodin:dns"
@@ -791,4 +793,40 @@ test_a_reload_does_not_need_the_certificates_it_will_not_reopen :: proc(t: ^test
 	os.remove(key)
 	out := reload_from(t, f, strings.concatenate({with_dot, "rewrites:\n  - { domain: c.test, answer: 192.0.2.1 }\n"}, context.temp_allocator))
 	testing.expect(t, out.applied, "a reload was refused over the files of a listener it keeps")
+}
+
+@(test)
+test_a_retired_group_still_in_use_closes_its_idle_connections :: proc(t: ^testing.T) {
+	/*
+	A generation held by a long request keeps its upstream groups, but nothing
+	new will ask them: an idle connection to a server the reload replaced is
+	closed at the next reap, not when the last request lets go.
+	*/
+	f, ok := boot_fixture(t, "idle", BASE)
+	if !ok {
+		return
+	}
+	defer close_fixture(f)
+	old := f.s.gens.current
+
+	h := Holder {
+		s = &f.s,
+	}
+	holder := thread.create_and_start_with_poly_data(&h, hold_a_request)
+	sync.sema_wait(&h.pinned)
+	reload_from(t, f, swap(BASE, "127.0.0.1:1", "127.0.0.1:2"))
+
+	socket, serr := net.create_socket(.IP4, .TCP)
+	if testing.expectf(t, serr == nil, "cannot make a socket: %v", serr) {
+		u := old.group.servers[0]
+		append(&u.idle, {socket = socket.(net.TCP_Socket), since = time.now()})
+	}
+	testing.expect_value(t, reap_generations(&f.s), 0)
+	testing.expect_value(t, len(old.group.servers[0].idle), 0)
+
+	sync.sema_post(&h.go_read)
+	sync.sema_wait(&h.saw_late)
+	sync.sema_post(&h.release)
+	thread.join(holder)
+	thread.destroy(holder)
 }

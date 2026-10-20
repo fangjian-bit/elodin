@@ -99,9 +99,11 @@ run = [
   # `Server` embeds `using live: Live` so tests can build one as a literal, which
   # also lets production code read `s.cfg` and the rest directly - the zero
   # `Live` a running server leaves behind, past the pin `live()` asserts on. A
-  # backtick before it is a comment naming the field.
+  # backtick before it is a comment naming the field. Any path to a `server`
+  # counts (`job.ctx.server`, `r.server`), except for `group`, which is also a
+  # key of the configuration's own `server` section (`cfg.server.group`).
   """
-  if grep -rnE '(^|[^A-Za-z0-9_.`])(s|ctx\\.server)\\.(cfg|group|routes|apex_memo|answers|validator|anchors|anchor_zones|cookies|limiter|policy)\\b' src/server src/main \\
+  if grep -rnE '(^|[^A-Za-z0-9_`])(s|[A-Za-z0-9_.]*[A-Za-z0-9_]\\.server)\\.(cfg|routes|apex_memo|answers|validator|anchors|anchor_zones|cookies|limiter|policy)\\b|(^|[^A-Za-z0-9_.`])(s|([A-Za-z0-9_]+\\.)*ctx\\.server|r\\.server)\\.group\\b' src/server src/main \\
       --include='*.odin' --exclude='*_test.odin'; then
     echo 'read the configuration through server.live(s), not the Server field' >&2
     exit 1
