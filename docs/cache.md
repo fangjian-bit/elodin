@@ -109,9 +109,10 @@ got:
   `stale_timeout` (RFC 8767 section 5's client response timer), the expired copy
   goes out with a 30-second TTL, or what its RRSIGs have left if that is less,
   and the refresh carries on in the background and caches what it gets. An
-  answer the cache will not keep (a TTL of 0, a denial without a SOA) drops the
-  expired copy instead, so the next query waits for the upstream; a SERVFAIL, a
-  REFUSED or no reply leaves the copy in place. A copy whose RRSIGs expired
+  answer the cache will not keep (a TTL of 0, a denial without a SOA, a private
+  address `rebind` refuses) drops the expired copy instead, so the next query
+  waits for the upstream. A SERVFAIL, a REFUSED, a truncated or unreadable
+  reply, or no reply leaves the copy in place. A copy whose RRSIGs expired
   during the wait is not served: the client waits for the refresh, up to the
   upstream budget, and gets SERVFAIL if that fails too.
 - One refresh per name runs at a time; clients arriving meanwhile get the expired

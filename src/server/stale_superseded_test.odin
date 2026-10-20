@@ -29,25 +29,26 @@ lent the copy, and on the client's own thread where there is no pool.
 */
 @(private = "file")
 Superseded_Case :: struct {
-	name:  string,
-	reply: []u8,
+	name:   string,
+	reply:  []u8,
 	// Whether the expired entry is still there once the reply has landed.
-	kept:  bool,
+	kept:   bool,
 	// A name on the block list, so the reply is refused by the CNAME walk
 	// and reaches the cache through the cloaking store instead.
-	block: string,
+	block:  string,
+	// Rebinding protection on, so the reply is refused by that guard and
+	// never reaches the cache at all.
+	rebind: bool,
 }
 
+// The question and `answer`, under `rcode`.
 @(private = "file")
-superseded_reply :: proc(rcode: dns.Rcode, ttl0: bool) -> []u8 {
+superseded_reply :: proc(rcode: dns.Rcode, answer: ..dns.Record) -> []u8 {
 	question := make([]dns.Question, 1, context.temp_allocator)
 	question[0] = dns.Question{name = STALE_NAME, type = .A, class = .IN}
-	msg := dns.Message{question = question}
-	if ttl0 {
-		answer := make([]dns.Record, 1, context.temp_allocator)
-		answer[0] = dns.Record{name = STALE_NAME, type = .A, class = .IN, ttl = 0, data = dns.Rdata_A{addr = LIVE_ADDR}}
-		msg.answer = answer
-	}
+	records := make([]dns.Record, len(answer), context.temp_allocator)
+	copy(records, answer)
+	msg := dns.Message{question = question, answer = records}
 	msg.flags.qr = true
 	msg.flags.rd = true
 	msg.flags.ra = true
@@ -59,34 +60,47 @@ superseded_reply :: proc(rcode: dns.Rcode, ttl0: bool) -> []u8 {
 	return wire
 }
 
-// The question, a TTL-0 CNAME to `target`, and a TTL-0 address there.
 @(private = "file")
-superseded_cloak :: proc(target: string) -> []u8 {
-	question := make([]dns.Question, 1, context.temp_allocator)
-	question[0] = dns.Question{name = STALE_NAME, type = .A, class = .IN}
-	answer := make([]dns.Record, 2, context.temp_allocator)
-	answer[0] = dns.Record{name = STALE_NAME, type = .CNAME, class = .IN, ttl = 0, data = dns.Rdata_Name{name = target}}
-	answer[1] = dns.Record{name = target, type = .A, class = .IN, ttl = 0, data = dns.Rdata_A{addr = LIVE_ADDR}}
-	msg := dns.Message{question = question, answer = answer}
-	msg.flags.qr = true
-	msg.flags.rd = true
-	msg.flags.ra = true
-	wire, _, err := dns.encode_message(msg, context.temp_allocator)
-	if err != .None {
-		return nil
-	}
-	return wire
+superseded_a :: proc(name: string, addr: [4]u8, ttl: u32) -> dns.Record {
+	return dns.Record{name = name, type = .A, class = .IN, ttl = ttl, data = dns.Rdata_A{addr = addr}}
+}
+
+// `wire` with one additional record whose RDLENGTH runs past the end, so only
+// the sections up to the answer decode.
+@(private = "file")
+superseded_junk :: proc(wire: []u8) -> []u8 {
+	junk := make([dynamic]u8, 0, len(wire) + 11, context.temp_allocator)
+	append(&junk, ..wire)
+	junk[11] = 1 // ARCOUNT
+	append(&junk, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 32) // root, TXT, IN, TTL 0, RDLENGTH 32
+	return junk[:]
 }
 
 @(private = "file")
 superseded_cases :: proc() -> []Superseded_Case {
-	cases := make([]Superseded_Case, 6, context.temp_allocator)
-	cases[0] = {"a TTL-0 answer", superseded_reply(.No_Error, true), false, ""}
-	cases[1] = {"a NODATA without a SOA", superseded_reply(.No_Error, false), false, ""}
-	cases[2] = {"an NXDOMAIN without a SOA", superseded_reply(.NX_Domain, false), false, ""}
-	cases[3] = {"a SERVFAIL", superseded_reply(.Serv_Fail, false), true, ""}
-	cases[4] = {"a REFUSED", superseded_reply(.Refused, false), true, ""}
-	cases[5] = {"a TTL-0 chain to a listed name", superseded_cloak("tracker.evil.example."), false, "tracker.evil.example"}
+	tracker :: "tracker.evil.example."
+	chain := dns.Record{name = STALE_NAME, type = .CNAME, class = .IN, data = dns.Rdata_Name{name = tracker}}
+	cases := make([]Superseded_Case, 11, context.temp_allocator)
+	cases[0] = {"a TTL-0 answer", superseded_reply(.No_Error, superseded_a(STALE_NAME, LIVE_ADDR, 0)), false, "", false}
+	cases[1] = {"a NODATA without a SOA", superseded_reply(.No_Error), false, "", false}
+	cases[2] = {"an NXDOMAIN without a SOA", superseded_reply(.NX_Domain), false, "", false}
+	cases[3] = {"a SERVFAIL", superseded_reply(.Serv_Fail), true, "", false}
+	cases[4] = {"a REFUSED", superseded_reply(.Refused), true, "", false}
+	cases[5] = {
+		"a TTL-0 chain to a listed name",
+		superseded_reply(.No_Error, chain, superseded_a(tracker, LIVE_ADDR, 0)),
+		false,
+		"tracker.evil.example",
+		false,
+	}
+	cases[6] = {"a private address", superseded_reply(.No_Error, superseded_a(STALE_NAME, {10, 0, 0, 1}, 300)), false, "", true}
+	// RFC 2308 section 2.1: a name error carries the chain and nothing else, so
+	// this one contradicts itself and is no answer to supersede anything with.
+	cases[7] = {"an NXDOMAIN carrying an address", superseded_reply(.NX_Domain, superseded_a(STALE_NAME, LIVE_ADDR, 300)), true, "", false}
+	cases[8] = {"an NXDOMAIN carrying a private address", superseded_reply(.NX_Domain, superseded_a(STALE_NAME, {10, 0, 0, 1}, 300)), true, "", true}
+	// Neither is read in full, which is no answer to supersede anything with.
+	cases[9] = {"a TTL-0 answer with junk after it", superseded_junk(superseded_reply(.No_Error, superseded_a(STALE_NAME, LIVE_ADDR, 0))), true, "", false}
+	cases[10] = {"a private address with junk after it", superseded_junk(superseded_reply(.No_Error, superseded_a(STALE_NAME, {10, 0, 0, 1}, 300))), true, "", true}
 	return cases
 }
 
@@ -127,6 +141,7 @@ run_superseded :: proc(t: ^testing.T, c: Superseded_Case, detached: bool) {
 		cfg.blocking.enabled = true
 		s.filters = engine
 	}
+	cfg.rebind.enabled = c.rebind
 	defer if s.filters != nil {
 		filter.engine_destroy(s.filters)
 	}
@@ -156,8 +171,8 @@ run_superseded :: proc(t: ^testing.T, c: Superseded_Case, detached: bool) {
 	thread.destroy(mock)
 	testing.expectf(t, ok, "%s: nothing came back", c.name)
 	testing.expectf(t, x.got, "%s: the upstream was never asked", c.name)
-	if !detached && c.block != "" {
-		testing.expectf(t, outcome == .Blocked, "%s: the chain was not refused by the walk (%v)", c.name, outcome)
+	if !detached && (c.block != "" || c.rebind) {
+		testing.expectf(t, outcome == .Blocked, "%s: the reply was not refused (%v)", c.name, outcome)
 	}
 	if detached {
 		testing.expectf(t, outcome == .Cached, "%s: the client was not lent the copy (%v)", c.name, outcome)
@@ -250,6 +265,9 @@ test_a_truncated_reply_keeps_the_stale_copy :: proc(t: ^testing.T) {
 		return
 	}
 	defer net.close(listener)
+	// Bounds the accept, so a resolver that never connects fails the test
+	// rather than hanging the join.
+	_ = net.set_option(listener, .Receive_Timeout, MOCK_RECV_TIMEOUT)
 	bound, _ := net.bound_endpoint(listener)
 
 	answers := cache.make_cache(cache.Options{max_entries = 8, max_ttl = 3600, serve_stale = true})
@@ -274,7 +292,7 @@ test_a_truncated_reply_keeps_the_stale_copy :: proc(t: ^testing.T) {
 
 	x := Tcp_Superseded {
 		listener = listener,
-		reply    = superseded_reply(.No_Error, true),
+		reply    = superseded_reply(.No_Error, superseded_a(STALE_NAME, LIVE_ADDR, 0)),
 	}
 	mock := thread.create_and_start_with_poly_data(&x, serve_one_truncated)
 	out, _, ok := handle_query(&s, stale_query(true), .UDP, "127.0.0.1:5555", context.temp_allocator)

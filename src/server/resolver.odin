@@ -2658,9 +2658,17 @@ resolve_query :: proc(
 	Below the decode rather than above it, which is the same position in the
 	order - nothing between here and the refusal stores anything or changes what
 	the guard reads.
+
+	A private address is the upstream's answer, refused rather than stored, so it
+	replaces the expired copy as an answer `cache.put` refuses does (issue
+	#419). An answer the guard could not read keeps it, and so does a private
+	address under an NXDOMAIN, which contradicts itself as `put` reads it.
 	*/
 	if checking_rebind {
 		if out, detail, blocked := rebind_refusal(s, msg, q, decoded, limit, allocator); blocked {
+			if detail == "rebind" && decoded.full && dns.rcode_of(decoded.msg) == .No_Error {
+				cache.forget(live(s).answers, key, stale_hit.serial)
+			}
 			log_query(s, client, proto, q, .Blocked, detail, started)
 			return out, .Blocked, true
 		}
@@ -2856,12 +2864,20 @@ resolve_query :: proc(
 			   decoded.full &&
 			   !unproven_apex_ds &&
 			   cloak_verdict_worth_keeping(verdict) {
-				kept := cache.put(live(s).answers, key, resp, decoded.msg, generation, u8(verdict), ede = answer_ede)
+				// `supersedes`: an answer refused here still replaces the
+				// expired copy (issue #419); see `cache.put`.
+				kept := cache.put(
+					live(s).answers,
+					key,
+					resp,
+					decoded.msg,
+					generation,
+					u8(verdict),
+					ede = answer_ede,
+					supersedes = stale_hit.serial,
+				)
 				if flight != nil && kept {
 					flight.stored = .Cloak
-				}
-				if !kept {
-					forget_superseded(s, stale_hit, decoded.msg)
 				}
 			}
 			return out, cloak_outcome(verdict), true
@@ -2897,9 +2913,9 @@ resolve_query :: proc(
 	willing to speak stores what it said.
 	*/
 	if live(s).cfg.cache.enabled && decoded.full && !unproven_apex_ds {
-		if !cache.put(live(s).answers, key, resp, decoded.msg, generation, ede = answer_ede) {
-			forget_superseded(s, stale_hit, decoded.msg)
-		}
+		// `supersedes`: an answer that cannot be kept still replaces the
+		// expired copy (issue #419); see `cache.put`.
+		cache.put(live(s).answers, key, resp, decoded.msg, generation, ede = answer_ede, supersedes = stale_hit.serial)
 	}
 	/*
 	What was just stored, or would have been, handed over and landed before
@@ -2936,34 +2952,6 @@ rules_generation :: proc(s: ^Server) -> u64 {
 		return filter.engine_generation(s.filters)
 	}
 	return 0
-}
-
-/*
-Drop the expired copy `stale_hit` once the upstream has answered with something
-`cache.put` would not keep (issue #419).
-
-A TTL-0 answer is the zone saying not to cache it (RFC 1035 section 3.2.1, RFC
-2181 section 8), and a denial without a SOA is one RFC 2308 section 5 says not
-to cache - but each is the upstream's answer, and the expired bytes no longer
-stand for anything. Left in place, they are lent again to every later query
-whose upstream is slower than `stale_timeout`, for the rest of the day
-`serve_stale` keeps them, while the upstream answers the whole time.
-
-Only for NOERROR and NXDOMAIN, untruncated: a SERVFAIL or a REFUSED is the
-failure RFC 8767 keeps the copy for, and a truncated reply is not the answer.
-The callers have already turned away a reply that would not decode in full and
-an apex DS the parent never spoke to, which are outages too. `forget` checks
-the serial, so an answer stored meanwhile by another query stays.
-*/
-@(private)
-forget_superseded :: proc(s: ^Server, stale_hit: Cached_Answer, msg: dns.Message) {
-	if stale_hit.wire == nil || msg.flags.tc {
-		return
-	}
-	#partial switch dns.rcode_of(msg) {
-	case .No_Error, .NX_Domain:
-		cache.forget(live(s).answers, stale_hit.key, stale_hit.serial)
-	}
 }
 
 // The entry under `key`, fresh or expired, as the answer path reads it.

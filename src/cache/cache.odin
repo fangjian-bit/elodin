@@ -926,6 +926,16 @@ numbering has moved on. The cache does not read it: what it counts is a number
 the caller recognises, and a caller with nothing to say leaves it at zero, which
 `get` will always report as out of date rather than silently current.
 
+`supersedes` is the serial of an expired entry under `key` the caller holds as
+its `serve_stale` fallback (issue #419). It is forgotten when this refuses an
+*answer*: a TTL of 0 (RFC 2181 section 8), a denial without a SOA (RFC 2308
+section 5), an entry too large for the cache. Each is the upstream's word that
+the old copy no longer holds, though none can be kept. A refusal of what is not
+an answer - a failure rcode, a truncated reply, an NXDOMAIN that contradicts
+its own answer section, a lapsed signature, bytes that will not scan - leaves
+it, since covering those is what RFC 8767 keeps it for. `forget` checks the
+serial, so an entry stored meanwhile stays; zero matches nothing.
+
 `bogus` is the caller saying the bytes are a refusal it reached itself rather
 than an answer somebody sent: a SERVFAIL, which is otherwise one of the
 transient failures above and refused, and which is all the flag admits - an
@@ -941,6 +951,7 @@ put :: proc(
 	refused: u8 = 0,
 	bogus := false,
 	ede: u16 = 0,
+	supersedes: u64 = 0,
 ) -> bool {
 	if c == nil || len(wire) < dns.HEADER_SIZE {
 		return false
@@ -1072,6 +1083,7 @@ the same shape stopped one layer further out, on the paths no validator
 		has_soa: bool
 		soa_ttl, has_soa = dns.negative_ttl(msg)
 		if !has_soa {
+			forget(c, key, supersedes)
 			return false
 		}
 	}
@@ -1160,11 +1172,14 @@ thing in both directions.
 	// signatures allow. A live one caps the lifetime below, at the expiration
 	// second.
 	if signed && signed_left == 0 {
-		effective = 0
+		delete(offsets, c.allocator)
+		delete(ttls, c.allocator)
+		return false
 	}
 	if effective == 0 {
 		delete(offsets, c.allocator)
 		delete(ttls, c.allocator)
+		forget(c, key, supersedes)
 		return false
 	}
 
@@ -1181,6 +1196,7 @@ thing in both directions.
 	if size > sync.atomic_load(&c.max_bytes) {
 		delete(offsets, c.allocator)
 		delete(ttls, c.allocator)
+		forget(c, key, supersedes)
 		return false
 	}
 
