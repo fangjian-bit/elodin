@@ -356,6 +356,16 @@ test_a_restart_only_key_dropped_from_the_file_is_named :: proc(t: ^testing.T) {
 	first := load(t, swap(BASE, "server:\n", "server:\n  workers: 4\n"), &arena)
 	again := load(t, swap(BASE, "server:\n", "server:\n  workers: 4\n"), &arena)
 	testing.expect_value(t, len(keep_restart_only(&first, &again, context.temp_allocator)), 0)
+
+	// A pool the file never sized, derived again from a machine whose memory
+	// limit moved since startup: held, and nothing the operator wrote to name.
+	derived := load(t, BASE, &arena)
+	moved := load(t, BASE, &arena)
+	testing.expect(t, derived.server.sizing.derived_workers, "BASE names a worker count, so nothing is tested")
+	moved.server.workers = derived.server.workers + 1
+	named = keep_restart_only(&derived, &moved, context.temp_allocator)
+	testing.expectf(t, len(named) == 0, "named %v for a file that names no worker count", named)
+	testing.expect_value(t, moved.server.workers, derived.server.workers)
 }
 
 @(private = "file")
@@ -547,6 +557,15 @@ test_a_reload_rebuilds_the_rules_and_takes_them_away_with_blocking :: proc(t: ^t
 	testing.expect(t, out.applied && !out.blocking, "a new block_ttl rebuilt the rule sets")
 	testing.expect_value(t, f.s.gens.current.cfg.blocking.block_ttl, 42)
 	testing.expect_value(t, filter.engine_match(f.s.filters, "second.example", .A), filter.Decision.Blocked)
+
+	// So are the addresses a `custom` block answers with.
+	out = reload_from(
+		t,
+		f,
+		swap(blocking(`"||second.example^"`), "cache_dir:", "block_ttl: 42, custom_ipv4: 192.0.2.9, custom_ipv6: \"2001:db8::9\", cache_dir:"),
+	)
+	testing.expect(t, out.applied && !out.blocking, "a new custom address rebuilt the rule sets")
+	testing.expect_value(t, f.s.gens.current.cfg.blocking.custom_ipv4, [4]u8{192, 0, 2, 9})
 
 	reload_from(t, f, BASE)
 	testing.expect(t, filter.engine_match(f.s.filters, "second.example", .A) != .Blocked, "turning blocking off left the rules in the engine")
@@ -741,4 +760,35 @@ blocking: { enabled: false }
 		testing.expect_value(t, cur.routes[0].domains[0], "corp.example.")
 		testing.expect_value(t, cur.routes[0].group.servers[0].spec.address, "127.0.0.1")
 	}
+}
+
+@(test)
+test_a_reload_does_not_need_the_certificates_it_will_not_reopen :: proc(t: ^testing.T) {
+	/*
+	After privileges are dropped the reload runs as an account that may not see
+	the certificate a listener started with - a 0700 `live/` directory, say. The
+	listeners are held at what they started with, so the reload must not be
+	refused over their files; the certificate reload says what it could not read.
+	Removing the files stands in for losing sight of them.
+	*/
+	cert := fmt.tprintf("/tmp/elodin-server-generation-test-cert-%d.pem", os.get_pid())
+	key := fmt.tprintf("/tmp/elodin-server-generation-test-key-%d.pem", os.get_pid())
+	testing.expect(t, os.write_entire_file(cert, "not read by the loader") == nil)
+	testing.expect(t, os.write_entire_file(key, "not read by the loader") == nil)
+	defer os.remove(cert)
+	defer os.remove(key)
+	with_dot := strings.concatenate(
+		{BASE, fmt.tprintf("listeners: {{ dot: {{ enabled: true, cert_file: %q, key_file: %q }} }}\n", cert, key)},
+		context.temp_allocator,
+	)
+	f, ok := boot_fixture(t, "certs", with_dot)
+	if !ok {
+		return
+	}
+	defer close_fixture(f)
+
+	os.remove(cert)
+	os.remove(key)
+	out := reload_from(t, f, strings.concatenate({with_dot, "rewrites:\n  - { domain: c.test, answer: 192.0.2.1 }\n"}, context.temp_allocator))
+	testing.expect(t, out.applied, "a reload was refused over the files of a listener it keeps")
 }

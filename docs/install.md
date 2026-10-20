@@ -143,7 +143,7 @@ ts=2026-10-19T19:35:57Z level=info msg=reloaded changed=upstream,rewrites rebuil
 | `cache` | resized in place; turned off or on, dropped or started empty |
 | `dnssec` | a change rebuilds the validator, which fetches its zone keys again |
 | `cookies` | applied; the secret is kept unless `cookies.secret` changes |
-| `blocking` | a change to `enabled`, the lists or the rules rebuilds the rule sets, and a list whose cached copy is within `refresh` is not downloaded again; `response`, `block_ttl` and `refresh` apply from the next query or tick. If a list that loaded before cannot be had, the rules in effect are kept, as on a refresh, and the change applies at the retry |
+| `blocking` | a change to `enabled`, the lists or the rules rebuilds the rule sets, and a list whose cached copy is within `refresh` is not downloaded again; `response`, `custom_ipv4`, `custom_ipv6`, `block_ttl` and `refresh` apply from the next query or tick. If a list that loaded before cannot be had, the rules in effect are kept, as on a refresh, and the change applies at the retry |
 | `listeners`, `metrics`, `server.workers`, `upstream_workers`, `running_workers`, `max_connections`, `max_connections_per_prefix`, `user`, `group`, `blocking.cache_dir` | need a restart; each one changed is named in a warning and keeps the value it started with |
 
 A change to which upstreams are asked (`upstream.servers`, `upstream.bootstrap`,

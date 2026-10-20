@@ -21,6 +21,8 @@ Loader :: struct {
 	root:      ^yaml.Node,
 	errors:    [dynamic]string,
 	allocator: mem.Allocator,
+	// See `load_file`'s `tls_files`.
+	tls_files: bool,
 }
 
 @(private)
@@ -28,17 +30,31 @@ errorf :: proc(l: ^Loader, format: string, args: ..any) {
 	append(&l.errors, fmt.aprintf(format, ..args, allocator = l.allocator))
 }
 
-load_file :: proc(path: string, allocator := context.allocator) -> (cfg: Config, err: Maybe(Load_Error)) {
+load_file :: proc(
+	path: string,
+	allocator := context.allocator,
+	/*
+	Whether the DoT and DoH certificate and key have to exist - the one check
+	here that reads the filesystem. Off for a SIGHUP reload, which keeps the
+	listeners it started with and reads their certificates on its own: run as the
+	account privileges were dropped to, the check could refuse every reload over
+	a file only root can see, which the listeners were never going to reopen.
+	*/
+	tls_files := true,
+) -> (
+	cfg: Config,
+	err: Maybe(Load_Error),
+) {
 	data, read_err := os.read_entire_file(path, allocator)
 	if read_err != nil {
 		msgs := make([]string, 1, allocator)
 		msgs[0] = fmt.aprintf("cannot read config file %q: %v", path, read_err, allocator = allocator)
 		return {}, Load_Error{msgs}
 	}
-	return load_string(string(data), allocator)
+	return load_string(string(data), allocator, tls_files)
 }
 
-load_string :: proc(src: string, allocator := context.allocator) -> (cfg: Config, err: Maybe(Load_Error)) {
+load_string :: proc(src: string, allocator := context.allocator, tls_files := true) -> (cfg: Config, err: Maybe(Load_Error)) {
 	root, perr := yaml.parse(src, allocator)
 	if e, has := perr.?; has {
 		msgs := make([]string, 1, allocator)
@@ -50,6 +66,7 @@ load_string :: proc(src: string, allocator := context.allocator) -> (cfg: Config
 		root      = root,
 		errors    = make([dynamic]string, 0, 4, allocator),
 		allocator = allocator,
+		tls_files = tls_files,
 	}
 	cfg = default_config()
 
@@ -2632,6 +2649,9 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 		}
 		if ln.cert_file == "" || ln.key_file == "" {
 			errorf(l, "listeners.%s: cert_file and key_file are required", name)
+			return
+		}
+		if !l.tls_files {
 			return
 		}
 		if !os.exists(ln.cert_file) {

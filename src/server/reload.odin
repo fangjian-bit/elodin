@@ -63,7 +63,10 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 		destroy_generation(g)
 	}
 
-	loaded, load_err := config.load_file(path, virtual.arena_allocator(arena))
+	// Without the certificate files: the listeners are held at what the process
+	// started with, and `reload_tls` reads their certificates and says what it
+	// could not.
+	loaded, load_err := config.load_file(path, virtual.arena_allocator(arena), tls_files = false)
 	if e, has := load_err.?; has {
 		for msg in e.messages {
 			logx.errorf("reload: %s: %s", path, msg)
@@ -82,37 +85,24 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 		return
 	}
 
-	built, ok := build_live(s, &g.live, &cur.live)
+	built, carried, ok := build_live(s, &g.live, &cur.live)
 	if !ok {
 		logx.warnf("reload: %s could not be put into effect; keeping the configuration already in effect", path)
 		return
 	}
 	g.owns = built
 
-	carried := Parts{.Upstreams, .Validator, .Cookies, .Limiter, .Answers} - built
-	if g.validator == nil {
-		carried -= {.Validator}
-	}
-	if g.cookies == nil {
-		carried -= {.Cookies}
-	}
-	if g.limiter == nil {
-		carried -= {.Limiter}
-	}
-	if g.answers == nil {
-		carried -= {.Answers}
-	}
-
 	// The cache is shared with the generation it came from, so it is brought in
 	// line only now that nothing can fail.
 	answers := "off"
+	flush := false
 	if g.answers != nil {
 		answers = "new" if .Answers in built else "kept"
 		if .Answers in carried && differs(cur.cfg.cache, g.cfg.cache) {
 			cache.reconfigure(g.answers, cache_options(g.cfg.cache))
 		}
-		if .Answers in carried && g.policy != cur.policy {
-			cache.clear_all(g.answers)
+		flush = .Answers in carried && g.policy != cur.policy
+		if flush {
 			answers = "flushed"
 		}
 	}
@@ -127,6 +117,11 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 	swap_generation(s, g, carried)
 	keep = true
 	out.applied = true
+	// After the swap: a query that pinned the old generation in between would
+	// otherwise refill the emptied cache under a number no query asks for again.
+	if flush {
+		cache.clear_all(g.answers)
+	}
 
 	logx.set_level(logx.Level(g.cfg.log.level))
 	if log_file_moved && !logx.reopen(g.cfg.log.file) {
@@ -179,7 +174,15 @@ keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.alloca
 	hold(&changed, "listeners.dot", boot.listeners.dot, &cfg.listeners.dot)
 	hold(&changed, "listeners.doh", boot.listeners.doh, &cfg.listeners.doh)
 	hold(&changed, "metrics", boot.metrics, &cfg.metrics)
-	hold(&changed, "server.workers", boot.server.workers, &cfg.server.workers)
+	// Unnamed when both files leave it to the machine: a memory limit that moved
+	// since startup moves the figure, and nothing the operator wrote changed.
+	hold(
+		&changed,
+		"server.workers",
+		boot.server.workers,
+		&cfg.server.workers,
+		boot.server.sizing.derived_workers && cfg.server.sizing.derived_workers,
+	)
 	// Named unless both files leave them to be derived: one derived from
 	// `workers` both times moves when `workers` does, and that is already the
 	// key to name. One the starting file wrote and this one dropped is a change
@@ -240,8 +243,9 @@ keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.alloca
 
 /*
 Whether the rule sets have to be built again: everything in `blocking` but the
-keys read per query or per tick - the response a block is answered with, its
-TTL and the refresh interval - which take effect without one. A rebuild holds
+keys read per query or per tick - the response a block is answered with, the
+addresses a `custom` one carries, its TTL and the refresh interval - which take
+effect without one. A rebuild holds
 two sets of every list in memory at once and may download them, which is not a
 price a new `block_ttl` should pay. Read off the type the other way round, so a
 key added to the section later rebuilds until it is listed here.
@@ -250,6 +254,7 @@ key added to the section later rebuilds until it is listed here.
 rules_changed :: proc(a, b: config.Blocking_Config) -> bool {
 	x, y := a, b
 	x.response, x.block_ttl, x.refresh = y.response, y.block_ttl, y.refresh
+	x.custom_ipv4, x.custom_ipv6 = y.custom_ipv4, y.custom_ipv6
 	return differs(x, y)
 }
 

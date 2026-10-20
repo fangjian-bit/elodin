@@ -361,8 +361,9 @@ release_parts :: proc(l: ^Live, parts: Parts) {
 Build what `l.cfg` describes into `l`, taking from `prev` every part whose
 section of the configuration has not changed.
 
-`built` is what this call made, and is the new generation's to release; what was
-taken from `prev` is not, until the swap hands it over. A part that cannot be
+`built` is what this call made, and is the new generation's to release;
+`carried` is what it took from `prev`, which is not, until the swap hands it
+over. A part that cannot be
 built fails the whole call, with everything it had built released and `prev`
 untouched - a reload that half-applies is worse than one that does not happen.
 
@@ -370,11 +371,11 @@ What can fail comes first, so nothing shared is touched by a call that then
 fails: the cache, taken over and resized rather than rebuilt, is resized by the
 caller once the build has succeeded.
 */
-build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built: Parts, ok: bool) {
+build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built, carried: Parts, ok: bool) {
 	cfg := l.cfg
 	defer if !ok {
 		release_parts(l, built)
-		built = {}
+		built, carried = {}, {}
 	}
 
 	if prev == nil ||
@@ -386,6 +387,7 @@ build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built: Parts, ok: bool
 		built += {.Upstreams}
 	} else {
 		l.group, l.routes = prev.group, prev.routes
+		carried += {.Upstreams}
 	}
 
 	if cfg.dnssec.enabled {
@@ -396,6 +398,7 @@ build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built: Parts, ok: bool
 			built += {.Validator}
 		} else {
 			l.validator, l.anchors, l.anchor_zones = prev.validator, prev.anchors, prev.anchor_zones
+			carried += {.Validator}
 		}
 	}
 
@@ -415,6 +418,7 @@ build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built: Parts, ok: bool
 			built += {.Cookies}
 		} else {
 			l.cookies = prev.cookies
+			carried += {.Cookies}
 		}
 	}
 
@@ -433,6 +437,7 @@ build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built: Parts, ok: bool
 			built += {.Limiter}
 		} else {
 			l.limiter = prev.limiter
+			carried += {.Limiter}
 		}
 	}
 
@@ -442,6 +447,7 @@ build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built: Parts, ok: bool
 			built += {.Answers}
 		} else {
 			l.answers = prev.answers
+			carried += {.Answers}
 		}
 	}
 
@@ -451,7 +457,7 @@ build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built: Parts, ok: bool
 			l.policy += 1
 		}
 	}
-	return built, true
+	return built, carried, true
 }
 
 /*
@@ -542,7 +548,7 @@ started with. The caller keeps `cfg` for as long as the server runs.
 boot_generation :: proc(s: ^Server, cfg: ^config.Config) -> bool {
 	g := new(Generation)
 	g.cfg = cfg
-	built, ok := build_live(s, &g.live, nil)
+	built, _, ok := build_live(s, &g.live, nil)
 	if !ok {
 		free(g)
 		return false
