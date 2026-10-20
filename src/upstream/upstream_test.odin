@@ -363,10 +363,18 @@ test_a_body_costs_about_twice_its_size_to_read :: proc(t: ^testing.T) {
 			context.allocator = mem.tracking_allocator(&track)
 			resp, err, ok := exchange_against(t, reply, &track)
 			if !ok {
-				return
+				continue
 			}
 			testing.expect_value(t, err, Error.None)
 			testing.expect_value(t, len(resp.body), SIZE)
+			testing.expectf(
+				t,
+				track.current_memory_allocated < 1.1 * SIZE,
+				"%s: a %d-byte body is held in %d bytes",
+				framings[framing],
+				SIZE,
+				track.current_memory_allocated,
+			)
 			delete(resp.body)
 		}
 		testing.expectf(

@@ -132,16 +132,18 @@ Buf_Reader :: struct {
 	// The peer has closed: what `reader_to_end` waits for, and the only thing
 	// that ends a body with no framing.
 	closed:   bool,
-	// Bytes consumed and then dropped from the front of `buf` by
-	// `reader_fill`, so `buf` being empty does not read as nothing received.
-	dropped:  int,
-	// How long `buf` has to get for the `reader_exact` waiting on it, so it
-	// grows to that rather than doubling past it; zero when nothing is waiting.
-	want:     int,
+	// Bytes have been read past and dropped from `buf`, so its being empty
+	// does not mean nothing arrived.
+	dropped:  bool,
 }
 
+/*
+Read once more from the stream into `buf`. `unread`, when given, is how many
+bytes past the cursor the caller is waiting for, so the buffer grows to hold
+exactly that rather than doubling past it.
+*/
 @(private)
-reader_fill :: proc(r: ^Buf_Reader) -> Error {
+reader_fill :: proc(r: ^Buf_Reader, unread := 0) -> Error {
 	/*
 	A timeout per read bounds a silent peer and nothing else: a peer sending a
 	line just inside it, again and again, held the exchange for as long as the
@@ -160,10 +162,7 @@ reader_fill :: proc(r: ^Buf_Reader) -> Error {
 	if r.pos > 0 {
 		kept := copy(r.buf[:], r.buf[r.pos:])
 		resize(&r.buf, kept)
-		r.dropped += r.pos
-		if r.want > 0 {
-			r.want -= r.pos
-		}
+		r.dropped = true
 		r.pos = 0
 	}
 	chunk: [8192]u8
@@ -187,14 +186,14 @@ reader_fill :: proc(r: ^Buf_Reader) -> Error {
 	*/
 	if n == 0 {
 		r.closed = true
-		return .Peer_Closed if len(r.buf) + r.dropped == 0 else .IO_Error
+		return .Peer_Closed if len(r.buf) == 0 && !r.dropped else .IO_Error
 	}
 	// Grown only as bytes arrive, never past what a waiting read needs: a
 	// length the peer declares and never sends reserves nothing.
 	if need := len(r.buf) + n; need > cap(r.buf) {
 		grow := max(2 * cap(r.buf), need)
-		if r.want > 0 {
-			grow = min(grow, max(r.want, need))
+		if unread > 0 {
+			grow = min(grow, max(r.pos + unread, need))
 		}
 		reserve(&r.buf, grow)
 	}
@@ -273,10 +272,8 @@ reader_exact :: proc(r: ^Buf_Reader, n: int) -> (data: []u8, err: Error) {
 	if n < 0 {
 		return nil, .HTTP_Error
 	}
-	r.want = r.pos + n
-	defer r.want = 0
 	for len(r.buf) - r.pos < n {
-		reader_fill(r) or_return
+		reader_fill(r, n) or_return
 	}
 	start := r.pos
 	r.pos += n
@@ -706,6 +703,9 @@ read_chunked :: proc(r: ^Buf_Reader, allocator: mem.Allocator) -> (body: []u8, e
 			return nil, .HTTP_Error
 		}
 	}
+	// The caller holds the body for as long as it needs it - a list, through
+	// parsing - so not in the capacity its doubling left behind.
+	shrink(&out)
 	return out[:], .None
 }
 
