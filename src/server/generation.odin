@@ -278,11 +278,15 @@ stream_source_allowed :: proc(s: ^Server, peer: net.Endpoint, proto: Protocol) -
 		return true
 	}
 	sync.atomic_add(&s.stats.refused, 1)
-	logx.debugf(
-		"%s: refusing a query from %s, which server.allow_from no longer admits",
-		proto_name(proto),
-		net.endpoint_to_string(peer, context.temp_allocator),
-	)
+	// Guarded, as `report_once` is: the address is formatted before `debugf`
+	// could decline it, and how often this runs is the refused client's choice.
+	if logx.enabled(.Debug) {
+		logx.debugf(
+			"%s: refusing a query from %s, which server.allow_from no longer admits",
+			proto_name(proto),
+			net.endpoint_to_string(peer, context.temp_allocator),
+		)
+	}
 	return false
 }
 
@@ -506,16 +510,17 @@ because validation runs before the answer is stored and not when it is served;
 
 Not the blocking rules, which the filter engine's own generation already covers
 (see `rules_generation`), and not the rewrites, the reserved names or the
-access list, which are all answered ahead of the cache. Each flush is a cold
-cache for every client, so a reload that only retunes a timeout does not pay
-for one.
+access list, which are all answered ahead of the cache. Not `dnssec` or `rebind`
+keys edited while that feature is off before and after, which judged nothing
+then and judge nothing now. Each flush is a cold cache for every client, so a
+reload that only retunes a timeout does not pay for one.
 */
 @(private)
 policy_changed :: proc(prev, cfg: ^config.Config) -> bool {
 	return(
 		upstreams_asked_changed(prev.upstream, cfg.upstream) ||
 		dnssec_verdicts_changed(prev.dnssec, cfg.dnssec) ||
-		differs(prev.rebind, cfg.rebind) ||
+		((prev.rebind.enabled || cfg.rebind.enabled) && differs(prev.rebind, cfg.rebind)) ||
 		prev.cache.min_ttl != cfg.cache.min_ttl ||
 		prev.cache.max_ttl != cfg.cache.max_ttl ||
 		prev.cache.negative_ttl != cfg.cache.negative_ttl \
@@ -528,14 +533,20 @@ from, and the NSEC3 iteration ceiling past which a zone is served insecure. Not
 the chain-walk bounds or the zone-key cache size, which decide how much work
 validation may do at once and how much it remembers, and nothing about what it
 concludes. The validator is rebuilt for those too; only the answers stay.
+
+Read off the type the other way round, as `rules_changed` is, so a key added to
+the section later moves the policy until it is listed here as one that does
+not. With validation off on both sides, nothing in the section reached an
+answer.
 */
 @(private)
 dnssec_verdicts_changed :: proc(a, b: config.Dnssec_Config) -> bool {
-	return(
-		a.enabled != b.enabled ||
-		a.max_nsec3_iterations != b.max_nsec3_iterations ||
-		differs(a.trust_anchors, b.trust_anchors) \
-	)
+	if !a.enabled && !b.enabled {
+		return false
+	}
+	x := a
+	x.max_chain_walks, x.max_connection_walks, x.max_cached_zones = b.max_chain_walks, b.max_connection_walks, b.max_cached_zones
+	return differs(x, b)
 }
 
 @(private)

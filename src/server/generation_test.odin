@@ -189,6 +189,16 @@ test_a_reload_moves_the_policy_for_rebind_and_dnssec_but_not_rewrites :: proc(t:
 	reload_from(t, f, BASE + "rewrites:\n  - { domain: r.test, answer: 192.0.2.1 }\n")
 	testing.expect_value(t, f.s.gens.current.policy, before)
 
+	// Nor an edit to a feature that is off before and after: it judged no
+	// answer under either file.
+	dormant := swap(
+		BASE,
+		"dnssec: { enabled: false }",
+		"dnssec: { enabled: false, max_nsec3_iterations: 50 }\nrebind: { enabled: false, allow_loopback: true }",
+	)
+	testing.expect(t, reload_from(t, f, dormant).applied, "the dormant edit did not load")
+	testing.expect_value(t, f.s.gens.current.policy, before)
+
 	// Waiting on the same servers longer changes no answer they give.
 	group := f.s.gens.current.group
 	reload_from(t, f, swap(BASE, "timeout: 1s", "timeout: 2s"))

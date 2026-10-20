@@ -633,6 +633,13 @@ serve_doh_request :: proc(
 	// `doh_question_overdue`.
 	asked: ^bool,
 ) -> bool {
+	// Before every path, the profile and the 404s included: the accept loop
+	// gives a source outside the list nothing at all, and a reload that removed
+	// a held connection's network leaves it in the same place. Closed after the
+	// answer, as the accept loop would have.
+	if !stream_source_allowed(s, conn.peer, .DoH) {
+		return send_http_error(conn, "doh", 403, "forbidden", false)
+	}
 	mc_path := startup_config(s).listeners.doh.mobileconfig_path
 	if mc_path != "" && req.path == mc_path {
 		return serve_doh_mobileconfig(s, conn, req)
@@ -711,9 +718,6 @@ serve_doh_request :: proc(
 	`client_timeout` between requests and by `max_connections` across them. A
 	flooder occupies the same one slot either way.
 	*/
-	if !stream_source_allowed(s, conn.peer, .DoH) {
-		return send_http_error(conn, "doh", 403, "forbidden", false)
-	}
 	asked^ = true
 	if !stream_admits(s, conn.peer) {
 		report_rate_limited(client, .DoH, !req.keep_alive)

@@ -157,6 +157,14 @@ serve_doh2 :: proc(s: ^Server, conn: ^tlsx.Conn, client: string, peer: net.Endpo
 h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 	ctx := cast(^H2_Context)hc.user
 
+	// The access list in effect, which a reload may have narrowed since this
+	// connection was accepted; see `stream_source_allowed`.
+	if !stream_source_allowed(ctx.server, ctx.peer, .DoH) {
+		h2.respond(hc, req.stream_id, h2.Response{status = 403})
+		h2.request_destroy(hc, req)
+		return
+	}
+
 	/*
 	Charged before the request is queued, which is the order the UDP loop charges
 	in and for the same reason: a request that is not going to be answered is work
@@ -179,11 +187,6 @@ h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 	anything then, so a 404 holds a connection no more cheaply than a query does,
 	and telling them apart would be the base64 decode the note above avoids.
 	*/
-	if !stream_source_allowed(ctx.server, ctx.peer, .DoH) {
-		h2.respond(hc, req.stream_id, h2.Response{status = 403})
-		h2.request_destroy(hc, req)
-		return
-	}
 	now := time.tick_now()
 	asked, limited: bool
 	max_pending: int

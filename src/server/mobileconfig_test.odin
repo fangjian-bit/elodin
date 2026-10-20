@@ -210,7 +210,7 @@ mc_roundtrip :: proc(t: ^testing.T, s: ^Server, request: string) -> (reply: stri
 
 	session := Mc_Session {
 		server = s,
-		conn   = Conn{socket = accepted},
+		conn   = Conn{socket = accepted, peer = net.Endpoint{address = net.IP4_Loopback, port = 1}},
 	}
 	handler := thread.create_and_start_with_poly_data(&session, run_serve_doh_mc)
 	defer {
