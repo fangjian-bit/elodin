@@ -344,11 +344,18 @@ test_a_body_costs_about_twice_its_size_to_read :: proc(t: ^testing.T) {
 		strings.write_string(&chunked, "\r\n")
 	}
 	strings.write_string(&chunked, "0\r\n\r\n")
+	one_chunk := strings.builder_make()
+	defer strings.builder_destroy(&one_chunk)
+	fmt.sbprintf(&one_chunk, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n%x\r\n", SIZE)
 	for _ in 0 ..< SIZE {
 		strings.write_byte(&sized, 'x')
+		strings.write_byte(&one_chunk, 'x')
 	}
+	strings.write_string(&one_chunk, "\r\n0\r\n\r\n")
 
-	for reply, framing in ([2]string{strings.to_string(sized), strings.to_string(chunked)}) {
+	framings := [3]string{"Content-Length", "chunked", "one chunk"}
+	replies := [3]string{strings.to_string(sized), strings.to_string(chunked), strings.to_string(one_chunk)}
+	for reply, framing in replies {
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, context.allocator)
 		defer mem.tracking_allocator_destroy(&track)
@@ -366,7 +373,7 @@ test_a_body_costs_about_twice_its_size_to_read :: proc(t: ^testing.T) {
 			t,
 			track.peak_memory_allocated < 2.1 * SIZE,
 			"%s: a %d-byte body peaked at %d bytes",
-			framing == 0 ? "Content-Length" : "chunked",
+			framings[framing],
 			SIZE,
 			track.peak_memory_allocated,
 		)

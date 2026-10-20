@@ -135,6 +135,9 @@ Buf_Reader :: struct {
 	// Bytes consumed and then dropped from the front of `buf` by
 	// `reader_fill`, so `buf` being empty does not read as nothing received.
 	dropped:  int,
+	// How long `buf` has to get for the `reader_exact` waiting on it, so it
+	// grows to that rather than doubling past it; zero when nothing is waiting.
+	want:     int,
 }
 
 @(private)
@@ -158,6 +161,9 @@ reader_fill :: proc(r: ^Buf_Reader) -> Error {
 		kept := copy(r.buf[:], r.buf[r.pos:])
 		resize(&r.buf, kept)
 		r.dropped += r.pos
+		if r.want > 0 {
+			r.want -= r.pos
+		}
 		r.pos = 0
 	}
 	chunk: [8192]u8
@@ -183,6 +189,15 @@ reader_fill :: proc(r: ^Buf_Reader) -> Error {
 		r.closed = true
 		return .Peer_Closed if len(r.buf) + r.dropped == 0 else .IO_Error
 	}
+	// Grown only as bytes arrive, never past what a waiting read needs: a
+	// length the peer declares and never sends reserves nothing.
+	if need := len(r.buf) + n; need > cap(r.buf) {
+		grow := max(2 * cap(r.buf), need)
+		if r.want > 0 {
+			grow = min(grow, max(r.want, need))
+		}
+		reserve(&r.buf, grow)
+	}
 	append(&r.buf, ..chunk[:n])
 	return .None
 }
@@ -207,9 +222,9 @@ next_wait :: proc(deadline: time.Tick, idle: time.Duration) -> (wait: time.Durat
 /*
 Read up to and including the next CRLF, returning the line without it.
 
-The result is a view into `r.buf`, which every later read may grow — and past
-its capacity that means a different block. So a line is good until the next read
-and no longer: `http_exchange` finishes with each one inside the iteration that
+The result is a view into `r.buf`, which every later read shifts down over the
+bytes already consumed, and past its capacity moves to a different block. So a
+line is good until the next read and no longer: `http_exchange` finishes with each one inside the iteration that
 produced it, and clones the one thing it keeps. Anything added here that holds a
 line across a read has to copy it first.
 */
@@ -258,6 +273,8 @@ reader_exact :: proc(r: ^Buf_Reader, n: int) -> (data: []u8, err: Error) {
 	if n < 0 {
 		return nil, .HTTP_Error
 	}
+	r.want = r.pos + n
+	defer r.want = 0
 	for len(r.buf) - r.pos < n {
 		reader_fill(r) or_return
 	}
@@ -545,10 +562,7 @@ http_exchange :: proc(
 	case content_length == 0:
 		resp.body = nil
 	case content_length > 0:
-		// Already bounded where the header was read. Reserved whole rather than
-		// grown by doubling past it; not zeroed, so a length the peer never
-		// sends costs pages nobody touches.
-		non_zero_reserve(&r.buf, r.pos + content_length)
+		// Already bounded where the header was read.
 		data := reader_exact(&r, content_length) or_return
 		out := make([]u8, len(data), allocator)
 		copy(out, data)

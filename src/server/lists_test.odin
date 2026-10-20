@@ -520,7 +520,6 @@ test_a_given_name_like_a_default_keeps_its_copy :: proc(t: ^testing.T) {
 One_List :: struct {
 	listener: net.TCP_Socket,
 	body:     string,
-	// Requests to answer before returning.
 	count:    int,
 }
 
