@@ -62,6 +62,10 @@ make_group :: proc(
 		append(&servers, u)
 	}
 	if len(servers) == 0 {
+		// Released here: a reload that cannot build a group keeps running, so
+		// what this call took would otherwise be lost on every such SIGHUP.
+		delete(servers)
+		free(g, allocator)
 		return nil, .Not_Resolved
 	}
 	g.servers = servers[:]

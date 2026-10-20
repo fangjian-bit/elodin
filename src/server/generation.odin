@@ -463,9 +463,9 @@ their certificates are checked, the bootstrap that finds them, and the routes -
 because an answer from one the file no longer names, or for a zone now routed
 somewhere else, is not what the new configuration would have asked for. Not how
 long they are waited on or in what order, which change nothing about an answer
-once it has arrived. `dnssec`, because validation and the anchors it starts from
-run before the answer is stored and not when it is served; `rebind`, for the
-same reason. And the lifetimes the cache stamps on an entry when it stores it.
+once it has arrived. What a DNSSEC verdict turns on (`dnssec_verdicts_changed`),
+because validation runs before the answer is stored and not when it is served;
+`rebind`, for the same reason. And the lifetimes the cache stamps on an entry when it stores it.
 
 Not the blocking rules, which the filter engine's own generation already covers
 (see `rules_generation`), and not the rewrites, the reserved names or the
@@ -477,11 +477,27 @@ for one.
 policy_changed :: proc(prev, cfg: ^config.Config) -> bool {
 	return(
 		upstreams_asked_changed(prev.upstream, cfg.upstream) ||
-		differs(prev.dnssec, cfg.dnssec) ||
+		dnssec_verdicts_changed(prev.dnssec, cfg.dnssec) ||
 		differs(prev.rebind, cfg.rebind) ||
 		prev.cache.min_ttl != cfg.cache.min_ttl ||
 		prev.cache.max_ttl != cfg.cache.max_ttl ||
 		prev.cache.negative_ttl != cfg.cache.negative_ttl \
+	)
+}
+
+/*
+The keys a DNSSEC verdict turns on: whether there is one, the anchors it starts
+from, and the NSEC3 iteration ceiling past which a zone is served insecure. Not
+the chain-walk bounds or the zone-key cache size, which decide how much work
+validation may do at once and how much it remembers, and nothing about what it
+concludes. The validator is rebuilt for those too; only the answers stay.
+*/
+@(private)
+dnssec_verdicts_changed :: proc(a, b: config.Dnssec_Config) -> bool {
+	return(
+		a.enabled != b.enabled ||
+		a.max_nsec3_iterations != b.max_nsec3_iterations ||
+		differs(a.trust_anchors, b.trust_anchors) \
 	)
 }
 

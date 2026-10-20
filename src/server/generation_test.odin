@@ -206,6 +206,13 @@ test_a_reload_moves_the_policy_for_rebind_and_dnssec_but_not_rewrites :: proc(t:
 	testing.expect(t, cur.validator != nil, "turning validation on built no validator")
 	testing.expect(t, .Validator in cur.owns, "the new validator is nobody's to release")
 
+	// Nor does how much validation may do at once.
+	chain_walks := swap(BASE, "dnssec: { enabled: false }", "dnssec: { enabled: true, max_chain_walks: 3 }")
+	testing.expect(t, reload_from(t, f, swap(chain_walks, "max_chain_walks: 3", "max_chain_walks: 5")).applied, "the walk bound did not load")
+	before = f.s.gens.current.policy
+	testing.expect(t, reload_from(t, f, chain_walks).applied, "the walk bound did not load")
+	testing.expect_value(t, f.s.gens.current.policy, before)
+
 	// Nor does the name a server is logged under.
 	named :: proc(name: string) -> string {
 		return swap(BASE, "servers: [\"127.0.0.1:1\"]", fmt.tprintf("servers: [{{ name: %s, address: 127.0.0.1, port: 1 }}]", name))
@@ -318,6 +325,37 @@ test_a_reload_holds_restart_only_keys_at_their_starting_values :: proc(t: ^testi
 	testing.expect_value(t, f.s.gens.current.cfg.blocking.cache_dir, old.cfg.blocking.cache_dir)
 	testing.expect_value(t, f.s.gens.current.cfg.server.workers, workers)
 	testing.expect_value(t, len(f.s.gens.current.cfg.rewrites), 1)
+}
+
+// A pool size the starting file wrote and the new one leaves to be derived is
+// held, and so is said: only one derived both times goes unnamed.
+@(test)
+test_a_restart_only_key_dropped_from_the_file_is_named :: proc(t: ^testing.T) {
+	arena: virtual.Arena
+	if err := virtual.arena_init_growing(&arena); err != nil {
+		testing.expectf(t, false, "cannot reserve an arena: %v", err)
+		return
+	}
+	defer virtual.arena_destroy(&arena)
+	load :: proc(t: ^testing.T, text: string, arena: ^virtual.Arena) -> config.Config {
+		cfg, err := config.load_string(text, virtual.arena_allocator(arena))
+		if e, has := err.?; has {
+			testing.expectf(t, false, "does not load: %v", e.messages)
+		}
+		return cfg
+	}
+	boot := load(t, swap(BASE, "server:\n", "server:\n  workers: 4\n  upstream_workers: 97\n"), &arena)
+	cfg := load(t, swap(BASE, "server:\n", "server:\n  workers: 4\n"), &arena)
+	testing.expect(t, cfg.server.upstream_workers != 97, "the derived figure is the written one, so nothing is tested")
+
+	named := keep_restart_only(&boot, &cfg, context.temp_allocator)
+	testing.expectf(t, len(named) == 1 && named[0] == "server.upstream_workers", "named %v", named)
+	testing.expect_value(t, cfg.server.upstream_workers, 97)
+
+	// Derived both times, and from the same `workers`: nothing to say.
+	first := load(t, swap(BASE, "server:\n", "server:\n  workers: 4\n"), &arena)
+	again := load(t, swap(BASE, "server:\n", "server:\n  workers: 4\n"), &arena)
+	testing.expect_value(t, len(keep_restart_only(&first, &again, context.temp_allocator)), 0)
 }
 
 @(private = "file")
@@ -497,11 +535,18 @@ test_a_reload_rebuilds_the_rules_and_takes_them_away_with_blocking :: proc(t: ^t
 
 	out := reload_from(t, f, blocking(`"||first.example^"`))
 	testing.expect(t, out.applied && out.blocking, "turning blocking on was not a blocking change")
+	testing.expect(t, out.rules, "the rules put into effect were not reported")
 	testing.expect_value(t, filter.engine_match(f.s.filters, "first.example", .A), filter.Decision.Blocked)
 
 	reload_from(t, f, blocking(`"||second.example^"`))
 	testing.expect_value(t, filter.engine_match(f.s.filters, "second.example", .A), filter.Decision.Blocked)
 	testing.expect(t, filter.engine_match(f.s.filters, "first.example", .A) != .Blocked, "a removed rule still blocks")
+
+	// A key read per query is applied without building the sets again.
+	out = reload_from(t, f, swap(blocking(`"||second.example^"`), "cache_dir:", "block_ttl: 42, cache_dir:"))
+	testing.expect(t, out.applied && !out.blocking, "a new block_ttl rebuilt the rule sets")
+	testing.expect_value(t, f.s.gens.current.cfg.blocking.block_ttl, 42)
+	testing.expect_value(t, filter.engine_match(f.s.filters, "second.example", .A), filter.Decision.Blocked)
 
 	reload_from(t, f, BASE)
 	testing.expect(t, filter.engine_match(f.s.filters, "second.example", .A) != .Blocked, "turning blocking off left the rules in the engine")
@@ -655,6 +700,7 @@ test_a_reload_that_adds_a_list_keeps_each_lists_history :: proc(t: ^testing.T) {
 	out := reload_from(t, f, both)
 	testing.expect(t, out.applied && out.blocking, "adding a list was not a blocking change")
 	testing.expect(t, !out.lists_current, "a list that loaded before and is unavailable now reads as current")
+	testing.expect(t, !out.rules, "the rules kept in effect were reported as rebuilt")
 	testing.expect_value(t, filter.engine_match(f.s.filters, "a.example", .A), filter.Decision.Blocked)
 	testing.expect(t, filter.engine_match(f.s.filters, "b.example", .A) != .Blocked, "the rules in effect were not the ones kept")
 }

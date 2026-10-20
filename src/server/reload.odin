@@ -19,6 +19,11 @@ Reload_Outcome :: struct {
 	// Whether every list the rebuilt rule sets wanted was current; see
 	// `reload_filters`. True when nothing was rebuilt.
 	lists_current: bool,
+	// The rule sets in effect were replaced. False on a blocking change too,
+	// where a list that loaded before cannot be had now and `reload_filters`
+	// keeps the rules already in effect; the retry it schedules applies the
+	// change once the list is back.
+	rules:         bool,
 }
 
 /*
@@ -113,7 +118,7 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 	}
 
 	changed := changed_sections(cur.cfg, g.cfg, context.temp_allocator)
-	out.blocking = differs(cur.cfg.blocking, g.cfg.blocking)
+	out.blocking = rules_changed(cur.cfg.blocking, g.cfg.blocking)
 	if out.blocking {
 		remap_lists_loaded(s, cur.cfg, g.cfg)
 	}
@@ -129,6 +134,7 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 	}
 
 	if out.blocking {
+		swapped := filter.engine_generation(s.filters)
 		pin(s)
 		if g.cfg.blocking.enabled {
 			out.lists_current = reload_filters(s, allow_network)
@@ -136,10 +142,11 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 			clear_filters(s)
 		}
 		unpin(s)
+		out.rules = filter.engine_generation(s.filters) != swapped
 	}
 
 	rebuilt := parts_text(built, context.temp_allocator)
-	if out.blocking {
+	if out.rules {
 		rebuilt = "rules" if built == {} else strings.concatenate({rebuilt, ",rules"}, context.temp_allocator)
 	}
 	logx.eventf(.Info, "reloaded", "changed=%s rebuilt=%s cache=%s", logx.quote(changed), logx.quote(rebuilt), answers)
@@ -173,21 +180,23 @@ keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.alloca
 	hold(&changed, "listeners.doh", boot.listeners.doh, &cfg.listeners.doh)
 	hold(&changed, "metrics", boot.metrics, &cfg.metrics)
 	hold(&changed, "server.workers", boot.server.workers, &cfg.server.workers)
-	// Named only where the file wrote them: one derived from `workers` moves
-	// when `workers` does, and that is already the key to name.
+	// Named unless both files leave them to be derived: one derived from
+	// `workers` both times moves when `workers` does, and that is already the
+	// key to name. One the starting file wrote and this one dropped is a change
+	// of its own, which is held like any other and so has to be said.
 	hold(
 		&changed,
 		"server.upstream_workers",
 		boot.server.upstream_workers,
 		&cfg.server.upstream_workers,
-		cfg.server.sizing.derived_upstream_workers,
+		boot.server.sizing.derived_upstream_workers && cfg.server.sizing.derived_upstream_workers,
 	)
 	hold(
 		&changed,
 		"server.running_workers",
 		boot.server.running_workers,
 		&cfg.server.running_workers,
-		cfg.server.sizing.derived_running_workers,
+		boot.server.sizing.derived_running_workers && cfg.server.sizing.derived_running_workers,
 	)
 	hold(&changed, "server.max_connections", boot.server.max_connections, &cfg.server.max_connections)
 	hold(
@@ -227,6 +236,21 @@ keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.alloca
 		cfg.server.max_pending = config.derive_max_pending(cfg.server.workers)
 	}
 	return changed[:]
+}
+
+/*
+Whether the rule sets have to be built again: everything in `blocking` but the
+keys read per query or per tick - the response a block is answered with, its
+TTL and the refresh interval - which take effect without one. A rebuild holds
+two sets of every list in memory at once and may download them, which is not a
+price a new `block_ttl` should pay. Read off the type the other way round, so a
+key added to the section later rebuilds until it is listed here.
+*/
+@(private)
+rules_changed :: proc(a, b: config.Blocking_Config) -> bool {
+	x, y := a, b
+	x.response, x.block_ttl, x.refresh = y.response, y.block_ttl, y.refresh
+	return differs(x, y)
 }
 
 @(private)

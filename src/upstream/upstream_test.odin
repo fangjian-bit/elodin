@@ -67,6 +67,15 @@ temp_arena :: proc() -> ^runtime.Arena {
 	return &data.arena
 }
 
+// A group with no usable server is refused with nothing left allocated: a reload
+// that cannot build one keeps running, so a leak here is one per SIGHUP.
+@(test)
+test_a_group_with_no_usable_server_releases_what_it_took :: proc(t: ^testing.T) {
+	g, err := make_group(config.Upstream_Config{}, nil)
+	testing.expect(t, g == nil, "a group with no servers was built")
+	testing.expect_value(t, err, Error.Not_Resolved)
+}
+
 @(test)
 test_race_worker_releases_its_scratch :: proc(t: ^testing.T) {
 	arena := temp_arena()
