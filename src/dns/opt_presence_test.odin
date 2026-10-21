@@ -320,8 +320,9 @@ test_peek_opt_unreadable_names_each_shape :: proc(t: ^testing.T) {
 	/*
 	The owner is judged as the name it decodes to, not by its first byte: a
 	pointer to the question name's terminating zero is the root (RFC 1035 section
-	4.1.4), and a pointer to the question name is not. The bare OPT is the last
-	eleven bytes, and the question's root is at 12 + 16.
+	4.1.4), and a pointer to the question name is not, nor one to itself, which
+	`name_is_root` would follow forever. The bare OPT is the last eleven bytes,
+	and the question's root is at 12 + 16.
 	*/
 	m := Message {
 		id         = 0x3530,
@@ -331,13 +332,47 @@ test_peek_opt_unreadable_names_each_shape :: proc(t: ^testing.T) {
 	m.flags.qr = true
 	wire, _, err := encode_message(m, context.temp_allocator)
 	if testing.expectf(t, err == .None, "encode: %v", err) {
-		for target, i in ([2]u8{28, 12}) {
+		for target, i in ([3]int{28, 12, len(wire) - 11}) {
 			ptr := make([dynamic]u8, 0, len(wire) + 1, context.temp_allocator)
 			append(&ptr, ..wire[:len(wire) - 11])
-			append(&ptr, 0xc0, target)
+			append(&ptr, 0xc0, u8(target))
 			append(&ptr, ..wire[len(wire) - 10:])
-			testing.expectf(t, peek_opt_unreadable(ptr[:]) == (i == 1), "owner pointer to offset %d", target)
+			testing.expectf(t, peek_opt_unreadable(ptr[:]) == (i != 0), "owner pointer to offset %d", target)
 		}
+	}
+	free_all(context.temp_allocator)
+}
+
+/*
+An OPT owner reached through a chain of pointers is root up to the jumps
+`decode_name` follows, and not one past them, so a reply this check passes is
+one the decoder reads the same owner from.
+*/
+@(test)
+test_peek_opt_unreadable_caps_the_owner_s_pointer_chain :: proc(t: ^testing.T) {
+	for jumps in ([2]int{MAX_NAME_WIRE / 2, MAX_NAME_WIRE / 2 + 1}) {
+		// No question; one answer of a private-use type whose RDATA is a zero
+		// octet and then a chain of pointers, each to the one before, ending at
+		// the zero.
+		rdlen := 1 + 2 * (jumps - 1)
+		msg := make([dynamic]u8, context.temp_allocator)
+		append(&msg, 0, 1, 0x81, 0x80, 0, 0, 0, 1, 0, 0, 0, 1)
+		append(&msg, 0, 0xff, 0, 0, 1, 0, 0, 0, 0, u8(rdlen >> 8), u8(rdlen))
+		zero := len(msg)
+		append(&msg, 0)
+		prev := zero
+		for _ in 0 ..< jumps - 1 {
+			here := len(msg)
+			append(&msg, 0xc0 | u8(prev >> 8), u8(prev))
+			prev = here
+		}
+		// The OPT record, owned by a pointer to the last link: `jumps` in all.
+		append(&msg, 0xc0 | u8(prev >> 8), u8(prev), 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0)
+
+		_, derr := decode_message(msg[:], context.temp_allocator)
+		decodes := derr == .None
+		testing.expectf(t, decodes == (jumps == MAX_NAME_WIRE / 2), "%d jumps: decode_message said %v", jumps, derr)
+		testing.expectf(t, peek_opt_unreadable(msg[:]) == !decodes, "%d jumps: peek_opt_unreadable disagrees with the decoder", jumps)
 	}
 	free_all(context.temp_allocator)
 }

@@ -19,9 +19,10 @@ are cleared, RA is set, and RD and CD are the client's own (RFC 1035 section
 
 Also handled: EDNS0 — the client's OPT record is forwarded upstream so payload
 sizes are negotiated end to end, minus its cookie, its client-subnet option and
-its keepalive request, which all stop here; a query with two OPT records, or with
-one whose options cannot be read, is answered FORMERR rather than forwarded, no
-such message being one they can be taken back out of. Then DNS cookies in both
+its keepalive request, which all stop here; a query with two OPT records, one
+outside the additional section, one owned by a name other than the root, or one
+whose options cannot be read, is answered FORMERR rather than forwarded, no such
+message being one they can be taken back out of. Then DNS cookies in both
 directions, [EDNS(0) padding](edns.md#edns-padding) in both directions on DoT and DoH and
 on neither of the clear transports, the
 [connection idle timeout](edns.md#telling-a-client-how-long-its-connection-is-held) told

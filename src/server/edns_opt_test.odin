@@ -274,7 +274,7 @@ test_a_cookie_in_a_second_opt_record_is_not_forwarded :: proc(t: ^testing.T) {
 An OPT record owned by a name other than the root is refused like the other
 shapes `edns_opt_readable` turns away. RFC 6891 section 6.1.2: NAME MUST be 0
 (root). Unbound (`parse_edns_from_query_pkt`) and BIND (`dns_message_parse`)
-answer it FORMERR; read as the query's EDNS record instead, it was answered from
+answer it FORMERR. Read as the query's EDNS record instead, it is answered from
 the cache, a block or a local zone with EDNS, and forwarded on a miss. Issue #301.
 */
 @(test)

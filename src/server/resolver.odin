@@ -2491,12 +2491,14 @@ resolve_query :: proc(
 
 	/*
 	And an OPT record this server cannot account for is not handed on either: one
-	outside the additional section, a second one, or one whose options do not
-	parse (`dns.peek_opt_unreadable`). `match_client_opt` edits the record
-	`find_opt_span` finds and no other, so handed on, any other copy reaches a
-	client that asked without EDNS, or goes beside the one minted for a client
-	that asked with it - which RFC 6891 section 6.1.1 forbids both ways. Issue
-	#353.
+	outside the additional section, a second one, one owned by a name other than
+	the root, or one whose options do not parse (`dns.peek_opt_unreadable`).
+	`match_client_opt` edits the record `find_opt_span` finds and no other, so
+	handed on, any other copy reaches a client that asked without EDNS, or goes
+	beside the one minted for a client that asked with it - which RFC 6891
+	section 6.1.1 forbids both ways - and a misowned one reaches the client
+	still owned by the wrong name, which section 6.1.2 forbids. Issues #353 and
+	#301.
 
 	`upstream.resolve_insisting` has already asked the rest of the group past it,
 	so SERVFAIL is what is true here, for the reason the rcode refusal above
