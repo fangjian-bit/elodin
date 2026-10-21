@@ -10,8 +10,9 @@ import "elodin:dns"
 
 /*
 Issue #353: a reply carrying an OPT record outside the additional section is
-malformed (RFC 6891 section 6.1.1), and the group goes on to a member that
-answers properly - the reading Unbound and BIND give it.
+malformed (RFC 6891 section 6.1.1), and so is one whose OPT is owned by a name
+other than the root (section 6.1.2, issue #301). The group goes on to a member
+that answers properly - the reading Unbound and BIND give both.
 */
 
 @(private = "file")
@@ -20,10 +21,13 @@ Opt_Mock :: struct {
 	stop:   bool,
 	hits:   int,
 	stray:  bool,
+	// Where set, the reply's OPT record in the additional section is owned by
+	// this name rather than the root.
+	owner:  string,
 }
 
-// Answers with an A record, and with an OPT record in the answer section
-// beside it where `stray` is set.
+// Answers with an A record, with an OPT record in the answer section beside it
+// where `stray` is set, and with one owned by `owner` where that is set.
 @(private = "file")
 opt_loop :: proc(m: ^Opt_Mock) {
 	buf: [512]u8
@@ -42,10 +46,17 @@ opt_loop :: proc(m: ^Opt_Mock) {
 		if m.stray {
 			append(&answer, dns.make_opt(4096, false))
 		}
+		additional: []dns.Record
+		if m.owner != "" {
+			additional = make([]dns.Record, 1, context.temp_allocator)
+			additional[0] = dns.make_opt(4096, false)
+			additional[0].name = m.owner
+		}
 		reply := dns.Message {
-			id       = q.id,
-			question = q.question,
-			answer   = answer[:],
+			id         = q.id,
+			question   = q.question,
+			answer     = answer[:],
+			additional = additional,
 		}
 		reply.flags.qr = true
 		reply.flags.rd = q.flags.rd
@@ -87,10 +98,25 @@ test_a_stray_opt_record_is_swept_past :: proc(t: ^testing.T) {
 	stray := Opt_Mock {
 		stray = true,
 	}
+	expect_swept_past(t, &stray)
+}
+
+@(test)
+test_an_opt_owned_by_a_name_other_than_root_is_swept_past :: proc(t: ^testing.T) {
+	owned := Opt_Mock {
+		owner = "example.",
+	}
+	expect_swept_past(t, &owned)
+}
+
+// A group of `stray`'s member first and a plain one behind it settles on the
+// plain one, for a client's question and for the chain walk.
+@(private = "file")
+expect_swept_past :: proc(t: ^testing.T, stray: ^Opt_Mock) {
 	plain: Opt_Mock
 	// Neither started means neither closed: a zero socket here is fd 0, which
 	// under `odin test` is another test's.
-	bad, bad_thread, bad_ok := start_mock(t, &stray, "stray")
+	bad, bad_thread, bad_ok := start_mock(t, stray, "stray")
 	if !bad_ok {
 		return
 	}

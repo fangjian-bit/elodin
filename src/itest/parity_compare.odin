@@ -184,13 +184,14 @@ parity_compare :: proc(
 	}
 	/*
 	An upstream reply whose OPT record this server cannot account for is
-	refused, so there is nothing of it left to compare. RFC 6891 section 6.1.1:
-	one OPT record, in the additional section. Issue #353.
+	refused, so there is nothing of it left to compare. RFC 6891 sections 6.1.1
+	and 6.1.2: one OPT record, in the additional section, owned by the root.
+	Issues #353 and #301.
 	*/
-	if pc_stray_opt(up) || up.opt.malformed {
+	if pc_opt_refused(up) {
 		reason := ""
 		if el.rcode == 2 && len(el.answer) == 0 {
-			reason = "the upstream's opt record is malformed (RFC 6891 section 6.1.1), so the reply is refused rather than handed on"
+			reason = "the upstream's opt record is malformed (RFC 6891 sections 6.1.1 and 6.1.2), so the reply is refused rather than handed on"
 		}
 		pc_add(&c, .Rcode, "an upstream reply with a malformed opt record", "-", pc_rcode_text(el.rcode, c.allocator), reason)
 		// The refusal is still an answer to this client, so its OPT record is
@@ -1434,6 +1435,12 @@ pc_stray_opt :: proc(m: Pw_Msg) -> bool {
 		}
 	}
 	return m.opt.duplicate
+}
+
+// An OPT record elodin refuses an upstream reply for: one `pc_stray_opt` finds,
+// one whose options do not parse, or one owned by a name other than the root.
+pc_opt_refused :: proc(m: Pw_Msg) -> bool {
+	return pc_stray_opt(m) || m.opt.malformed || (m.opt.present && !m.opt.root)
 }
 
 @(private = "file")

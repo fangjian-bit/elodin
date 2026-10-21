@@ -327,7 +327,9 @@ handle_query :: proc(
 	FORMERR because RFC 6891 section 6.1.1 says exactly that of a query carrying
 	more than one OPT record, and because RDATA that is not a well-formed option
 	list is no more answerable: every option in it is one this server can neither
-	see nor take back out, while the upstream reading the same bytes can.
+	see nor take back out, while the upstream reading the same bytes can. An OPT
+	record owned by a name other than the root breaks the MUST of section 6.1.2,
+	and Unbound and BIND answer it FORMERR as well.
 
 	Ahead of `inspect_cookie` for the reason the version check below is ahead of
 	`resolve_query`: this is a property of the request and not of the name. A gate
@@ -969,8 +971,8 @@ pad_answer :: proc(
 Whether this server can account for the EDNS on a message, which is what every
 later edit to one depends on.
 
-Two shapes cannot be accounted for, and they are the same defect read from
-either end. A second OPT record is one RFC 6891 section 6.1.1 forbids outright,
+Four shapes cannot be accounted for. The first two are the same defect read
+from either end. A second OPT record is one RFC 6891 section 6.1.1 forbids outright,
 and every reader here - `find_opt` on the decoded message, `find_opt_span` on
 the wire, and so both the cookie strip and the subnet strip - takes the first
 one and looks no further, so an option sitting in the second travels upstream
@@ -1001,6 +1003,13 @@ own `peek_udp_size` did until #325. A query has no answer or authority section
 to begin with, so nothing legitimate is being turned away: the records that do
 belong in one, a prerequisite in an UPDATE or the SOA of an IXFR, are not OPT
 records and are not counted here.
+
+The fourth is an OPT record owned by a name other than the root. RFC 6891
+section 6.1.2 says NAME MUST be 0, and Unbound (`parse_edns_from_query_pkt`) and
+BIND (`dns_message_parse`) answer such a query FORMERR. Read as the query's EDNS
+record it is answered with EDNS from the cache, a block or a local zone, and
+forwarded on a miss to an upstream that refuses it. The decoder writes the root
+as ".", whether it arrived as a zero octet or as a pointer to one.
 */
 @(private)
 edns_opt_readable :: proc(msg: dns.Message) -> bool {
@@ -1019,7 +1028,7 @@ edns_opt_readable :: proc(msg: dns.Message) -> bool {
 		if rec.type != .OPT {
 			continue
 		}
-		if seen {
+		if seen || rec.name != "." {
 			return false
 		}
 		seen = true
@@ -2484,12 +2493,14 @@ resolve_query :: proc(
 
 	/*
 	And an OPT record this server cannot account for is not handed on either: one
-	outside the additional section, a second one, or one whose options do not
-	parse (`dns.peek_opt_unreadable`). `match_client_opt` edits the record
-	`find_opt_span` finds and no other, so handed on, any other copy reaches a
-	client that asked without EDNS, or goes beside the one minted for a client
-	that asked with it - which RFC 6891 section 6.1.1 forbids both ways. Issue
-	#353.
+	outside the additional section, a second one, one owned by a name other than
+	the root, or one whose options do not parse (`dns.peek_opt_unreadable`).
+	`match_client_opt` edits the record `find_opt_span` finds and no other, so
+	handed on, any other copy reaches a client that asked without EDNS, or goes
+	beside the one minted for a client that asked with it - which RFC 6891
+	section 6.1.1 forbids both ways - and a misowned one reaches the client
+	still owned by the wrong name, which section 6.1.2 forbids. Issues #353 and
+	#301.
 
 	`upstream.resolve_insisting` has already asked the rest of the group past it,
 	so SERVFAIL is what is true here, for the reason the rcode refusal above
@@ -2501,7 +2512,7 @@ resolve_query :: proc(
 		logx.gated_warnf_from(
 			&winner.stray_opt if winner != nil else &unreadable_opt_reported,
 			client,
-			"upstream %s answered %s %s with an OPT record outside the additional section, a second one, or options that do not parse; answering SERVFAIL",
+			"upstream %s answered %s %s with an OPT record outside the additional section, a second one, one not owned by the root, or options that do not parse; answering SERVFAIL",
 			from,
 			dns.type_name(q.type),
 			dns.name_trim_root(q.name),

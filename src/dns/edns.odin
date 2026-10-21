@@ -485,16 +485,17 @@ find_opt_span :: proc(msg: []u8) -> (span: Opt_Span, ok: bool) {
 
 /*
 Whether a message carries an OPT record that `find_opt_span` cannot account for:
-one outside the additional section, a second one, or one whose RDATA is not a
-well-formed option list.
+one outside the additional section, a second one, one owned by a name other
+than the root, or one whose RDATA is not a well-formed option list.
 
 RFC 6891 section 6.1.1 puts the record in the additional section and allows one
-per message, and section 6.1.2 frames its RDATA as a list of options. The
-readers and writers here find the first record of type OPT in the additional
-section and edit that one, so any other copy crosses them untouched - to a
-client that asked without EDNS, or as a second record beside the one minted for
-a client that asked with it. Issue #353. The wire-level counterpart of
-`server.edns_opt_readable`, which refuses the same four shapes in a query, and
+per message, and section 6.1.2 makes its owner the root and frames its RDATA as
+a list of options. The readers and writers here find the first record of type
+OPT in the additional section and edit that one, so any other copy crosses them
+untouched - to a client that asked without EDNS, or as a second record beside
+the one minted for a client that asked with it - and the one they edit keeps
+whatever owner it came with. Issues #353 and #301. The wire-level counterpart
+of `server.edns_opt_readable`, which refuses the same shapes in a query, and
 the reading Unbound (`parse_extract_edns_from_response_msg`) and BIND
 (`dns_message_parse`) give a reply: FORMERR, and the next server is asked.
 
@@ -525,7 +526,7 @@ peek_opt_unreadable :: proc(msg: []u8) -> bool {
 			return false
 		}
 		if type == .OPT {
-			if i < before || seen {
+			if i < before || seen || !name_is_root(msg, pos) {
 				return true
 			}
 			seen = true

@@ -101,6 +101,18 @@ parity_synth_reply :: proc(
 	// the additional count is settled before it is bumped for this one.
 	opt := pm_opt(query, &r, shape, allocator)
 	if opt != nil {
+		/*
+		One answer in thirty-two owns its OPT record by the question's name
+		rather than the root, which RFC 6891 section 6.1.2 forbids - the shape
+		of issue #301. Off the hash for the reason the stray record above is.
+		Replaced whole, because the truncated stub below carries `opt` too.
+		*/
+		if seed >> 59 == 1 {
+			owned := make([]u8, len(opt) + 1, allocator)
+			copy(owned, PM_PTR_Q)
+			copy(owned[2:], opt[1:])
+			opt = owned
+		}
 		append(&body, ..opt)
 		counts[2] += 1
 	}

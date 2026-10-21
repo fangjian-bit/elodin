@@ -57,3 +57,6 @@
 # An upstream OPT record outside the additional section (#353): handed to a
 # client that sent none, or beside the one minted for a client that sent one.
 1
+# An upstream OPT record owned by a name other than the root (#301): handed
+# to the client as the reply's EDNS record.
+1792584408197143947
