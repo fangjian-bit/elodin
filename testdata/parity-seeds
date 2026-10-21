@@ -54,3 +54,6 @@
 # question's let a typed rule's name through the chain.
 1792438861547891112
 1792438917195719448
+# An upstream OPT record outside the additional section (#353): handed to a
+# client that sent none, or beside the one minted for a client that sent one.
+1

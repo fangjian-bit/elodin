@@ -185,6 +185,12 @@ counted as upstream failures, since the bytes are forgeable and one forged packe
 per query would otherwise park the whole group. A client's own EXTENDED-RCODE
 bits are cleared before forwarding, as RFC 6891 requires.
 
+**A malformed OPT record** — one outside the additional section, a second one,
+or one whose options do not parse (RFC 6891 section 6.1.1) — is swept the same
+way and counted in `elodin_upstream_swept_rcode_total`. If no member does better
+the client gets SERVFAIL (`outcome=failed detail=opt:<upstream>`), and elodin
+warns once.
+
 ## What a forwarded query carries
 
 - The EDNS payload size is the client's figure held between 512 and 1232 bytes
