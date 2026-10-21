@@ -992,12 +992,78 @@ test_reader_exact_refuses_a_negative_count :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
+// Run `check` against a reader connected to a mock that answers with `reply`.
+@(private = "file")
+with_reader :: proc(t: ^testing.T, reply: string, check: proc(t: ^testing.T, r: ^Buf_Reader)) {
+	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if !testing.expectf(t, lerr == nil, "cannot listen on loopback: %v", lerr) {
+		return
+	}
+	bound, _ := net.bound_endpoint(listener)
+	m := Http_Mock {
+		listener = listener,
+		reply    = reply,
+	}
+	server := thread.create_and_start_with_poly_data(&m, http_mock_once)
+	defer {
+		thread.join(server)
+		thread.destroy(server)
+		net.close(listener)
+	}
+	socket, derr := dial_tcp_timeout(bound, 2 * time.Second)
+	if !testing.expectf(t, derr == .None, "cannot dial the mock: %v", derr) {
+		return
+	}
+	set_socket_timeouts(socket, 2 * time.Second)
+	stream := Stream {
+		socket = socket,
+	}
+	defer stream_close(&stream)
+	// The mock reads a request before it answers.
+	stream_write(&stream, []u8{'\n'})
+	r := Buf_Reader {
+		stream = &stream,
+		buf    = make([dynamic]u8, 0, 8192),
+	}
+	defer delete(r.buf)
+	check(t, &r)
+}
+
+/*
+A read waiting for a length grows the buffer to that length and no further,
+even when the peer has sent more behind it - the CRLF after a chunk, the next
+response - or the last read would grow the whole buffer again for a few bytes.
+*/
+@(test)
+test_reader_exact_grows_to_what_it_waits_for :: proc(t: ^testing.T) {
+	SIZE :: 100_000
+	with_reader(t, strings.concatenate({strings.repeat("x", SIZE, context.temp_allocator), "\r\n0\r\n\r\n"}, context.temp_allocator), proc(t: ^testing.T, r: ^Buf_Reader) {
+		data, err := reader_exact(r, SIZE)
+		testing.expect_value(t, err, Error.None)
+		testing.expect_value(t, len(data), SIZE)
+		testing.expect_value(t, cap(r.buf), SIZE)
+	})
+	free_all(context.temp_allocator)
+}
+
+// A body with no length is refused past its limit before the buffer has grown
+// past that limit, not after doubling beyond it.
+@(test)
+test_reader_to_end_grows_no_further_than_its_limit :: proc(t: ^testing.T) {
+	with_reader(t, strings.repeat("x", 150_000, context.temp_allocator), proc(t: ^testing.T, r: ^Buf_Reader) {
+		LIMIT :: 100_000
+		_, err := reader_to_end(r, LIMIT)
+		testing.expect_value(t, err, Error.Too_Large)
+		testing.expectf(t, cap(r.buf) <= LIMIT + 1, "a %d-byte limit grew the buffer to %d", LIMIT, cap(r.buf))
+	})
+	free_all(context.temp_allocator)
+}
+
 /*
 `reader_line`'s 64 KB guard must measure the unconsumed remainder, not the
-whole buffer. Consumed bytes stay in `r.buf` until the next read drops them,
-so a guard on the whole buffer, once a body has pushed it past 64 KB, would
-refuse the next line that needs a fresh socket read with nothing outstanding to
-read.
+whole buffer. Consumed bytes stay in `r.buf` until a read needs the room, so a
+guard on the whole buffer, once a body has pushed it past 64 KB, would refuse
+the next line that needs a fresh socket read with nothing outstanding to read.
 
 `r.buf` is primed here to simulate exactly that: a chunk body already consumed
 past 64 KB, with the cursor at the end of it, as `read_chunked` leaves things

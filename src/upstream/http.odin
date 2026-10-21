@@ -164,7 +164,13 @@ reader_fill :: proc(r: ^Buf_Reader, unread := 0) -> Error {
 		r.pos = 0
 	}
 	chunk: [8192]u8
-	n, err := stream_read(r.stream, chunk[:])
+	// No more than a waiting read needs, so the buffer grown for it holds what
+	// arrives: bytes the peer sent behind it would grow the whole thing again.
+	size := len(chunk)
+	if unread > 0 {
+		size = clamp(unread - (len(r.buf) - r.pos), 1, len(chunk))
+	}
+	n, err := stream_read(r.stream, chunk[:size])
 	if err != .None {
 		return err
 	}
@@ -305,7 +311,7 @@ reader_to_end :: proc(r: ^Buf_Reader, limit: int) -> (data: []u8, err: Error) {
 		had arrived came back as the whole, with no error - for a list, a
 		partial copy written over the good cached one (#445).
 		*/
-		if ferr := reader_fill(r); ferr != .None {
+		if ferr := reader_fill(r, limit + 1); ferr != .None {
 			if r.closed {
 				break
 			}
