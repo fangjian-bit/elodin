@@ -411,6 +411,27 @@ run_wire_cases :: proc(r: ^Runner) {
 	}
 	end_case(r)
 
+	start_case(r, "malformed: an OPT record owned by a name other than root yields FORMERR")
+	{
+		// RFC 6891 section 6.1.2: the OPT record's NAME MUST be 0 (root). The
+		// OPT is the last eleven bytes; its root owner becomes a pointer to the
+		// question's name, which is one byte longer.
+		f := fixture("a")
+		q := build_query(f.qname, f.qtype, edns_size = 1232)
+		bad := make([dynamic]u8, 0, len(q) + 1, context.temp_allocator)
+		append(&bad, ..q[:len(q) - 11])
+		append(&bad, 0xc0, 0x0c)
+		append(&bad, ..q[len(q) - 10:])
+		before := mock_total(mock)
+		res := query_udp(udp_port, bad[:])
+		if check(r, res.ok, "no response") {
+			h := parse_header(r, res.wire)
+			check(r, h.rcode == int(dns.Rcode.Form_Err), "rcode %d, want FORMERR", h.rcode)
+			check_eq_int(r, mock_total(mock) - before, 0, "queries forwarded to the upstream")
+		}
+	}
+	end_case(r)
+
 	start_case(r, "malformed: an unsupported opcode yields NOTIMP")
 	{
 		q := build_query("example.com.", u16(dns.Type.A))

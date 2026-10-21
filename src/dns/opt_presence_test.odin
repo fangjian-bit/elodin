@@ -265,12 +265,14 @@ test_ensure_opt_and_remove_opt_round_trip :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-// Issue #353: the four OPT shapes `find_opt_span` cannot account for, and the
-// one it can.
+// Issues #353 and #301: the five OPT shapes `find_opt_span` cannot account for,
+// and the one it can.
 @(test)
 test_peek_opt_unreadable_names_each_shape :: proc(t: ^testing.T) {
 	a := Record{name = "www.example.com.", type = .A, class = .IN, ttl = 300, data = Rdata_A{addr = {192, 0, 2, 1}}}
 	opt := make_opt(4096, false)
+	owned := opt
+	owned.name = "example."
 	with_option := opt
 	with_option.data = Rdata_OPT {
 		options = []EDNS_Option{{code = 65001, data = {1, 2, 3, 4}}},
@@ -291,6 +293,7 @@ test_peek_opt_unreadable_names_each_shape :: proc(t: ^testing.T) {
 		{label = "opt in authority", answer = {a}, authority = {opt}, expect = true},
 		{label = "two opt records", answer = {a}, additional = {opt, opt}, expect = true},
 		{label = "an option past its rdata", answer = {a}, additional = {with_option}, cut = true, expect = true},
+		{label = "an owner other than root", answer = {a}, additional = {owned}, expect = true},
 	}
 	for c in cases {
 		m := Message {
@@ -313,5 +316,28 @@ test_peek_opt_unreadable_names_each_shape :: proc(t: ^testing.T) {
 	}
 	// A message that cannot be walked is the decoder's to refuse.
 	testing.expect(t, !peek_opt_unreadable([]u8{1, 2}), "a short message was reported")
+
+	/*
+	The owner is judged as the name it decodes to, not by its first byte: a
+	pointer to the question name's terminating zero is the root (RFC 1035 section
+	4.1.4), and a pointer to the question name is not. The bare OPT is the last
+	eleven bytes, and the question's root is at 12 + 16.
+	*/
+	m := Message {
+		id         = 0x3530,
+		question   = []Question{{name = "www.example.com.", type = .A, class = .IN}},
+		additional = {opt},
+	}
+	m.flags.qr = true
+	wire, _, err := encode_message(m, context.temp_allocator)
+	if testing.expectf(t, err == .None, "encode: %v", err) {
+		for target, i in ([2]u8{28, 12}) {
+			ptr := make([dynamic]u8, 0, len(wire) + 1, context.temp_allocator)
+			append(&ptr, ..wire[:len(wire) - 11])
+			append(&ptr, 0xc0, target)
+			append(&ptr, ..wire[len(wire) - 10:])
+			testing.expectf(t, peek_opt_unreadable(ptr[:]) == (i == 1), "owner pointer to offset %d", target)
+		}
+	}
 	free_all(context.temp_allocator)
 }

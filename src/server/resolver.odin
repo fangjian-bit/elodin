@@ -1001,6 +1001,13 @@ own `peek_udp_size` did until #325. A query has no answer or authority section
 to begin with, so nothing legitimate is being turned away: the records that do
 belong in one, a prerequisite in an UPDATE or the SOA of an IXFR, are not OPT
 records and are not counted here.
+
+The fourth is an OPT record owned by a name other than the root. RFC 6891
+section 6.1.2 says NAME MUST be 0, and Unbound (`parse_edns_from_query_pkt`) and
+BIND (`dns_message_parse`) answer such a query FORMERR. Read as the query's EDNS
+record it is answered with EDNS from the cache, a block or a local zone, and
+forwarded on a miss to an upstream that refuses it. The decoder writes the root
+as ".", whether it arrived as a zero octet or as a pointer to one.
 */
 @(private)
 edns_opt_readable :: proc(msg: dns.Message) -> bool {
@@ -1019,7 +1026,7 @@ edns_opt_readable :: proc(msg: dns.Message) -> bool {
 		if rec.type != .OPT {
 			continue
 		}
-		if seen {
+		if seen || rec.name != "." {
 			return false
 		}
 		seen = true
@@ -2501,7 +2508,7 @@ resolve_query :: proc(
 		logx.gated_warnf_from(
 			&winner.stray_opt if winner != nil else &unreadable_opt_reported,
 			client,
-			"upstream %s answered %s %s with an OPT record outside the additional section, a second one, or options that do not parse; answering SERVFAIL",
+			"upstream %s answered %s %s with an OPT record outside the additional section, a second one, one not owned by the root, or options that do not parse; answering SERVFAIL",
 			from,
 			dns.type_name(q.type),
 			dns.name_trim_root(q.name),

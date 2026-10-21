@@ -186,7 +186,8 @@ per query would otherwise park the whole group. A client's own EXTENDED-RCODE
 bits are cleared before forwarding, as RFC 6891 requires.
 
 **A malformed OPT record** — one outside the additional section, a second one,
-or one whose options do not parse (RFC 6891 section 6.1.1) — is swept the same
+one owned by a name other than the root, or one whose options do not parse
+(RFC 6891 sections 6.1.1 and 6.1.2) — is swept the same
 way and counted in `elodin_upstream_swept_rcode_total`. If no member does better
 the client gets SERVFAIL (`outcome=failed detail=opt:<upstream>`), with extended
 error 0 if it asked with EDNS, and elodin warns once a window per upstream. A
@@ -200,8 +201,9 @@ DNSSEC chain lookup answered this way is a lookup that could not be made.
   again over TCP. Over streams the figure bounds nothing (RFC 7766 section
   6.2.1.1); an upstream that truncates a stream reply anyway has it passed on as
   it is, and cannot serve answers over 1232 bytes through elodin.
-- A query with an OPT record outside the additional section, a second OPT, or
-  OPT options that do not parse is answered FORMERR and not forwarded.
+- A query with an OPT record outside the additional section, a second OPT, an
+  OPT owned by a name other than the root, or OPT options that do not parse is
+  answered FORMERR and not forwarded.
 
 ## Per-domain upstreams
 

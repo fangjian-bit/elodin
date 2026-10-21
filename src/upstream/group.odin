@@ -539,12 +539,13 @@ resolve_insisting :: proc(
 /*
 Whether `acceptable` will have the reply, and its EDNS can be accounted for.
 
-A reply with an OPT record outside the additional section, a second one, or one
-whose options do not parse (`dns.peek_opt_unreadable`) is malformed - RFC 6891
-section 6.1.1 - and is not one a client can be handed or a chain lookup read, so
+A reply with an OPT record outside the additional section, a second one, one
+owned by a name other than the root, or one whose options do not parse
+(`dns.peek_opt_unreadable`) is malformed - RFC 6891 sections 6.1.1 and 6.1.2 -
+and is not one a client can be handed or a chain lookup read, so
 whichever caller is asking, the rest of the group is asked past it. Unbound and
 BIND both treat it as FORMERR and move on to the next server. Where no member
-does better `resolve_query` refuses it. Issue #353.
+does better `resolve_query` refuses it. Issues #353 and #301.
 */
 @(private)
 takes :: proc(acceptable: proc(response: []u8) -> bool, response: []u8) -> bool {
