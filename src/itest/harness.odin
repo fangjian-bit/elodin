@@ -293,6 +293,9 @@ start_server_raw :: proc(
 	// Write the configuration exactly as given, so a case can observe what the
 	// shipped defaults do rather than what the suite prefers.
 	verbatim := false,
+	// The whole environment the process starts with, `KEY=VALUE` each; nil is
+	// this process's own.
+	env: []string = nil,
 ) -> (
 	srv: Server,
 	ok: bool,
@@ -320,7 +323,7 @@ start_server_raw :: proc(
 	}
 
 	process, perr := os.process_start(
-		os.Process_Desc{command = command[:], stdout = log_file, stderr = log_file},
+		os.Process_Desc{command = command[:], env = env, stdout = log_file, stderr = log_file},
 	)
 	if perr != nil {
 		fail(r, "cannot start %s: %v", r.binary, perr)

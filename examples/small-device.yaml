@@ -198,7 +198,10 @@ blocking:
   # below is 98,293 - so at ~35 bytes a rule, one list here is about 3 MB
   # and the four in examples/lan.yaml are 350,929 unique rules and 12 MB
   # resident, measured, with the cache still empty. A refresh builds the new
-  # rules beside the old ones, so budget about twice that.
+  # rules beside the old ones, so budget about twice that. On glibc that peak
+  # stays resident after the refresh unless MALLOC_MMAP_THRESHOLD_ is set, as
+  # packaging/elodin.service does; set it yourself when starting elodin any
+  # other way (see docs/blocking.md).
   #
   # Check yours rather than trusting these: the "list <name>: N rules" and
   # "filter: N block rules" lines at startup are what you are paying for,

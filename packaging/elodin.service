@@ -51,6 +51,16 @@ ConfigurationDirectory=elodin
 # past that, raise this with it.
 LimitNOFILE=8192
 
+# A blocklist refresh builds new rule tables, tens of MB at a few hundred
+# thousand rules, and frees the old ones. Each free of a block that large raises
+# glibc's mmap threshold to its size, so the next refresh's tables come from the
+# heap, which does not give freed memory back: resident memory settles at a
+# refresh's peak, about twice what the rules need. A fixed threshold keeps them
+# mmap'd and returned on free. No query allocates anything this large, so it
+# costs nothing measurable per query. musl ignores it. For glibc's default, put
+# UnsetEnvironment=MALLOC_MMAP_THRESHOLD_ in a drop-in.
+Environment=MALLOC_MMAP_THRESHOLD_=131072
+
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
