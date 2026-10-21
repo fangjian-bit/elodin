@@ -264,3 +264,54 @@ test_ensure_opt_and_remove_opt_round_trip :: proc(t: ^testing.T) {
 
 	free_all(context.temp_allocator)
 }
+
+// Issue #353: the four OPT shapes `find_opt_span` cannot account for, and the
+// one it can.
+@(test)
+test_peek_opt_unreadable_names_each_shape :: proc(t: ^testing.T) {
+	a := Record{name = "www.example.com.", type = .A, class = .IN, ttl = 300, data = Rdata_A{addr = {192, 0, 2, 1}}}
+	opt := make_opt(4096, false)
+	with_option := opt
+	with_option.data = Rdata_OPT {
+		options = []EDNS_Option{{code = 65001, data = {1, 2, 3, 4}}},
+	}
+
+	Case :: struct {
+		label:      string,
+		answer:     []Record,
+		authority:  []Record,
+		additional: []Record,
+		cut:        bool,
+		expect:     bool,
+	}
+	cases := []Case {
+		{label = "no opt", answer = {a}},
+		{label = "one opt with an option", answer = {a}, additional = {with_option}},
+		{label = "opt in the answer", answer = {a, opt}, expect = true},
+		{label = "opt in authority", answer = {a}, authority = {opt}, expect = true},
+		{label = "two opt records", answer = {a}, additional = {opt, opt}, expect = true},
+		{label = "an option past its rdata", answer = {a}, additional = {with_option}, cut = true, expect = true},
+	}
+	for c in cases {
+		m := Message {
+			id         = 0x3530,
+			question   = []Question{{name = "www.example.com.", type = .A, class = .IN}},
+			answer     = c.answer,
+			authority  = c.authority,
+			additional = c.additional,
+		}
+		m.flags.qr = true
+		wire, _, err := encode_message(m, context.temp_allocator)
+		if !testing.expectf(t, err == .None, "%s: encode: %v", c.label, err) {
+			continue
+		}
+		if c.cut {
+			// The option's length, four bytes of data back from the end.
+			wire[len(wire) - 5] = 9
+		}
+		testing.expectf(t, peek_opt_unreadable(wire) == c.expect, "%s: want %v", c.label, c.expect)
+	}
+	// A message that cannot be walked is the decoder's to refuse.
+	testing.expect(t, !peek_opt_unreadable([]u8{1, 2}), "a short message was reported")
+	free_all(context.temp_allocator)
+}

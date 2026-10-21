@@ -83,6 +83,20 @@ parity_synth_reply :: proc(
 		}
 	}
 
+	/*
+	One answer in thirty-two carries a second OPT record, in the answer section
+	where RFC 6891 section 6.1.1 says none may go - the shape of issue #353,
+	which handed on reaches a client as an OPT it never negotiated, or as two. Only behind
+	an answer with nothing written after it, so the record lands in the answer
+	section; and off the top bits of the hash rather than a draw from `r`, so
+	every other name keeps the zone it had and the committed seeds still mean
+	what they meant.
+	*/
+	if rcode == 0 && counts[0] > 0 && counts[1] == 0 && counts[2] == 0 && seed >> 59 == 0 {
+		append(&body, ..PM_STRAY_OPT[:])
+		counts[0] += 1
+	}
+
 	// The OPT record goes last, after every other record has been written, so
 	// the additional count is settled before it is bumped for this one.
 	opt := pm_opt(query, &r, shape, allocator)
@@ -129,6 +143,10 @@ parity_synth_reply :: proc(
 	}
 	return reply
 }
+
+// A bare OPT record: root owner, type 41, a payload size of 4096, no options.
+@(private = "file")
+PM_STRAY_OPT := [11]u8{0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0}
 
 // --- message assembly ------------------------------------------------------
 

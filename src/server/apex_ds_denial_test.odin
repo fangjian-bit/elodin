@@ -118,6 +118,8 @@ test_an_apex_ds_nodata_is_the_proof_unless_the_denial_shows_no_delegation :: pro
 		{"an NSEC3 past the ceiling", ds_nodata(APEX, nsec3_at(nil, zero, 0, 150, .A, .RRSIG)), true},
 		{"an opt-out span", ds_nodata(APEX, nsec3_at(zero, ones, 1, 0, .NS, .SOA)), true},
 		{"a span that is not opt-out", ds_nodata(APEX, nsec3_at(zero, ones, 0, 0, .NS, .SOA)), false},
+		// Issue #353: a reply `resolve_query` refuses is no proof to serve.
+		{"an OPT record in authority", ds_nodata(APEX, nsec_at(APEX, "example.", .NS, .RRSIG, .NSEC), dns.make_opt(4096, false)), false},
 	}
 
 	// The premise: each reply is a NODATA whose authority the decoder hands over.

@@ -87,7 +87,9 @@ looser reading is the one that cannot miss a link.
 */
 parity_cloaked :: proc(reference: []u8, qtype: u16) -> (cloaked: bool, typed_only: bool) {
 	m := pw_parse(reference, context.temp_allocator)
-	if !m.ok {
+	// A reply with a malformed OPT record is refused before its CNAMEs are read
+	// (issue #353), and `parity_compare` is what holds elodin to that.
+	if !m.ok || pc_stray_opt(m) || m.opt.malformed {
 		return false, false
 	}
 	typed_only = true

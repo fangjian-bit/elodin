@@ -508,3 +508,106 @@ test_an_opt_record_that_will_not_fit_is_not_minted :: proc(t: ^testing.T) {
 
 	free_all(context.temp_allocator)
 }
+
+/*
+An upstream reply carrying an OPT record this server cannot account for is
+refused, SERVFAIL, rather than handed on. Issue #353.
+
+RFC 6891 section 6.1.1 puts the record in the additional section and allows one
+per message. `find_opt` and `find_opt_span` read that one alone, so a record of
+type OPT anywhere else - or a second one, or one whose options do not parse -
+walks past `match_client_opt`: handed on, it gives a client that asked without
+EDNS an OPT record it never negotiated, and one that asked with EDNS two.
+
+The four shapes are the four `edns_opt_readable` refuses on the query side.
+*/
+@(test)
+test_an_upstream_opt_this_server_cannot_account_for_is_refused :: proc(t: ^testing.T) {
+	h: Harness
+	if !harness_start(t, &h, caching = false) {
+		return
+	}
+	defer harness_stop(&h)
+
+	reply, _ := dns.decode_message(mock_reply(false), context.temp_allocator)
+
+	in_answer := reply
+	in_answer.answer = make([]dns.Record, 2, context.temp_allocator)
+	in_answer.answer[0] = reply.answer[0]
+	in_answer.answer[1] = dns.make_opt(4096, false)
+
+	in_authority := reply
+	in_authority.authority = make([]dns.Record, 1, context.temp_allocator)
+	in_authority.authority[0] = dns.make_opt(4096, false)
+
+	doubled := reply
+	doubled.additional = make([]dns.Record, 2, context.temp_allocator)
+	doubled.additional[0] = dns.make_opt(4096, false)
+	doubled.additional[1] = dns.make_opt(1232, false)
+
+	// One option, four bytes of data, last in the message - its length is then
+	// rewritten to run past the RDATA.
+	unparsed := reply
+	unparsed.additional = make([]dns.Record, 1, context.temp_allocator)
+	unparsed.additional[0] = dns.make_opt(4096, false)
+	options := make([]dns.EDNS_Option, 1, context.temp_allocator)
+	options[0] = dns.EDNS_Option {
+		code = 65001,
+		data = {1, 2, 3, 4},
+	}
+	unparsed.additional[0].data = dns.Rdata_OPT {
+		options = options,
+	}
+
+	shapes := [?]struct {
+		label: string,
+		msg:   dns.Message,
+	}{{"opt in the answer", in_answer}, {"opt in authority", in_authority}, {"two opt records", doubled}, {"unparsed options", unparsed}}
+
+	for shape in shapes {
+		wire, _, err := dns.encode_message(shape.msg, context.temp_allocator)
+		if !testing.expectf(t, err == .None, "%s: cannot encode the reply: %v", shape.label, err) {
+			continue
+		}
+		if shape.label == "unparsed options" {
+			wire[len(wire) - 5] = 9
+		}
+		for edns in ([]bool{false, true}) {
+			x := Exchange {
+				socket = h.socket,
+				reply  = wire,
+			}
+			mock := thread.create_and_start_with_poly_data(&x, serve_one)
+			out, outcome, served := handle_query(&h.srv, client_query(edns), .UDP, "127.0.0.1:5555", context.temp_allocator)
+			thread.join(mock)
+			thread.destroy(mock)
+			if !testing.expectf(t, x.got && served, "%s, edns=%v: asked=%v answered=%v", shape.label, edns, x.got, served) {
+				continue
+			}
+
+			m, derr := dns.decode_message(out, context.temp_allocator)
+			if !testing.expectf(t, derr == .None, "%s, edns=%v: the reply does not decode: %v", shape.label, edns, derr) {
+				continue
+			}
+			opts := 0
+			for section in ([][]dns.Record{m.answer, m.authority, m.additional}) {
+				for rec in section {
+					if rec.type == .OPT {
+						opts += 1
+					}
+				}
+			}
+			testing.expectf(t, opts == (edns ? 1 : 0), "%s, edns=%v: %d OPT records in the reply, want %d", shape.label, edns, opts, edns ? 1 : 0)
+			testing.expectf(t, dns.peek_rcode(out) == .Serv_Fail, "%s, edns=%v: answered %v, not SERVFAIL", shape.label, edns, dns.peek_rcode(out))
+			testing.expectf(t, outcome == .Failed, "%s, edns=%v: outcome %v", shape.label, edns, outcome)
+			testing.expectf(t, len(m.answer) == 0, "%s, edns=%v: the refused answer was handed on", shape.label, edns)
+			// RFC 8914 extended error 0 says why, to a client with somewhere to put it.
+			ede, has_ede := dns.peek_edns_option(out, .Ext_Error)
+			testing.expectf(t, has_ede == edns, "%s, edns=%v: extended error present=%v", shape.label, edns, has_ede)
+			if has_ede {
+				testing.expectf(t, len(ede) >= 2 && ede[0] == 0 && ede[1] == 0, "%s: extended error %v, not 0", shape.label, ede)
+			}
+		}
+	}
+	free_all(context.temp_allocator)
+}

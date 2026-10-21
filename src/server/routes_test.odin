@@ -1127,6 +1127,63 @@ test_a_referral_is_no_chain_lookup :: proc(t: ^testing.T) {
 }
 
 /*
+And so is a reply carrying an OPT record outside the additional section (issue
+#353): `resolve_answerable` sweeps past one and hands it back where no member
+does better, and the walk is not handed what a client is refused.
+*/
+@(test)
+test_a_malformed_opt_is_no_chain_lookup :: proc(t: ^testing.T) {
+	socket, berr := net.make_bound_udp_socket(net.IP4_Loopback, 0)
+	if !testing.expectf(t, berr == nil, "cannot bind the mock: %v", berr) {
+		return
+	}
+	defer net.close(socket)
+	_ = net.set_option(socket, .Receive_Timeout, MOCK_RECV_TIMEOUT)
+	bound, perr := net.bound_endpoint(socket)
+	if !testing.expectf(t, perr == nil, "cannot read the mock's port: %v", perr) {
+		return
+	}
+
+	cfg := forwarding_config()
+	group := mock_group(t, cfg.upstream, bound.port)
+	defer upstream.destroy_group(group)
+	s := Server {
+		cfg   = &cfg,
+		group = group,
+	}
+
+	question := make([]dns.Question, 1, context.temp_allocator)
+	question[0] = dns.Question{name = "stray.example.", type = .DS, class = .IN}
+	answer := make([]dns.Record, 1, context.temp_allocator)
+	answer[0] = dns.make_opt(4096, false)
+	msg := dns.Message {
+		question = question,
+		answer   = answer,
+	}
+	msg.flags.qr = true
+	msg.flags.rd = true
+	msg.flags.ra = true
+	reply, _, eerr := dns.encode_message(msg, context.temp_allocator)
+	testing.expect_value(t, eerr, dns.Encode_Error.None)
+	// The premise: the shape is the one the refusal reads.
+	testing.expect(t, dns.peek_opt_unreadable(reply), "the reply does not carry the stray OPT record")
+
+	mock := Route_Mock {
+		socket = socket,
+		reply  = reply,
+		want   = "stray.example.",
+	}
+	mock_thread := thread.create_and_start_with_poly_data(&mock, serve_route)
+	_, ok := validator_query(&s, "stray.example.", .DS, context.temp_allocator, nil)
+	thread.join(mock_thread)
+	thread.destroy(mock_thread)
+
+	testing.expect(t, mock.asked, "the upstream was not asked")
+	testing.expect(t, !ok, "a reply with a stray OPT record was handed to the chain walk")
+	free_all(context.temp_allocator)
+}
+
+/*
 A chain lookup the group answered with an error rcode is said at `warn`.
 
 The walk is handed the reply and reads the rcode itself, calling the chain

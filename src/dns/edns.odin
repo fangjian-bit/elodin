@@ -483,6 +483,63 @@ find_opt_span :: proc(msg: []u8) -> (span: Opt_Span, ok: bool) {
 	return {}, false
 }
 
+/*
+Whether a message carries an OPT record that `find_opt_span` cannot account for:
+one outside the additional section, a second one, or one whose RDATA is not a
+well-formed option list.
+
+RFC 6891 section 6.1.1 puts the record in the additional section and allows one
+per message, and section 6.1.2 frames its RDATA as a list of options. The
+readers and writers here find the first record of type OPT in the additional
+section and edit that one, so any other copy crosses them untouched - to a
+client that asked without EDNS, or as a second record beside the one minted for
+a client that asked with it. Issue #353. The wire-level counterpart of
+`server.edns_opt_readable`, which refuses the same four shapes in a query, and
+the reading Unbound (`parse_extract_edns_from_response_msg`) and BIND
+(`dns_message_parse`) give a reply: FORMERR, and the next server is asked.
+
+A message that cannot be walked is not reported here, nor an OPT record past
+the point where the walk stops: `find_opt_span` cannot reach one there either,
+and nor can a client's decoder. Allocates nothing.
+*/
+peek_opt_unreadable :: proc(msg: []u8) -> bool {
+	if len(msg) < HEADER_SIZE {
+		return false
+	}
+	qdcount := int(u16(msg[4]) << 8 | u16(msg[5]))
+	before := int(u16(msg[6]) << 8 | u16(msg[7])) + int(u16(msg[8]) << 8 | u16(msg[9]))
+	arcount := int(u16(msg[10]) << 8 | u16(msg[11]))
+
+	pos := HEADER_SIZE
+	for _ in 0 ..< qdcount {
+		next, ok := skip_name(msg, pos)
+		if !ok || next + 4 > len(msg) {
+			return false
+		}
+		pos = next + 4
+	}
+	seen := false
+	for i in 0 ..< before + arcount {
+		type, next, ok := skip_record(msg, pos)
+		if !ok {
+			return false
+		}
+		if type == .OPT {
+			if i < before || seen {
+				return true
+			}
+			seen = true
+			// The framing the editors below hold an OPT's RDATA to.
+			fixed, _ := skip_name(msg, pos)
+			if _, framed := scan_edns_option(msg, Opt_Span{rd_start = fixed + 10, rd_end = next}, 0); !framed {
+				return true
+			}
+		}
+		pos = next
+	}
+	return false
+}
+
 @(private)
 Option_Site :: struct {
 	start: int,

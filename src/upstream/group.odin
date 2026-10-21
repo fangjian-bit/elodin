@@ -304,7 +304,7 @@ resolve_insisting :: proc(
 
 	started := time.tick_now()
 	response, winner, err = resolve_within(g, query, budget, allocator, &unreachable)
-	if err != .None || acceptable(response) {
+	if err != .None || takes(acceptable, response) {
 		return response, winner, err
 	}
 
@@ -502,7 +502,7 @@ resolve_insisting :: proc(
 		// has cost this query exactly what a member that said nothing did.
 		spent += time.tick_since(before)
 		// A failed exchange is left to `exchange`, which says why.
-		if xerr == .None && acceptable(resp) {
+		if xerr == .None && takes(acceptable, resp) {
 			// Said here rather than above, because what makes a filtering
 			// member's block bypassed is another member *answering* - a second
 			// REFUSED from behind the same ACL bypasses nothing, and warning
@@ -512,11 +512,12 @@ resolve_insisting :: proc(
 			// name, and `%v` renders one of those as a placeholder - the same
 			// reading `unreadable_rcode_refusal` gives its own line.
 			logx.debugf(
-				"upstream %s answered rcode %d%s, swept past it to %s",
+				"upstream %s answered rcode %d%s%s, swept past it to %s",
 				winner.spec.name,
 				u16(dns.peek_rcode(response)),
 				// Gated: arguments are evaluated whether or not the line is written.
 				" (a referral)" if logx.enabled(.Debug) && dns.peek_referral(response) else "",
+				" (an OPT record it cannot account for)" if logx.enabled(.Debug) && dns.peek_opt_unreadable(response) else "",
 				u.spec.name,
 			)
 			// The first reply is superseded. It came from the caller's
@@ -533,6 +534,21 @@ resolve_insisting :: proc(
 	// reads it and decides, and turning one verdict into another is not this
 	// procedure's business.
 	return response, winner, .None
+}
+
+/*
+Whether `acceptable` will have the reply, and its EDNS can be accounted for.
+
+A reply with an OPT record outside the additional section, a second one, or one
+whose options do not parse (`dns.peek_opt_unreadable`) is malformed - RFC 6891
+section 6.1.1 - and is not one a client can be handed or a chain lookup read, so
+whichever caller is asking, the rest of the group is asked past it. Unbound and
+BIND both treat it as FORMERR and move on to the next server. Where no member
+does better `resolve_query` refuses it. Issue #353.
+*/
+@(private)
+takes :: proc(acceptable: proc(response: []u8) -> bool, response: []u8) -> bool {
+	return acceptable(response) && !dns.peek_opt_unreadable(response)
 }
 
 // The two rcodes that say something about the name that was asked for. The

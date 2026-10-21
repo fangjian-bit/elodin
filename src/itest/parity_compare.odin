@@ -179,6 +179,27 @@ parity_compare :: proc(
 	}
 
 	pc_identity(&c, q, el)
+	if pc_stray_opt(el) {
+		pc_add(&c, .Edns, "an opt record outside the additional section, or a second one", "-", "present", "")
+	}
+	/*
+	An upstream reply whose OPT record this server cannot account for is
+	refused, so there is nothing of it left to compare. RFC 6891 section 6.1.1:
+	one OPT record, in the additional section. Issue #353.
+	*/
+	if pc_stray_opt(up) || up.opt.malformed {
+		reason := ""
+		if el.rcode == 2 && len(el.answer) == 0 {
+			reason = "the upstream's opt record is malformed (RFC 6891 section 6.1.1), so the reply is refused rather than handed on"
+		}
+		pc_add(&c, .Rcode, "an upstream reply with a malformed opt record", "-", pc_rcode_text(el.rcode, c.allocator), reason)
+		// The refusal is still an answer to this client, so its OPT record is
+		// still the client's to have or not (RFC 6891 section 6.1.1).
+		if el.opt.present != q.edns {
+			pc_add(&c, .Edns, q.edns ? "no opt record for a client that sent one" : "an opt record for a client that sent none", "-", el.opt.present ? "present" : "-", "")
+		}
+		return c
+	}
 	dropped := pc_first_dropped(&c, up, el)
 	pc_header(&c, q, up, el, policy, dropped)
 	pc_records(&c, q, up, el, policy)
@@ -1402,6 +1423,19 @@ pc_lapsing_ttl :: proc(c: ^Parity_Compare, u, e: Pw_RR, policy: Parity_Policy) -
 
 // --- edns ------------------------------------------------------------------
 
+// A record of type OPT in the answer or authority section, or a second one in
+// additional - each a record `find_opt_span` does not see.
+pc_stray_opt :: proc(m: Pw_Msg) -> bool {
+	for section in ([][]Pw_RR{m.answer, m.authority}) {
+		for rec in section {
+			if rec.type == 41 {
+				return true
+			}
+		}
+	}
+	return m.opt.duplicate
+}
+
 @(private = "file")
 pc_edns :: proc(
 	c: ^Parity_Compare,
@@ -1471,9 +1505,6 @@ pc_edns :: proc(
 	}
 	if el.opt.malformed {
 		pc_add(c, .Edns, "elodin's opt rdata is not a well-formed option list", "-", "malformed", "")
-	}
-	if el.opt.duplicate {
-		pc_add(c, .Edns, "more than one opt record", "-", "duplicate", "")
 	}
 
 	// The payload size in a response is this server saying what it can receive,
