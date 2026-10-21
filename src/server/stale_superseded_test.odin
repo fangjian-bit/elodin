@@ -95,7 +95,7 @@ superseded_lapsed_rrsig :: proc() -> dns.Record {
 superseded_cases :: proc() -> []Superseded_Case {
 	tracker :: "tracker.evil.example."
 	chain := dns.Record{name = STALE_NAME, type = .CNAME, class = .IN, data = dns.Rdata_Name{name = tracker}}
-	cases := make([]Superseded_Case, 12, context.temp_allocator)
+	cases := make([]Superseded_Case, 14, context.temp_allocator)
 	cases[0] = {"a TTL-0 answer", superseded_reply(.No_Error, superseded_a(STALE_NAME, LIVE_ADDR, 0)), false, "", false}
 	cases[1] = {"a NODATA without a SOA", superseded_reply(.No_Error), false, "", false}
 	cases[2] = {"an NXDOMAIN without a SOA", superseded_reply(.NX_Domain), false, "", false}
@@ -124,6 +124,10 @@ superseded_cases :: proc() -> []Superseded_Case {
 		"",
 		true,
 	}
+	// An answer section with nothing at the question name answers nothing
+	// that was asked, which the cache reads as a denial and rebind refuses.
+	cases[12] = {"a NOERROR about another name", superseded_reply(.No_Error, superseded_a("other.example.", LIVE_ADDR, 300)), true, "", false}
+	cases[13] = {"a private address at another name", superseded_reply(.No_Error, superseded_a("other.example.", {10, 0, 0, 1}, 300)), true, "", true}
 	return cases
 }
 

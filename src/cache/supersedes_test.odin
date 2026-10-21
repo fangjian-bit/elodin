@@ -68,6 +68,7 @@ test_a_refused_answer_forgets_the_entry_it_supersedes :: proc(t: ^testing.T) {
 		{name = "an answer too large to keep", msg = supersede_msg(.No_Error, supersede_a(300)), tiny = true, forgotten = true},
 		{name = "a TTL-0 answer naming another entry", msg = supersede_msg(.No_Error, supersede_a(0)), off = 1},
 		{name = "an NXDOMAIN carrying an address", msg = supersede_msg(.NX_Domain, supersede_a(300))},
+		{name = "a NOERROR about another name", msg = supersede_msg(.No_Error, {name = "other.example.", type = .A, class = .IN, ttl = 300, data = dns.Rdata_A{addr = {5, 6, 7, 8}}})},
 		{name = "a SERVFAIL", msg = supersede_msg(.Serv_Fail)},
 		{name = "a truncated answer", msg = truncated},
 		{name = "an answer whose signature lapsed", msg = supersede_msg(.No_Error, supersede_a(300), lapsed_rrsig())},

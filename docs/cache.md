@@ -112,7 +112,8 @@ got:
   answer the cache will not keep (a TTL of 0, a denial without a SOA, a private
   address `rebind` refuses) drops the expired copy instead, so the next query
   waits for the upstream. A SERVFAIL, a REFUSED, a truncated or unreadable
-  reply, or no reply leaves the copy in place. A copy whose RRSIGs expired
+  reply, one whose answer section holds nothing at the name asked about, or no
+  reply leaves the copy in place. A copy whose RRSIGs expired
   during the wait is not served: the client waits for the refresh, up to the
   upstream budget, and gets SERVFAIL if that fails too.
 - One refresh per name runs at a time; clients arriving meanwhile get the expired

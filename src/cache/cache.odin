@@ -618,6 +618,27 @@ denial :: proc(msg: dns.Message) -> bool {
 }
 
 /*
+Does the answer section speak about the question at all? Empty, it denies it;
+otherwise a record has to sit at the question name, in its class, which is
+where `stops_short` starts its walk. A section holding only records at other
+names, or in another class, answers nothing that was asked (RFC 1034 section
+4.3.2), so it is no word from the upstream that an expired copy stopped
+holding (issue #419).
+*/
+concerns_question :: proc(msg: dns.Message) -> bool {
+	if len(msg.question) == 0 || len(msg.answer) == 0 {
+		return true
+	}
+	q := msg.question[0]
+	for r in msg.answer {
+		if (q.class == .ANY || r.class == q.class) && dns.name_equal_fold(r.name, q.name) {
+			return true
+		}
+	}
+	return false
+}
+
+/*
 How many CNAME hops `stops_short` follows past the question name before it reads
 the answer as a chain that never ends. Four times the sixteen that the server's
 own chain check (`server.MAX_CHAIN_NAMES`) and the validator's
@@ -933,7 +954,8 @@ its `serve_stale` fallback (issue #419). It is forgotten when this refuses an
 section 5), an entry too large for the cache. Each is the upstream's word that
 the old copy no longer holds, though none can be kept. A refusal of what is not
 an answer - a failure rcode, a truncated reply, an NXDOMAIN that contradicts
-its own answer section, a lapsed signature, bytes that will not scan - leaves
+its own answer section, an answer section with nothing at the question name
+(`concerns_question`), a lapsed signature, bytes that will not scan - leaves
 it, since covering those is what RFC 8767 keeps it for. `forget` checks the
 serial, so an entry stored meanwhile stays; zero matches nothing.
 
@@ -1057,6 +1079,10 @@ the same shape stopped one layer further out, on the paths no validator
 		}
 	}
 
+	// The expired copy the refusals below forget, unless the answer section
+	// is about some other name, which `stops_short` would read as a denial.
+	stale := supersedes if concerns_question(msg) else 0
+
 	now := time.now()
 	now_unix := time.time_to_unix(now)
 	signed_left, signed := dns.signatures_lapse(wire, u32(now_unix))
@@ -1095,7 +1121,7 @@ the same shape stopped one layer further out, on the paths no validator
 		has_soa: bool
 		soa_ttl, has_soa = dns.negative_ttl(msg)
 		if !has_soa {
-			forget(c, key, supersedes)
+			forget(c, key, stale)
 			return false
 		}
 	}
@@ -1179,7 +1205,7 @@ thing in both directions.
 	if effective == 0 {
 		delete(offsets, c.allocator)
 		delete(ttls, c.allocator)
-		forget(c, key, supersedes)
+		forget(c, key, stale)
 		return false
 	}
 
@@ -1196,7 +1222,7 @@ thing in both directions.
 	if size > sync.atomic_load(&c.max_bytes) {
 		delete(offsets, c.allocator)
 		delete(ttls, c.allocator)
-		forget(c, key, supersedes)
+		forget(c, key, stale)
 		return false
 	}
 

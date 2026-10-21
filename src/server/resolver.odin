@@ -2663,8 +2663,9 @@ resolve_query :: proc(
 	replaces the expired copy as an answer `cache.put` refuses does (issue
 	#419). What `put` would not read as an answer keeps it: one the guard could
 	not read, a private address under an NXDOMAIN, which contradicts itself, a
-	truncated reply (RFC 2181 section 9) and one whose signatures have lapsed
-	(RFC 4034 section 3.1.5).
+	truncated reply (RFC 2181 section 9), one whose signatures have lapsed
+	(RFC 4034 section 3.1.5) and an answer section with nothing at the question
+	name (`cache.concerns_question`).
 	*/
 	if checking_rebind {
 		if out, detail, blocked := rebind_refusal(s, msg, q, decoded, limit, allocator); blocked {
@@ -2672,7 +2673,8 @@ resolve_query :: proc(
 			   decoded.full &&
 			   !decoded.msg.flags.tc &&
 			   !(signed && signed_left == 0) &&
-			   dns.rcode_of(decoded.msg) == .No_Error {
+			   dns.rcode_of(decoded.msg) == .No_Error &&
+			   cache.concerns_question(decoded.msg) {
 				cache.forget(live(s).answers, key, stale_hit.serial)
 			}
 			log_query(s, client, proto, q, .Blocked, detail, started)
