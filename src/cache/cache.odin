@@ -618,6 +618,27 @@ denial :: proc(msg: dns.Message) -> bool {
 }
 
 /*
+Does the answer section speak about the question at all? Empty, it denies it;
+otherwise a record has to sit at the question name, in its class, which is
+where `stops_short` starts its walk. A section holding only records at other
+names, or in another class, answers nothing that was asked (RFC 1034 section
+4.3.2), so it is no word from the upstream that an expired copy stopped
+holding (issue #419).
+*/
+concerns_question :: proc(msg: dns.Message) -> bool {
+	if len(msg.question) == 0 || len(msg.answer) == 0 {
+		return true
+	}
+	q := msg.question[0]
+	for r in msg.answer {
+		if (q.class == .ANY || r.class == q.class) && dns.name_equal_fold(r.name, q.name) {
+			return true
+		}
+	}
+	return false
+}
+
+/*
 How many CNAME hops `stops_short` follows past the question name before it reads
 the answer as a chain that never ends. Four times the sixteen that the server's
 own chain check (`server.MAX_CHAIN_NAMES`) and the validator's
@@ -762,7 +783,8 @@ too small; this is an entry that turned out to be unusable, which is a different
 question and a rarer one.
 */
 forget :: proc(c: ^Cache, key: string, serial: u64) {
-	if c == nil {
+	// No entry is numbered zero, so there is nothing to look for or lock over.
+	if c == nil || serial == 0 {
 		return
 	}
 	sync.mutex_lock(&c.mu)
@@ -926,6 +948,17 @@ numbering has moved on. The cache does not read it: what it counts is a number
 the caller recognises, and a caller with nothing to say leaves it at zero, which
 `get` will always report as out of date rather than silently current.
 
+`supersedes` is the serial of an expired entry under `key` the caller holds as
+its `serve_stale` fallback (issue #419). It is forgotten when this refuses an
+*answer*: a TTL of 0 (RFC 2181 section 8), a denial without a SOA (RFC 2308
+section 5), an entry too large for the cache. Each is the upstream's word that
+the old copy no longer holds, though none can be kept. A refusal of what is not
+an answer - a failure rcode, a truncated reply, an NXDOMAIN that contradicts
+its own answer section, an answer section with nothing at the question name
+(`concerns_question`), a lapsed signature, bytes that will not scan - leaves
+it, since covering those is what RFC 8767 keeps it for. `forget` checks the
+serial, so an entry stored meanwhile stays; zero matches nothing.
+
 `bogus` is the caller saying the bytes are a refusal it reached itself rather
 than an answer somebody sent: a SERVFAIL, which is otherwise one of the
 transient failures above and refused, and which is all the flag admits - an
@@ -941,6 +974,7 @@ put :: proc(
 	refused: u8 = 0,
 	bogus := false,
 	ede: u16 = 0,
+	supersedes: u64 = 0,
 ) -> bool {
 	if c == nil || len(wire) < dns.HEADER_SIZE {
 		return false
@@ -1045,6 +1079,22 @@ the same shape stopped one layer further out, on the paths no validator
 		}
 	}
 
+	// The expired copy the refusals below forget, unless the answer section
+	// is about some other name, which `stops_short` would read as a denial.
+	// Asked only when there is a copy to forget: most stores name none.
+	stale := supersedes if supersedes != 0 && concerns_question(msg) else 0
+
+	now := time.now()
+	now_unix := time.time_to_unix(now)
+	signed_left, signed := dns.signatures_lapse(wire, u32(now_unix))
+	// A message whose signature has already lapsed is not stored at all, past
+	// `min_ttl`, which is a floor on what records claim and not on what their
+	// signatures allow. A live one caps the lifetime below, at the expiration
+	// second. Above the SOA check, so a lapsed denial keeps the copy too.
+	if signed && signed_left == 0 {
+		return false
+	}
+
 	/*
 	A denial without a SOA is not an answer to remember either.
 
@@ -1072,6 +1122,7 @@ the same shape stopped one layer further out, on the paths no validator
 		has_soa: bool
 		soa_ttl, has_soa = dns.negative_ttl(msg)
 		if !has_soa {
+			forget(c, key, stale)
 			return false
 		}
 	}
@@ -1108,9 +1159,6 @@ thing in both directions.
 	for the upstream's figure. `signed_left` is no bound at all for a message
 	that carries none.
 	*/
-	now := time.now()
-	now_unix := time.time_to_unix(now)
-	signed_left, signed := dns.signatures_lapse(wire, u32(now_unix))
 	// Read once each, atomically: this runs outside the lock `reconfigure`
 	// writes them under.
 	min_ttl := sync.atomic_load(&c.min_ttl)
@@ -1155,16 +1203,10 @@ thing in both directions.
 		}
 		effective = clamp(effective, min_ttl, max_ttl)
 	}
-	// A message whose signature has already lapsed is not stored at all, past
-	// `min_ttl`, which is a floor on what records claim and not on what their
-	// signatures allow. A live one caps the lifetime below, at the expiration
-	// second.
-	if signed && signed_left == 0 {
-		effective = 0
-	}
 	if effective == 0 {
 		delete(offsets, c.allocator)
 		delete(ttls, c.allocator)
+		forget(c, key, stale)
 		return false
 	}
 
@@ -1181,6 +1223,7 @@ thing in both directions.
 	if size > sync.atomic_load(&c.max_bytes) {
 		delete(offsets, c.allocator)
 		delete(ttls, c.allocator)
+		forget(c, key, stale)
 		return false
 	}
 

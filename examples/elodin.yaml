@@ -365,10 +365,13 @@ cache:
   # arrives after the client has already failed.
   #
   # The refresh is not cancelled when the timer fires. It carries on and writes
-  # whatever it gets to the cache, so the entry is renewed even though this
-  # client was answered from it, and one refresh per name is in flight at a time
-  # however many clients are asking. 0 turns the timer off: the client waits the
-  # whole upstream budget out, which is what every release before this one did.
+  # what it gets to the cache, so the entry is renewed even though this client
+  # was answered from it. An answer the cache will not keep (a TTL of 0, a
+  # denial without a SOA, a private address rebind refuses) drops the expired
+  # copy instead; a failure or no reply leaves it (see docs/cache.md). One
+  # refresh per name is in flight at a time however many clients are asking. 0
+  # turns the timer off: the client waits the whole upstream budget out, which
+  # is what every release before this one did.
   #
   # Read only while serve_stale is on.
   stale_timeout: 1.8s

@@ -2626,7 +2626,7 @@ resolve_query :: proc(
 	validated - CD, or validation off - is held to it only here.
 	*/
 	// `signatures_lapse` reads no bound at all for a message that carries none.
-	signed_left, _ := dns.signatures_lapse(resp, u32(time.time_to_unix(time.now())))
+	signed_left, signed := dns.signatures_lapse(resp, u32(time.time_to_unix(time.now())))
 	dns.cap_ttls(resp, min(cache.ttl_ceiling(live(s).answers), signed_left))
 
 	/*
@@ -2658,9 +2658,25 @@ resolve_query :: proc(
 	Below the decode rather than above it, which is the same position in the
 	order - nothing between here and the refusal stores anything or changes what
 	the guard reads.
+
+	A private address is the upstream's answer, refused rather than stored, so it
+	replaces the expired copy as an answer `cache.put` refuses does (issue
+	#419). What `put` would not read as an answer keeps it: one the guard could
+	not read, a private address under an NXDOMAIN, which contradicts itself, a
+	truncated reply (RFC 2181 section 9), one whose signatures have lapsed
+	(RFC 4034 section 3.1.5) and an answer section with nothing at the question
+	name (`cache.concerns_question`).
 	*/
 	if checking_rebind {
 		if out, detail, blocked := rebind_refusal(s, msg, q, decoded, limit, allocator); blocked {
+			if detail == "rebind" &&
+			   decoded.full &&
+			   !decoded.msg.flags.tc &&
+			   !(signed && signed_left == 0) &&
+			   dns.rcode_of(decoded.msg) == .No_Error &&
+			   cache.concerns_question(decoded.msg) {
+				cache.forget(live(s).answers, key, stale_hit.serial)
+			}
 			log_query(s, client, proto, q, .Blocked, detail, started)
 			return out, .Blocked, true
 		}
@@ -2856,7 +2872,18 @@ resolve_query :: proc(
 			   decoded.full &&
 			   !unproven_apex_ds &&
 			   cloak_verdict_worth_keeping(verdict) {
-				kept := cache.put(live(s).answers, key, resp, decoded.msg, generation, u8(verdict), ede = answer_ede)
+				// `supersedes`: an answer refused here still replaces the
+				// expired copy (issue #419); see `cache.put`.
+				kept := cache.put(
+					live(s).answers,
+					key,
+					resp,
+					decoded.msg,
+					generation,
+					u8(verdict),
+					ede = answer_ede,
+					supersedes = stale_hit.serial,
+				)
 				if flight != nil && kept {
 					flight.stored = .Cloak
 				}
@@ -2894,7 +2921,9 @@ resolve_query :: proc(
 	willing to speak stores what it said.
 	*/
 	if live(s).cfg.cache.enabled && decoded.full && !unproven_apex_ds {
-		cache.put(live(s).answers, key, resp, decoded.msg, generation, ede = answer_ede)
+		// `supersedes`: an answer that cannot be kept still replaces the
+		// expired copy (issue #419); see `cache.put`.
+		cache.put(live(s).answers, key, resp, decoded.msg, generation, ede = answer_ede, supersedes = stale_hit.serial)
 	}
 	/*
 	What was just stored, or would have been, handed over and landed before

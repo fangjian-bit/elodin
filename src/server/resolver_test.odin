@@ -1,6 +1,7 @@
 package server
 
 import "core:net"
+import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -295,6 +296,9 @@ Stale_Exchange :: struct {
 	// need an upstream that is slow rather than absent, so that the client
 	// gives up on it while it is still going to answer.
 	delay:  time.Duration,
+	// Held until posted, rather than for a duration, where the case needs the
+	// client answered before the upstream is; bounded by `MOCK_RECV_TIMEOUT`.
+	hold:   ^sync.Sema,
 }
 
 /*
@@ -314,6 +318,9 @@ serve_one_stale :: proc(x: ^Stale_Exchange) {
 	x.got = true
 	if x.delay > 0 {
 		time.sleep(x.delay)
+	}
+	if x.hold != nil {
+		_ = sync.sema_wait_with_timeout(x.hold, MOCK_RECV_TIMEOUT)
 	}
 
 	out: [4096]u8
