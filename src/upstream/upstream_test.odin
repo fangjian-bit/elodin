@@ -322,6 +322,73 @@ expect_caller_holds_nothing :: proc(t: ^testing.T, track: ^mem.Tracking_Allocato
 	}
 }
 
+/*
+Reading a body costs the body and the reader's buffer, not a buffer grown by
+doubling past the body's size, nor one still holding every chunk already
+copied out. 600 KB lands a doubling buffer at 1 MiB.
+*/
+@(test)
+test_a_body_costs_about_twice_its_size_to_read :: proc(t: ^testing.T) {
+	SIZE :: 600_000
+	sized := strings.builder_make()
+	defer strings.builder_destroy(&sized)
+	fmt.sbprintf(&sized, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", SIZE)
+	chunked := strings.builder_make()
+	defer strings.builder_destroy(&chunked)
+	strings.write_string(&chunked, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+	for _ in 0 ..< SIZE / 1000 {
+		strings.write_string(&chunked, "3e8\r\n")
+		for _ in 0 ..< 1000 {
+			strings.write_byte(&chunked, 'x')
+		}
+		strings.write_string(&chunked, "\r\n")
+	}
+	strings.write_string(&chunked, "0\r\n\r\n")
+	one_chunk := strings.builder_make()
+	defer strings.builder_destroy(&one_chunk)
+	fmt.sbprintf(&one_chunk, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n%x\r\n", SIZE)
+	for _ in 0 ..< SIZE {
+		strings.write_byte(&sized, 'x')
+		strings.write_byte(&one_chunk, 'x')
+	}
+	strings.write_string(&one_chunk, "\r\n0\r\n\r\n")
+
+	framings := [3]string{"Content-Length", "chunked", "one chunk"}
+	replies := [3]string{strings.to_string(sized), strings.to_string(chunked), strings.to_string(one_chunk)}
+	for reply, framing in replies {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		defer mem.tracking_allocator_destroy(&track)
+		{
+			context.allocator = mem.tracking_allocator(&track)
+			resp, err, ok := exchange_against(t, reply, &track)
+			if !ok {
+				continue
+			}
+			testing.expect_value(t, err, Error.None)
+			testing.expect_value(t, len(resp.body), SIZE)
+			testing.expectf(
+				t,
+				track.current_memory_allocated < 1.1 * SIZE,
+				"%s: a %d-byte body is held in %d bytes",
+				framings[framing],
+				SIZE,
+				track.current_memory_allocated,
+			)
+			delete(resp.body)
+		}
+		testing.expectf(
+			t,
+			track.peak_memory_allocated < 2.1 * SIZE,
+			"%s: a %d-byte body peaked at %d bytes",
+			framings[framing],
+			SIZE,
+			track.peak_memory_allocated,
+		)
+	}
+	free_all(context.temp_allocator)
+}
+
 @(test)
 test_redirect_location_is_not_the_callers_to_free :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
@@ -925,12 +992,79 @@ test_reader_exact_refuses_a_negative_count :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
+@(private = "file")
+with_reader :: proc(t: ^testing.T, reply: string, check: proc(t: ^testing.T, r: ^Buf_Reader)) {
+	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if !testing.expectf(t, lerr == nil, "cannot listen on loopback: %v", lerr) {
+		return
+	}
+	bound, _ := net.bound_endpoint(listener)
+	// So a return before the dial ends the mock's accept rather than hanging.
+	_ = net.set_option(listener, .Receive_Timeout, 3 * time.Second)
+	m := Http_Mock {
+		listener = listener,
+		reply    = reply,
+	}
+	server := thread.create_and_start_with_poly_data(&m, http_mock_once)
+	defer {
+		thread.join(server)
+		thread.destroy(server)
+		net.close(listener)
+	}
+	socket, derr := dial_tcp_timeout(bound, 2 * time.Second)
+	if !testing.expectf(t, derr == .None, "cannot dial the mock: %v", derr) {
+		return
+	}
+	set_socket_timeouts(socket, 2 * time.Second)
+	stream := Stream {
+		socket = socket,
+	}
+	defer stream_close(&stream)
+	// The mock reads a request before it answers.
+	stream_write(&stream, []u8{'\n'})
+	r := Buf_Reader {
+		stream = &stream,
+		buf    = make([dynamic]u8, 0, 8192),
+	}
+	defer delete(r.buf)
+	check(t, &r)
+}
+
+/*
+A read waiting for a length grows the buffer to that length and no further,
+even when the peer has sent more behind it - the CRLF after a chunk, the next
+response - or the last read would grow the whole buffer again for a few bytes.
+*/
+@(test)
+test_reader_exact_grows_to_what_it_waits_for :: proc(t: ^testing.T) {
+	SIZE :: 100_000
+	with_reader(t, strings.concatenate({strings.repeat("x", SIZE, context.temp_allocator), "\r\n0\r\n\r\n"}, context.temp_allocator), proc(t: ^testing.T, r: ^Buf_Reader) {
+		data, err := reader_exact(r, SIZE)
+		testing.expect_value(t, err, Error.None)
+		testing.expect_value(t, len(data), SIZE)
+		testing.expect_value(t, cap(r.buf), SIZE)
+	})
+	free_all(context.temp_allocator)
+}
+
+// A body with no length is refused past its limit before the buffer has grown
+// past that limit, not after doubling beyond it.
+@(test)
+test_reader_to_end_grows_no_further_than_its_limit :: proc(t: ^testing.T) {
+	with_reader(t, strings.repeat("x", 150_000, context.temp_allocator), proc(t: ^testing.T, r: ^Buf_Reader) {
+		LIMIT :: 100_000
+		_, err := reader_to_end(r, LIMIT)
+		testing.expect_value(t, err, Error.Too_Large)
+		testing.expectf(t, cap(r.buf) <= LIMIT + 1, "a %d-byte limit grew the buffer to %d", LIMIT, cap(r.buf))
+	})
+	free_all(context.temp_allocator)
+}
+
 /*
 `reader_line`'s 64 KB guard must measure the unconsumed remainder, not the
-whole buffer. `Buf_Reader` never compacts, so once a body has pushed `r.buf`
-past 64 KB, every consumed byte stays counted against the guard forever - the
-next line that needs a fresh socket read would be refused even with nothing
-outstanding to read.
+whole buffer. Consumed bytes stay in `r.buf` until a read needs the room, so a
+guard on the whole buffer, once a body has pushed it past 64 KB, would refuse
+the next line that needs a fresh socket read with nothing outstanding to read.
 
 `r.buf` is primed here to simulate exactly that: a chunk body already consumed
 past 64 KB, with the cursor at the end of it, as `read_chunked` leaves things
@@ -3139,9 +3273,8 @@ test_http_bodyless_statuses_end_at_the_fields :: proc(t: ^testing.T) {
 
 	/*
 	Interim responses draw on the final response's field budget, on purpose:
-	the reader keeps every line of the exchange, so a budget each would let a
-	run of them hold a hundred times as much. 103 with 60 fields costs 61, and
-	a 200 with 40 more is one over.
+	a budget each would let a run of them go on a hundred times as long. 103
+	with 60 fields costs 61, and a 200 with 40 more is one over.
 	*/
 	{
 		b := strings.builder_make(context.temp_allocator)

@@ -132,10 +132,17 @@ Buf_Reader :: struct {
 	// The peer has closed: what `reader_to_end` waits for, and the only thing
 	// that ends a body with no framing.
 	closed:   bool,
+	// Some of the response has arrived, whether or not `buf` still holds it.
+	received: bool,
 }
 
+/*
+Read once more from the stream into `buf`. `unread`, when given, is how many
+bytes past the cursor the caller is waiting for, so the buffer grows to hold
+exactly that rather than doubling past it.
+*/
 @(private)
-reader_fill :: proc(r: ^Buf_Reader) -> Error {
+reader_fill :: proc(r: ^Buf_Reader, unread := 0) -> Error {
 	/*
 	A timeout per read bounds a silent peer and nothing else: a peer sending a
 	line just inside it, again and again, held the exchange for as long as the
@@ -149,7 +156,23 @@ reader_fill :: proc(r: ^Buf_Reader) -> Error {
 		stream_set_read_timeout(r.stream, wait)
 	}
 	chunk: [8192]u8
-	n, err := stream_read(r.stream, chunk[:])
+	// What has been read past is dropped rather than grown over, or a chunked
+	// body would be held twice: here, and in the body its chunks are copied to.
+	// A view into `buf` lasts only until the next read, so nothing points here.
+	if r.pos > 0 && len(r.buf) + len(chunk) > cap(r.buf) {
+		kept := copy(r.buf[:], r.buf[r.pos:])
+		resize(&r.buf, kept)
+		r.pos = 0
+	}
+	// No more than a waiting read needs once the buffer is full, so the buffer
+	// grown for it holds what arrives: bytes the peer sent behind it would grow
+	// the whole thing again. Room already there is filled, or what follows a
+	// chunk would take a read of its own.
+	size := len(chunk)
+	if unread > 0 {
+		size = clamp(max(unread - (len(r.buf) - r.pos), cap(r.buf) - len(r.buf)), 1, len(chunk))
+	}
+	n, err := stream_read(r.stream, chunk[:size])
 	if err != .None {
 		return err
 	}
@@ -161,17 +184,34 @@ reader_fill :: proc(r: ^Buf_Reader) -> Error {
 	keep-alive` costs when the server's idle timer is shorter than ours - and
 	is the one thing `record_failure` must not read as an outage. Once a byte
 	of the response has arrived the same close is a reply cut in half, which is
-	the server breaking and has to be counted as one; `r.buf` is per exchange,
-	so its being empty is exactly that question.
+	the server breaking and has to be counted as one, which is what `received`
+	answers.
 
 	`reader_to_end` reaches here for the opposite reason, as the close that
 	ends a body with no length, and discards whichever of the two it gets.
 	*/
 	if n == 0 {
 		r.closed = true
-		return .Peer_Closed if len(r.buf) == 0 else .IO_Error
+		return .Peer_Closed if !r.received else .IO_Error
 	}
-	append(&r.buf, ..chunk[:n])
+	r.received = true
+	// Doubled as bytes arrive, but never past what a waiting read needs - the
+	// drop above runs on any read that could grow `buf`, so the cursor is at
+	// zero here and that is `unread`.
+	// Not reserved to `unread` outright: a length the peer declares and never
+	// sends must not cost more than twice what it did send.
+	if need := len(r.buf) + n; need > cap(r.buf) {
+		grow := max(2 * cap(r.buf), need)
+		if unread > 0 {
+			grow = min(grow, max(unread, need))
+		}
+		reserve(&r.buf, grow)
+	}
+	// Bytes taken off the socket cannot be put back: dropped, the response
+	// would go on with a gap in it rather than fail.
+	if _, aerr := append(&r.buf, ..chunk[:n]); aerr != nil {
+		return .Too_Large
+	}
 	return .None
 }
 
@@ -195,11 +235,11 @@ next_wait :: proc(deadline: time.Tick, idle: time.Duration) -> (wait: time.Durat
 /*
 Read up to and including the next CRLF, returning the line without it.
 
-The result is a view into `r.buf`, which every later read may grow — and past
-its capacity that means a different block. So a line is good until the next read
-and no longer: `http_exchange` finishes with each one inside the iteration that
-produced it, and clones the one thing it keeps. Anything added here that holds a
-line across a read has to copy it first.
+The result is a view into `r.buf`, which a later read may shift down over the
+bytes already consumed, or past its capacity move to a different block. So a
+line is good until the next read and no longer: `http_exchange` finishes with
+each one inside the iteration that produced it, and clones the one thing it
+keeps. Anything added here that holds a line across a read has to copy it first.
 */
 @(private)
 reader_line :: proc(r: ^Buf_Reader) -> (line: string, err: Error) {
@@ -247,7 +287,7 @@ reader_exact :: proc(r: ^Buf_Reader, n: int) -> (data: []u8, err: Error) {
 		return nil, .HTTP_Error
 	}
 	for len(r.buf) - r.pos < n {
-		reader_fill(r) or_return
+		reader_fill(r, n) or_return
 	}
 	start := r.pos
 	r.pos += n
@@ -277,7 +317,7 @@ reader_to_end :: proc(r: ^Buf_Reader, limit: int) -> (data: []u8, err: Error) {
 		had arrived came back as the whole, with no error - for a list, a
 		partial copy written over the good cached one (#445).
 		*/
-		if ferr := reader_fill(r); ferr != .None {
+		if ferr := reader_fill(r, limit + 1); ferr != .None {
 			if r.closed {
 				break
 			}
@@ -311,9 +351,9 @@ MAX_HTTP_BODY :: 64 * 1024 * 1024
 /*
 How many header fields — or trailer fields, which are read by the same loop —
 one exchange may carry. Interim (1xx) responses draw on the headers' budget,
-each one costing a field on top of its own: the reader keeps every line it has
-read for the whole exchange, so a budget per response would let a run of interim
-responses hold a hundred times as much. Trailers have a budget of their own.
+each one costing a field on top of its own, so a budget per response would let a
+run of interim responses go on a hundred times as long. Trailers have a budget
+of their own.
 
 `reader_line` bounds a line at 64 KB but says nothing about how many lines
 follow, so a peer sending short fields forever was answered for as long as it
@@ -326,7 +366,10 @@ MAX_HTTP_HEADERS :: 100
 Perform one request/response exchange on `stream`.
 
 The returned body is allocated from `allocator`; everything else borrows from
-scratch memory and must be copied if it needs to outlive the call.
+scratch memory and must be copied if it needs to outlive the call. The response
+is read through a buffer from `context.allocator`, freed before returning, so
+that has to be an allocator that frees: in an arena, every block the buffer
+outgrew would stay.
 
 `deadline`, when set, bounds the request's writes and the reading of the whole
 response, and `idle` any one read or write under it; see `stream_write` and
@@ -386,12 +429,16 @@ http_exchange :: proc(
 		stream_write(stream, req.body, deadline, idle) or_return
 	}
 
+	// On the heap rather than in scratch, which keeps every block the buffer
+	// outgrows until the caller's `free_all` - for a blocklist refresh, every
+	// list's download until the last one has loaded.
 	r := Buf_Reader {
 		stream   = stream,
-		buf      = make([dynamic]u8, 0, 8192, context.temp_allocator),
+		buf      = make([dynamic]u8, 0, 8192),
 		deadline = deadline,
 		idle     = idle,
 	}
+	defer delete(r.buf)
 
 	/*
 	Interim (1xx) responses come first and are passed over: their fields are
@@ -672,6 +719,11 @@ read_chunked :: proc(r: ^Buf_Reader, allocator: mem.Allocator) -> (body: []u8, e
 		if tail := reader_line(r) or_return; tail != "" {
 			return nil, .HTTP_Error
 		}
+	}
+	// The caller holds the body for as long as it needs it - a list, through
+	// parsing - so not in the capacity its doubling left behind.
+	if cap(out) > len(out) {
+		shrink(&out)
 	}
 	return out[:], .None
 }

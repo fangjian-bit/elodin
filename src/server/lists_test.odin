@@ -1,5 +1,6 @@
 package server
 
+import "base:runtime"
 import "core:fmt"
 import "core:net"
 import "core:os"
@@ -519,20 +520,25 @@ test_a_given_name_like_a_default_keeps_its_copy :: proc(t: ^testing.T) {
 One_List :: struct {
 	listener: net.TCP_Socket,
 	body:     string,
+	count:    int,
 }
 
-// Answer one request on `listener` with `body` as a 200.
+// Answer `count` requests on `listener` with `body` as a 200.
 @(private = "file")
 serve_one_list :: proc(one: ^One_List) {
-	client, _, err := net.accept_tcp(one.listener)
-	if err != nil {
-		return
+	for _ in 0 ..< one.count {
+		client, _, err := net.accept_tcp(one.listener)
+		if err != nil {
+			return
+		}
+		buf: [1024]u8
+		_, _ = net.recv_tcp(client, buf[:])
+		head := fmt.tprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(one.body))
+		_, _ = net.send_tcp(client, transmute([]u8)head)
+		_, _ = net.send_tcp(client, transmute([]u8)one.body)
+		net.close(client)
+		free_all(context.temp_allocator)
 	}
-	defer net.close(client)
-	buf: [1024]u8
-	_, _ = net.recv_tcp(client, buf[:])
-	reply := fmt.tprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(one.body), one.body)
-	_, _ = net.send_tcp(client, transmute([]u8)reply)
 }
 
 // A loopback listener for `serve_one_list`, and the URL that reaches it.
@@ -561,7 +567,7 @@ test_a_fresh_cached_page_is_downloaded_over :: proc(t: ^testing.T) {
 		return
 	}
 	defer net.close(listener)
-	one := One_List{listener, "0.0.0.0 fetched.example\n"}
+	one := One_List{listener, "0.0.0.0 fetched.example\n", 1}
 	server := thread.create_and_start_with_poly_data(&one, serve_one_list)
 	defer thread.destroy(server)
 	defer thread.join(server)
@@ -591,6 +597,65 @@ test_a_fresh_cached_page_is_downloaded_over :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_a_refresh_leaves_no_download_in_scratch :: proc(t: ^testing.T) {
+	/*
+	Scratch is cleared only when the maintenance tick ends, so a download read
+	into it is held for the whole refresh, and every list's buffers pile up on
+	top of the old and new rule sets.
+	*/
+	LISTS :: 8
+	listener, url, ok := listen_one_list(t)
+	if !ok {
+		return
+	}
+	defer net.close(listener)
+	body := strings.builder_make()
+	defer strings.builder_destroy(&body)
+	for i := 0; strings.builder_len(body) < 512 * 1024; i += 1 {
+		fmt.sbprintf(&body, "0.0.0.0 n%d.example\n", i)
+	}
+	one := One_List{listener, strings.to_string(body), LISTS}
+	server := thread.create_and_start_with_poly_data(&one, serve_one_list)
+	defer thread.destroy(server)
+	defer thread.join(server)
+
+	defer free_all(context.temp_allocator)
+	dir := fmt.tprintf("/tmp/elodin-server-lists-test-scratch-%d", os.get_pid())
+	testing.expect(t, os.make_directory(dir) == nil)
+	defer os.remove_all(dir)
+	cfg := config.default_config()
+	cfg.blocking.cache_dir = dir
+	lists: [LISTS]config.Block_List
+	for &list, i in lists {
+		list = {name = fmt.tprintf("l%d", i), url = fmt.tprintf("%s%d", url, i), format = .Hosts, enabled = true}
+	}
+	cfg.blocking.lists = lists[:]
+
+	if !testing.expect(t, context.temp_allocator.data == &runtime.global_default_temp_allocator_data, "scratch is not the thread's own arena") {
+		return
+	}
+	scratch := &runtime.global_default_temp_allocator_data.arena
+	before := int(scratch.total_used)
+	loads: [LISTS]List_Load
+	block, allow := build_filter_sets(&cfg, true, loads[:])
+	defer filter.set_destroy(block)
+	defer filter.set_destroy(allow)
+	held := int(scratch.total_used) - before
+
+	for load in loads {
+		testing.expect_value(t, load, List_Load.Current)
+	}
+	testing.expectf(
+		t,
+		held < len(one.body),
+		"%d lists of %d bytes left %d bytes in the scratch arena; a download should not outlive its exchange there",
+		LISTS,
+		len(one.body),
+		held,
+	)
+}
+
+@(test)
 test_an_empty_download_with_no_copy_does_not_hold_the_others_back :: proc(t: ^testing.T) {
 	/*
 	A list that loaded before, then downloads empty with no cached copy behind
@@ -603,7 +668,7 @@ test_an_empty_download_with_no_copy_does_not_hold_the_others_back :: proc(t: ^te
 		return
 	}
 	defer net.close(listener)
-	one := One_List{listener, "# emptied\n"}
+	one := One_List{listener, "# emptied\n", 1}
 	server := thread.create_and_start_with_poly_data(&one, serve_one_list)
 	defer thread.destroy(server)
 	defer thread.join(server)
