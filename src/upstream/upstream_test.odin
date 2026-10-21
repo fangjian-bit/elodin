@@ -992,7 +992,6 @@ test_reader_exact_refuses_a_negative_count :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-// Run `check` against a reader connected to a mock that answers with `reply`.
 @(private = "file")
 with_reader :: proc(t: ^testing.T, reply: string, check: proc(t: ^testing.T, r: ^Buf_Reader)) {
 	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
@@ -3272,9 +3271,8 @@ test_http_bodyless_statuses_end_at_the_fields :: proc(t: ^testing.T) {
 
 	/*
 	Interim responses draw on the final response's field budget, on purpose:
-	the reader keeps every line of the exchange, so a budget each would let a
-	run of them hold a hundred times as much. 103 with 60 fields costs 61, and
-	a 200 with 40 more is one over.
+	a budget each would let a run of them go on a hundred times as long. 103
+	with 60 fields costs 61, and a 200 with 40 more is one over.
 	*/
 	{
 		b := strings.builder_make(context.temp_allocator)

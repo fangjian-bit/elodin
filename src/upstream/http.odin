@@ -164,11 +164,13 @@ reader_fill :: proc(r: ^Buf_Reader, unread := 0) -> Error {
 		r.pos = 0
 	}
 	chunk: [8192]u8
-	// No more than a waiting read needs, so the buffer grown for it holds what
-	// arrives: bytes the peer sent behind it would grow the whole thing again.
+	// No more than a waiting read needs once the buffer is full, so the buffer
+	// grown for it holds what arrives: bytes the peer sent behind it would grow
+	// the whole thing again. Room already there is filled, or what follows a
+	// chunk would take a read of its own.
 	size := len(chunk)
 	if unread > 0 {
-		size = clamp(unread - (len(r.buf) - r.pos), 1, len(chunk))
+		size = clamp(max(unread - (len(r.buf) - r.pos), cap(r.buf) - len(r.buf)), 1, len(chunk))
 	}
 	n, err := stream_read(r.stream, chunk[:size])
 	if err != .None {
