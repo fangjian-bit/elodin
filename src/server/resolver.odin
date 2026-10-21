@@ -327,7 +327,9 @@ handle_query :: proc(
 	FORMERR because RFC 6891 section 6.1.1 says exactly that of a query carrying
 	more than one OPT record, and because RDATA that is not a well-formed option
 	list is no more answerable: every option in it is one this server can neither
-	see nor take back out, while the upstream reading the same bytes can.
+	see nor take back out, while the upstream reading the same bytes can. An OPT
+	record owned by a name other than the root breaks the MUST of section 6.1.2,
+	and Unbound and BIND answer it FORMERR as well.
 
 	Ahead of `inspect_cookie` for the reason the version check below is ahead of
 	`resolve_query`: this is a property of the request and not of the name. A gate
@@ -969,8 +971,8 @@ pad_answer :: proc(
 Whether this server can account for the EDNS on a message, which is what every
 later edit to one depends on.
 
-Two shapes cannot be accounted for, and they are the same defect read from
-either end. A second OPT record is one RFC 6891 section 6.1.1 forbids outright,
+Four shapes cannot be accounted for. The first two are the same defect read
+from either end. A second OPT record is one RFC 6891 section 6.1.1 forbids outright,
 and every reader here - `find_opt` on the decoded message, `find_opt_span` on
 the wire, and so both the cookie strip and the subnet strip - takes the first
 one and looks no further, so an option sitting in the second travels upstream
