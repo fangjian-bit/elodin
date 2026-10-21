@@ -192,6 +192,12 @@ jobs:
           # answers if the takeover pointed the machine at elodin properly.
           getent hosts example.com
 
+      # The postinst only says to look in the journal, and the runner is gone by
+      # the time anyone reads that, so a failure prints it here.
+      - name: The service's journal
+        if: failure()
+        run: sudo journalctl -u elodin --no-pager -o short-precise -n 300 || true
+
       # Runs even when something above failed, so the runner is never left
       # pointed at a resolver that is not answering.
       - name: Remove it, and check the runner got its resolver back
