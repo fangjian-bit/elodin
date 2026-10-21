@@ -155,15 +155,15 @@ reader_fill :: proc(r: ^Buf_Reader, unread := 0) -> Error {
 		}
 		stream_set_read_timeout(r.stream, wait)
 	}
+	chunk: [8192]u8
 	// What has been read past is dropped rather than grown over, or a chunked
 	// body would be held twice: here, and in the body its chunks are copied to.
 	// A view into `buf` lasts only until the next read, so nothing points here.
-	if r.pos > 0 && len(r.buf) + 8192 > cap(r.buf) {
+	if r.pos > 0 && len(r.buf) + len(chunk) > cap(r.buf) {
 		kept := copy(r.buf[:], r.buf[r.pos:])
 		resize(&r.buf, kept)
 		r.pos = 0
 	}
-	chunk: [8192]u8
 	// No more than a waiting read needs once the buffer is full, so the buffer
 	// grown for it holds what arrives: bytes the peer sent behind it would grow
 	// the whole thing again. Room already there is filled, or what follows a
@@ -718,7 +718,9 @@ read_chunked :: proc(r: ^Buf_Reader, allocator: mem.Allocator) -> (body: []u8, e
 	}
 	// The caller holds the body for as long as it needs it - a list, through
 	// parsing - so not in the capacity its doubling left behind.
-	shrink(&out)
+	if cap(out) > len(out) {
+		shrink(&out)
+	}
 	return out[:], .None
 }
 

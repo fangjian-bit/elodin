@@ -999,6 +999,8 @@ with_reader :: proc(t: ^testing.T, reply: string, check: proc(t: ^testing.T, r: 
 		return
 	}
 	bound, _ := net.bound_endpoint(listener)
+	// So a return before the dial ends the mock's accept rather than hanging.
+	_ = net.set_option(listener, .Receive_Timeout, 3 * time.Second)
 	m := Http_Mock {
 		listener = listener,
 		reply    = reply,

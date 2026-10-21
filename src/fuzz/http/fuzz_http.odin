@@ -28,10 +28,10 @@ fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
 	outgrows, so a use after free of anything read through it would read memory
 	that is still there and ASan would say nothing. The tracker is how it is all
 	handed back afterwards. The reader's own buffer comes from `context.allocator`,
-	which `setup` made an arena for the same reason: it goes to the untracked heap,
-	where ASan sees a line held across a read that grows it, and LeakSanitizer one
-	the exchange forgets to free. Scoped to the block so `teardown` sees the
-	thread's own allocators again.
+	which `setup` makes an arena and which would hide the same mistakes, so here it
+	is the untracked heap: ASan sees a line held across a read that grows the
+	buffer, and LeakSanitizer a buffer the exchange forgets to free. Scoped to the
+	block so `teardown` sees the thread's own allocators again.
 	*/
 	{
 		heap := runtime.heap_allocator()
