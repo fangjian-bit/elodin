@@ -48,15 +48,15 @@ Rewrite the server's file, send SIGHUP, and wait for `needle` to be logged once
 more than it was: the line that says this reload, rather than an earlier one,
 is over.
 */
-@(private = "file")
-reload_to :: proc(r: ^Runner, srv: ^Server, config: string, needle: string) -> bool {
+@(private)
+reload_to :: proc(r: ^Runner, srv: ^Server, config: string, needle: string, timeout := 5 * time.Second) -> bool {
 	path := filepath.join({r.work_dir, fmt.tprintf("elodin-%d.yaml", srv.udp_port)}, context.temp_allocator) or_else ""
 	before := log_count(srv, needle)
 	written := without_dnssec(config)
 	if os.write_entire_file(path, transmute([]u8)written) != nil {
 		return false
 	}
-	return signal_reload(srv) && wait_for_log_count(srv, needle, before + 1, 5 * time.Second)
+	return signal_reload(srv) && wait_for_log_count(srv, needle, before + 1, timeout)
 }
 
 @(private = "file")

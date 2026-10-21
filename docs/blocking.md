@@ -78,6 +78,13 @@ digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share o
   while it is built and is trimmed to 80% as it is swapped in, briefly holding
   its slots twice over each time; the four lists in `examples/lan.yaml` peaked
   6% over their final size.
+- On glibc, the memory a refresh frees stays resident unless
+  `MALLOC_MMAP_THRESHOLD_` is set. Freeing tables that large raises glibc's
+  mmap threshold, so the next refresh builds on the heap, which keeps what it
+  frees, and resident memory settles at a refresh's peak. The shipped unit sets
+  `Environment=MALLOC_MMAP_THRESHOLD_=131072`. Started any other way (by hand,
+  another init system, a container), set it in elodin's environment. musl
+  returns the memory without it.
 
 ## Rule syntax
 
