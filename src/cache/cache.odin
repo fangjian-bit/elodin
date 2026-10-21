@@ -1081,7 +1081,8 @@ the same shape stopped one layer further out, on the paths no validator
 
 	// The expired copy the refusals below forget, unless the answer section
 	// is about some other name, which `stops_short` would read as a denial.
-	stale := supersedes if concerns_question(msg) else 0
+	// Asked only when there is a copy to forget: most stores name none.
+	stale := supersedes if supersedes != 0 && concerns_question(msg) else 0
 
 	now := time.now()
 	now_unix := time.time_to_unix(now)
