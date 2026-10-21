@@ -338,35 +338,42 @@ run_running_worker_cases :: proc(r: ^Runner, cert_ok: bool) {
 	The derived sizing, which is what an installation that names no number
 	gets: a pool as wide as the memory allows, whatever the core count, so a
 	burst of misses wider than the cores still overlaps its round trips.
+
+	Read off the upstream rather than a clock: a mock of its own holds every
+	reply until all 64 questions are waiting on it, which only a pool with all
+	64 in flight at once can bring about. A pool that ran fewer would leave the
+	hold unreached and the burst unanswered. A bound on the elapsed time was
+	this case's first form, and an AddressSanitizer build on four cores spends
+	the half-delay of slack in it on its own.
 	*/
-	start_case(r, "running_workers: the derived pool carries a burst of 64 misses in one round trip")
+	start_case(r, "running_workers: the derived pool carries a burst of 64 misses at once")
 	{
-		derived_port := next_port(r)
-		dsrv, dok := start_server(
-			r,
-			Server_Options {
-				config = config_running(r, derived_port, 0, upstream_port, "  rate_limit: { enabled: false }"),
-				udp_port = derived_port,
-				warmup = DELAY,
-			},
-		)
-		if check(r, dok, "server did not start") {
-			defer stop_server(&dsrv)
-			check(
+		derived_mock := mock_make("running-derived", next_port(r))
+		mock_delay_all(derived_mock, 0, nil)
+		if check(r, mock_start(derived_mock), "cannot start the derived mock upstream") {
+			defer mock_stop(derived_mock)
+			derived_port := next_port(r)
+			dsrv, dok := start_server(
 				r,
-				log_contains(&dsrv, "running_workers="),
-				"the sizing line does not report the running limit; log:\n%s",
-				read_log(&dsrv),
+				Server_Options {
+					config = config_running(r, derived_port, 0, derived_mock.port, "  rate_limit: { enabled: false }"),
+					udp_port = derived_port,
+					warmup = DELAY,
+				},
 			)
-			answered, elapsed := udp_burst(derived_port, burst_queries("derived", 64, 0x5400))
-			check_eq_int(r, answered, 64, "queries answered")
-			check(
-				r,
-				elapsed < WITHIN,
-				"64 misses against a %v upstream took %v with the derived sizing",
-				DELAY,
-				elapsed,
-			)
+			if check(r, dok, "server did not start") {
+				defer stop_server(&dsrv)
+				check(
+					r,
+					log_contains(&dsrv, "running_workers="),
+					"the sizing line does not report the running limit; log:\n%s",
+					read_log(&dsrv),
+				)
+				mock_hold_until(derived_mock, 64)
+				answered, _ := udp_burst(derived_port, burst_queries("derived", 64, 0x5400))
+				check(r, mock_held(derived_mock) >= 64, "only %d of 64 misses reached the upstream at once", mock_held(derived_mock))
+				check_eq_int(r, answered, 64, "queries answered")
+			}
 		}
 	}
 	end_case(r)
