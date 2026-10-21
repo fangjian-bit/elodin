@@ -207,7 +207,11 @@ reader_fill :: proc(r: ^Buf_Reader, unread := 0) -> Error {
 		}
 		reserve(&r.buf, grow)
 	}
-	append(&r.buf, ..chunk[:n])
+	// Bytes taken off the socket cannot be put back: dropped, the response
+	// would go on with a gap in it rather than fail.
+	if _, aerr := append(&r.buf, ..chunk[:n]); aerr != nil {
+		return .Too_Large
+	}
 	return .None
 }
 
