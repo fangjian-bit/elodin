@@ -79,7 +79,9 @@ unit_environment :: proc(r: ^Runner) -> (env: [dynamic]string, ok: bool) {
 			fail(r, "%s: %q is not read here", UNIT_FILE, line)
 			return
 		}
-		for field in strings.fields(value, context.temp_allocator) {
+		// systemd splits on ASCII blanks only, where `strings.fields` also
+		// splits on \v, \f and Unicode spaces.
+		for field in strings.fields_proc(value, proc(c: rune) -> bool {return c == ' ' || c == '\t' || c == '\r'}, context.temp_allocator) {
 			sep := strings.index_byte(field, '=')
 			if sep <= 0 {
 				fail(r, "%s: %q is not an assignment", UNIT_FILE, field)

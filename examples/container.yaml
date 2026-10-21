@@ -199,7 +199,9 @@ blocking:
   #
   # If you do want filtering here, give the pod a writable volume and set
   # `cache_dir` to it; without one the lists are re-downloaded on every start
-  # and every restart.
+  # and every restart. On a glibc image, also set MALLOC_MMAP_THRESHOLD_=131072
+  # in the container's environment, or each refresh's peak stays resident (see
+  # docs/blocking.md).
   enabled: false
 
 dnssec:
