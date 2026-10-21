@@ -21,9 +21,10 @@ off.
 
 The case rebuilds one list over SIGHUP in two processes: one started with the
 environment `packaging/elodin.service` sets, which has to stay near the RSS it
-started with, and one without it - the premise, which has to grow. Under a
-sanitizer's allocator, or where the control does not grow (musl), there is
-nothing to measure, and the case is skipped rather than passed.
+started with, and one without it - the premise, which has to grow. A control
+that does not grow fails the case: the check would pass whatever the unit set,
+so the list's size needs moving back into the band where glibc keeps the
+memory. Under a sanitizer, whose allocator is not glibc's, it is skipped.
 */
 
 /*
@@ -42,9 +43,11 @@ MEMORY_RELOADS :: 4
 UNIT_FILE :: "packaging/elodin.service"
 
 // The `KEY=VALUE` assignments of the unit's Environment= lines. Quoting,
-// specifiers, an empty line (which resets the list) and a key set twice (where
-// systemd takes the last and getenv the first) are refused rather than
-// interpreted, so a value this does not read cannot pass as one.
+// specifiers, an empty line (which resets the list), an assignment without `=`,
+// a key set twice (where systemd takes the last and getenv the first) and any
+// other environment directive (UnsetEnvironment=, EnvironmentFile=,
+// PassEnvironment=) are refused rather than interpreted, so a value this does
+// not read cannot pass as one.
 @(private = "file")
 unit_environment :: proc(r: ^Runner) -> (env: [dynamic]string, ok: bool) {
 	data, err := os.read_entire_file(UNIT_FILE, context.temp_allocator)
@@ -54,19 +57,31 @@ unit_environment :: proc(r: ^Runner) -> (env: [dynamic]string, ok: bool) {
 	}
 	env = make([dynamic]string, context.temp_allocator)
 	text := string(data)
-	for line in strings.split_lines_iterator(&text) {
-		if !strings.has_prefix(line, "Environment=") {
+	for raw in strings.split_lines_iterator(&text) {
+		// systemd strips ASCII blanks around the directive and its `=`.
+		line := strings.trim_left(raw, " \t")
+		eq := strings.index_byte(line, '=')
+		if eq < 0 || strings.has_prefix(line, "#") || strings.has_prefix(line, ";") {
 			continue
 		}
-		value := line[len("Environment="):]
-		if strings.contains_any(value, `"'\%`) || strings.trim_space(value) == "" {
+		directive := strings.trim_right(line[:eq], " \t")
+		if !strings.contains(directive, "Environment") {
+			continue
+		}
+		value := line[eq + 1:]
+		if directive != "Environment" || strings.contains_any(value, `"'\%`) || strings.trim_space(value) == "" {
 			fail(r, "%s: %q is not read here", UNIT_FILE, line)
 			return
 		}
 		for field in strings.fields(value, context.temp_allocator) {
-			key := field[:strings.index_byte(field, '=') + 1]
+			sep := strings.index_byte(field, '=')
+			if sep <= 0 {
+				fail(r, "%s: %q is not an assignment", UNIT_FILE, field)
+				return
+			}
+			key := field[:sep + 1]
 			for set in env {
-				if key != "" && strings.has_prefix(set, key) {
+				if strings.has_prefix(set, key) {
 					fail(r, "%s: %s is set twice", UNIT_FILE, key)
 					return
 				}
@@ -135,13 +150,9 @@ rss_across_rebuilds :: proc(r: ^Runner, env: []string, list_path: string) -> (st
 		return
 	}
 
-	cfg_path := filepath.join({r.work_dir, fmt.tprintf("elodin-%d.yaml", udp_port)}, context.temp_allocator) or_else ""
 	for i in 1 ..= MEMORY_RELOADS {
-		before := log_count(&srv, "msg=reloaded")
-		written := without_dnssec(list_memory_config(udp_port, list_path, 2 + i % 2))
-		if !check(r, os.write_entire_file(cfg_path, transmute([]u8)written) == nil, "cannot rewrite %s", cfg_path) ||
-		   !check(r, signal_reload(&srv), "could not deliver SIGHUP") ||
-		   !check(r, wait_for_log_count(&srv, "msg=reloaded", before + 1, 60 * time.Second), "reload %d never finished; log:\n%s", i, read_log(&srv)) {
+		reloaded := reload_to(r, &srv, list_memory_config(udp_port, list_path, 2 + i % 2), "msg=reloaded", 60 * time.Second)
+		if !check(r, reloaded, "reload %d never finished; log:\n%s", i, read_log(&srv)) {
 			return start, 0, false
 		}
 	}
@@ -161,12 +172,16 @@ run_list_memory_cases :: proc(r: ^Runner) {
 
 	// A sanitizer's runtime answers malloc itself and ignores glibc's settings,
 	// and its quarantine grows both processes alike.
-	exe, xerr := os.read_entire_file(r.binary, context.temp_allocator)
+	// Heap, as the list below: the temp allocator is not reset until the next
+	// case ends, and a skip from here ends none.
+	exe, xerr := os.read_entire_file(r.binary, context.allocator)
 	if xerr != nil {
 		skip_case(r, NAME, "cannot read the binary")
 		return
 	}
-	if strings.contains(string(exe), "__asan_init") {
+	asan := strings.contains(string(exe), "__asan_init")
+	delete(exe)
+	if asan {
 		skip_case(r, NAME, "the binary is built with AddressSanitizer, whose allocator is not glibc's")
 		return
 	}
@@ -175,11 +190,13 @@ run_list_memory_cases :: proc(r: ^Runner) {
 	// allocator.
 	list_path := filepath.join({r.work_dir, "list-memory.txt"}, context.allocator) or_else ""
 	defer delete(list_path)
-	b := strings.builder_make(context.temp_allocator)
+	b := strings.builder_make(context.allocator)
 	for i in 0 ..< MEMORY_RULES {
 		fmt.sbprintfln(&b, "0.0.0.0 host%07d.sub%d.example-blocked-domain.test", i, i % 97)
 	}
-	if os.write_entire_file(list_path, b.buf[:]) != nil {
+	werr := os.write_entire_file(list_path, b.buf[:])
+	strings.builder_destroy(&b)
+	if werr != nil {
 		skip_case(r, NAME, "cannot write the list")
 		return
 	}
@@ -199,36 +216,40 @@ run_list_memory_cases :: proc(r: ^Runner) {
 			append(&control, kv)
 		}
 	}
+	// The unit's first: getenv takes the first of a key set twice, and under
+	// systemd the unit's value is the one the process sees.
 	shipped := make([dynamic]string, context.temp_allocator)
-	append(&shipped, ..control[:])
 	append(&shipped, ..unit_env[:])
-
-	// Outside the case, so a control that cannot run fails as setup and one
-	// that does not grow is a skip, not a pass.
-	c0, c1, cok := rss_across_rebuilds(r, control[:], list_path)
-	if !cok {
-		return
-	}
-	// The premise: the defaults keep a rebuild's peak, here at least half as
-	// much again as the process started with.
-	if c1 * 2 < c0 * 3 {
-		skip_case(r, NAME, fmt.tprintf("the allocator returns the memory without the unit's setting (%d -> %d KiB)", c0, c1))
-		return
-	}
+	append(&shipped, ..control[:])
 
 	start_case(r, NAME)
-	if u0, u1, uok := rss_across_rebuilds(r, shipped[:], list_path); uok {
+	c0, c1, cok := rss_across_rebuilds(r, control[:], list_path)
+	// The premise: the defaults keep a rebuild's peak, here at least half as
+	// much again as the process started with.
+	premise :=
+		cok &&
 		check(
 			r,
-			u1 * 4 <= u0 * 5,
-			"RSS went %d -> %d KiB over %d rebuilds with the unit's environment %v (%d -> %d KiB without it)",
-			u0,
-			u1,
-			MEMORY_RELOADS,
-			unit_env[:],
+			c1 * 2 >= c0 * 3,
+			"without the unit's environment RSS went only %d -> %d KiB over %d rebuilds, so this cannot tell whether the unit's setting works; move MEMORY_RULES back to a size glibc keeps",
 			c0,
 			c1,
+			MEMORY_RELOADS,
 		)
+	if premise {
+		if u0, u1, uok := rss_across_rebuilds(r, shipped[:], list_path); uok {
+			check(
+				r,
+				u1 * 4 <= u0 * 5,
+				"RSS went %d -> %d KiB over %d rebuilds with the unit's environment %v (%d -> %d KiB without it)",
+				u0,
+				u1,
+				MEMORY_RELOADS,
+				unit_env[:],
+				c0,
+				c1,
+			)
+		}
 	}
 	end_case(r)
 }

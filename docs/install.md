@@ -68,7 +68,7 @@ than as root, and runs under `DynamicUser=yes` with `ProtectSystem=strict`.
 `Restart=on-failure` with `StartLimitBurst=5` retries a start that fails for a
 passing reason and gives up in `failed` on one that does not — a port it cannot
 have, a certificate it cannot read. `systemctl reset-failed elodin` clears that.
-It also sets `MALLOC_MMAP_THRESHOLD_=131072`, without which glibc keeps the
+The unit also sets `MALLOC_MMAP_THRESHOLD_=131072`, without which glibc keeps the
 memory each blocklist refresh frees (see [Sink lists](blocking.md));
 `UnsetEnvironment=MALLOC_MMAP_THRESHOLD_` in a drop-in takes glibc's default
 instead.
