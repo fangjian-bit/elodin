@@ -193,6 +193,11 @@ parity_compare :: proc(
 			reason = "the upstream's opt record is malformed (RFC 6891 section 6.1.1), so the reply is refused rather than handed on"
 		}
 		pc_add(&c, .Rcode, "an upstream reply with a malformed opt record", "-", pc_rcode_text(el.rcode, c.allocator), reason)
+		// The refusal is still an answer to this client, so its OPT record is
+		// still the client's to have or not (RFC 6891 section 6.1.1).
+		if el.opt.present != q.edns {
+			pc_add(&c, .Edns, q.edns ? "no opt record for a client that sent one" : "an opt record for a client that sent none", "-", el.opt.present ? "present" : "-", "")
+		}
 		return c
 	}
 	dropped := pc_first_dropped(&c, up, el)

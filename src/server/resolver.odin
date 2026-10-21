@@ -2486,19 +2486,20 @@ resolve_query :: proc(
 	And an OPT record this server cannot account for is not handed on either: one
 	outside the additional section, a second one, or one whose options do not
 	parse (`dns.peek_opt_unreadable`). `match_client_opt` edits the record
-	`find_opt_span` finds and no other, so any other copy reached a client that
-	asked without EDNS, or went beside the one minted for a client that asked
-	with it - which RFC 6891 section 6.1.1 forbids both ways. Issue #353.
+	`find_opt_span` finds and no other, so handed on, any other copy reaches a
+	client that asked without EDNS, or goes beside the one minted for a client
+	that asked with it - which RFC 6891 section 6.1.1 forbids both ways. Issue
+	#353.
 
 	`upstream.resolve_insisting` has already asked the rest of the group past it,
 	so SERVFAIL is what is true here, for the reason the rcode refusal above
-	gives. Once a window at warn: the shape is one an upstream, or anyone who can
-	write into its replies, chooses.
+	gives. Once a window per upstream at warn: the shape is one an upstream, or
+	anyone who can write into its replies, chooses.
 	*/
 	if dns.peek_opt_unreadable(resp) {
 		from := answering_upstream(winner)
 		logx.gated_warnf_from(
-			&unreadable_opt_reported,
+			&winner.stray_opt if winner != nil else &unreadable_opt_reported,
 			client,
 			"upstream %s answered %s %s with an OPT record outside the additional section, a second one, or options that do not parse; answering SERVFAIL",
 			from,
@@ -2506,8 +2507,15 @@ resolve_query :: proc(
 			dns.name_trim_root(q.name),
 		)
 		count_answer(&s.stats.failed)
-		out, built := dns.error_response(query, msg, .Serv_Fail, allocator, limit)
 		log_query(s, client, proto, q, .Failed, fmt.tprintf("opt:%s", from), started)
+		// Explained the way the rcode refusal is, and with its fallback: the
+		// SERVFAIL is what the client cannot do without, the reason is not.
+		refusal := dns.make_response(msg, .Serv_Fail, allocator)
+		attach_extended_error(&refusal, EDE_OTHER, "upstream OPT record malformed", allocator)
+		if encoded, truncated, enc_err := dns.encode_message(refusal, allocator, limit); enc_err == .None && !truncated {
+			return encoded, .Failed, true
+		}
+		out, built := dns.error_response(query, msg, .Serv_Fail, allocator, limit)
 		return out, .Failed, built
 	}
 
@@ -3272,7 +3280,8 @@ and gets the bare SERVFAIL.
 @(private)
 unreadable_rcode_reported: logx.Gate
 
-// The line about an upstream OPT record `resolve_query` refuses; see there.
+// The line about an upstream OPT record `resolve_query` refuses, for a reply
+// no upstream can be named for; see `upstream.Upstream.stray_opt`.
 @(private)
 unreadable_opt_reported: logx.Gate
 

@@ -437,7 +437,10 @@ parent_answers_apex_ds :: proc(
 	proved: bool,
 	settled: bool,
 ) {
-	if !reached {
+	// A reply with an OPT record `resolve_query` refuses (issue #353) settles
+	// nothing either: taken as the proof, it is served as a SERVFAIL while the
+	// route goes unasked.
+	if !reached || dns.peek_opt_unreadable(resp) {
 		return false, false
 	}
 	rcode := dns.peek_rcode(resp)

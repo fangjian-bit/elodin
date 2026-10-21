@@ -348,6 +348,20 @@ validator_query :: proc(
 		return nil, false
 	}
 	/*
+	And a reply whose OPT record this server cannot account for (issue #353),
+	which `resolve_answerable` also hands back where no member did better. A
+	client is refused it in `resolve_query`; the walk is not handed it either.
+	*/
+	if dns.peek_opt_unreadable(response) {
+		logx.gated_warnf(
+			&chain_fetch_opt_reported,
+			"dnssec: %s %s could not be fetched: the group answered with a malformed OPT record",
+			dns.type_name(type),
+			dns.name_trim_root(name),
+		)
+		return nil, false
+	}
+	/*
 	And an error rcode, which `resolve_answerable` also hands back where no
 	member did better. The walk reads it itself and calls the chain unavailable,
 	so it is returned as it is; this line is the only place that says which
@@ -385,6 +399,11 @@ chain_fetch_failed_reported: [upstream.Error]logx.Gate
 // The same for a lookup the group answered with an error rcode.
 @(private)
 chain_fetch_rcode_reported: logx.Gate
+
+// The line for a chain lookup answered with a malformed OPT record; a window of
+// its own, so that it neither takes nor is taken by the rcode line's.
+@(private)
+chain_fetch_opt_reported: logx.Gate
 
 @(private)
 report_chain_fetch_failed :: proc(type: dns.Type, name: string, uerr: upstream.Error) {

@@ -528,13 +528,9 @@ peek_opt_unreadable :: proc(msg: []u8) -> bool {
 				return true
 			}
 			seen = true
-			// The same framing the decoder holds an OPT's RDATA to.
+			// The framing the editors below hold an OPT's RDATA to.
 			fixed, _ := skip_name(msg, pos)
-			p := fixed + 10
-			for p + 4 <= next {
-				p += 4 + int(u16(msg[p + 2]) << 8 | u16(msg[p + 3]))
-			}
-			if p != next {
+			if _, framed := scan_edns_option(msg, Opt_Span{rd_start = fixed + 10, rd_end = next}, 0); !framed {
 				return true
 			}
 		}

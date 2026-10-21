@@ -601,6 +601,12 @@ test_an_upstream_opt_this_server_cannot_account_for_is_refused :: proc(t: ^testi
 			testing.expectf(t, dns.peek_rcode(out) == .Serv_Fail, "%s, edns=%v: answered %v, not SERVFAIL", shape.label, edns, dns.peek_rcode(out))
 			testing.expectf(t, outcome == .Failed, "%s, edns=%v: outcome %v", shape.label, edns, outcome)
 			testing.expectf(t, len(m.answer) == 0, "%s, edns=%v: the refused answer was handed on", shape.label, edns)
+			// RFC 8914 extended error 0 says why, to a client with somewhere to put it.
+			ede, has_ede := dns.peek_edns_option(out, .Ext_Error)
+			testing.expectf(t, has_ede == edns, "%s, edns=%v: extended error present=%v", shape.label, edns, has_ede)
+			if has_ede {
+				testing.expectf(t, len(ede) >= 2 && ede[0] == 0 && ede[1] == 0, "%s: extended error %v, not 0", shape.label, ede)
+			}
 		}
 	}
 	free_all(context.temp_allocator)

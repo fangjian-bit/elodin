@@ -940,8 +940,9 @@ render_upstream_metrics :: proc(b: ^strings.Builder, s: ^Server) {
 
 	/*
 	Which upstream answered something another member of its group had to answer
-	instead - a SERVFAIL, a REFUSED, an rcode no client could read, or, on a
-	chain lookup, anything that is not an answer about the name.
+	instead - a SERVFAIL, a REFUSED, an rcode no client could read, a referral, a
+	malformed OPT record, or, on a chain lookup, anything that is not an answer
+	about the name.
 
 	The same reasoning as the family above, for the case that is far more
 	common. `resolve_insisting` sweeps past such a reply without counting a
@@ -957,7 +958,7 @@ render_upstream_metrics :: proc(b: ^strings.Builder, s: ^Server) {
 		b,
 		"elodin_upstream_swept_rcode_total",
 		.Counter,
-		"Replies from each upstream that its group could not use, one per reply and whether or not another member was left to ask: for a client's own question a SERVFAIL, a REFUSED or an rcode it could not read; for a DNSSEC chain lookup anything that is not NOERROR or NXDOMAIN.",
+		"Replies from each upstream that its group could not use, one per reply and whether or not another member was left to ask: for a client's own question a SERVFAIL, a REFUSED, an rcode it could not read, a referral or a malformed OPT record; for a DNSSEC chain lookup a referral, a malformed OPT record or anything that is not NOERROR or NXDOMAIN.",
 	)
 	for u in all {
 		metrics.sample(b, "elodin_upstream_swept_rcode_total", u.swept, metrics.Label{"upstream", u.name})
