@@ -112,6 +112,16 @@ Mock :: struct {
 	drip_handshake: bool,
 	dripped:        int,
 
+	/*
+	Set to hold every delayed UDP reply until this many are waiting, then send
+	them all: a barrier, so a case can ask whether queries were in flight at
+	once without timing them. `held` counts the replies waiting, and reaching
+	`hold_until` is the event the case reads. Atomic, both: set once the server
+	under test is up, so its startup probes are not held.
+	*/
+	hold_until:  int,
+	held:        int,
+
 	mu:          sync.Mutex,
 	udp_queries: int,
 	tcp_queries: int,
@@ -174,6 +184,16 @@ mock_delay_all :: proc(m: ^Mock, delay: time.Duration, payload: []u8) {
 		delay     = delay,
 		payload   = payload,
 	}
+}
+
+// From here on, hold delayed UDP replies until `n` are waiting. See `Mock.hold_until`.
+mock_hold_until :: proc(m: ^Mock, n: int) {
+	sync.atomic_store(&m.hold_until, n)
+}
+
+// Whether `n` delayed replies have been held at once.
+mock_held :: proc(m: ^Mock) -> int {
+	return sync.atomic_load(&m.held)
 }
 
 mock_reply_all :: proc(m: ^Mock, payload: []u8) {
@@ -666,6 +686,14 @@ Delayed_Reply :: struct {
 @(private = "file")
 delayed_udp_reply :: proc(job: ^Delayed_Reply) {
 	m := job.mock
+	// A poll on the count rather than a `sync.Barrier`, so that `mock_stop`
+	// still ends a hold that is never reached and the join cannot hang.
+	if n := sync.atomic_load(&m.hold_until); n > 0 {
+		sync.atomic_add(&m.held, 1)
+		for sync.atomic_load(&m.held) < n && !sync.atomic_load(&m.stop) {
+			time.sleep(time.Millisecond)
+		}
+	}
 	reply, ok := build_reply(m, job.query, job.rule, false, context.temp_allocator)
 	if ok && !sync.atomic_load(&m.stop) {
 		_, _ = net.send_udp(m.udp_socket, reply, job.client)
