@@ -167,6 +167,14 @@ jobs:
             md5sum < /etc/resolv.conf
           } | tee /tmp/resolv-before
 
+      # What already listens on port 53, with its process, which the postinst has
+      # to clear before elodin can bind 0.0.0.0:53. Printed before the install:
+      # after a failed one the postinst has put the previous resolver back.
+      - name: What holds port 53
+        run: |
+          sudo ss -lntup 'sport = :53' || true
+          systemctl list-sockets --all --no-pager | grep -E ':53\b' || true
+
       - name: Install it
         run: |
           echo 'elodin elodin/takeover-dns boolean true' | sudo debconf-set-selections
