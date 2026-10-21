@@ -41,8 +41,10 @@ MEMORY_RELOADS :: 4
 @(private = "file")
 UNIT_FILE :: "packaging/elodin.service"
 
-// The `KEY=VALUE` assignments of the unit's Environment= lines. Quoting is
-// refused rather than parsed, so a value this does not read cannot pass as one.
+// The `KEY=VALUE` assignments of the unit's Environment= lines. Quoting,
+// specifiers, an empty line (which resets the list) and a key set twice (where
+// systemd takes the last and getenv the first) are refused rather than
+// interpreted, so a value this does not read cannot pass as one.
 @(private = "file")
 unit_environment :: proc(r: ^Runner) -> (env: [dynamic]string, ok: bool) {
 	data, err := os.read_entire_file(UNIT_FILE, context.temp_allocator)
@@ -57,11 +59,18 @@ unit_environment :: proc(r: ^Runner) -> (env: [dynamic]string, ok: bool) {
 			continue
 		}
 		value := line[len("Environment="):]
-		if strings.contains_any(value, `"'\`) {
-			fail(r, "%s: quoting in %q is not read here", UNIT_FILE, line)
+		if strings.contains_any(value, `"'\%`) || strings.trim_space(value) == "" {
+			fail(r, "%s: %q is not read here", UNIT_FILE, line)
 			return
 		}
 		for field in strings.fields(value, context.temp_allocator) {
+			key := field[:strings.index_byte(field, '=') + 1]
+			for set in env {
+				if key != "" && strings.has_prefix(set, key) {
+					fail(r, "%s: %s is set twice", UNIT_FILE, key)
+					return
+				}
+			}
 			append(&env, field)
 		}
 	}
@@ -133,7 +142,7 @@ rss_across_rebuilds :: proc(r: ^Runner, env: []string, list_path: string) -> (st
 		if !check(r, os.write_entire_file(cfg_path, transmute([]u8)written) == nil, "cannot rewrite %s", cfg_path) ||
 		   !check(r, signal_reload(&srv), "could not deliver SIGHUP") ||
 		   !check(r, wait_for_log_count(&srv, "msg=reloaded", before + 1, 60 * time.Second), "reload %d never finished; log:\n%s", i, read_log(&srv)) {
-			return
+			return start, 0, false
 		}
 	}
 	end, ok = rss_kib(srv.process.pid)
@@ -144,9 +153,9 @@ rss_across_rebuilds :: proc(r: ^Runner, env: []string, list_path: string) -> (st
 run_list_memory_cases :: proc(r: ^Runner) {
 	NAME :: "lists: a rebuild under the shipped unit's environment gives the old sets' memory back"
 
+	// Its failure is already a setup failure, and a skip would count it twice.
 	unit_env, unit_ok := unit_environment(r)
 	if !unit_ok {
-		skip_case(r, NAME, "cannot read the unit's environment")
 		return
 	}
 
@@ -162,7 +171,10 @@ run_list_memory_cases :: proc(r: ^Runner) {
 		return
 	}
 
-	list_path := filepath.join({r.work_dir, "list-memory.txt"}, context.temp_allocator) or_else ""
+	// Heap: the deferred removal runs after `end_case` has reset the temp
+	// allocator.
+	list_path := filepath.join({r.work_dir, "list-memory.txt"}, context.allocator) or_else ""
+	defer delete(list_path)
 	b := strings.builder_make(context.temp_allocator)
 	for i in 0 ..< MEMORY_RULES {
 		fmt.sbprintfln(&b, "0.0.0.0 host%07d.sub%d.example-blocked-domain.test", i, i % 97)
@@ -173,8 +185,9 @@ run_list_memory_cases :: proc(r: ^Runner) {
 	}
 	defer os.remove(list_path)
 
-	// Without any MALLOC_ setting of the suite's own, so the control is the
-	// allocator's defaults and the unit's arm is only what the unit sets.
+	// Without any MALLOC_ setting or GLIBC_TUNABLES of the suite's own (either
+	// sets the threshold), so the control is the allocator's defaults and the
+	// unit's arm is only what the unit sets.
 	inherited, eerr := os.environ(context.temp_allocator)
 	if eerr != nil {
 		skip_case(r, NAME, "cannot read the environment")
@@ -182,7 +195,7 @@ run_list_memory_cases :: proc(r: ^Runner) {
 	}
 	control := make([dynamic]string, context.temp_allocator)
 	for kv in inherited {
-		if !strings.has_prefix(kv, "MALLOC_") {
+		if !strings.has_prefix(kv, "MALLOC_") && !strings.has_prefix(kv, "GLIBC_TUNABLES=") {
 			append(&control, kv)
 		}
 	}
