@@ -2508,14 +2508,7 @@ resolve_query :: proc(
 		)
 		count_answer(&s.stats.failed)
 		log_query(s, client, proto, q, .Failed, fmt.tprintf("opt:%s", from), started)
-		// Explained the way the rcode refusal is, and with its fallback: the
-		// SERVFAIL is what the client cannot do without, the reason is not.
-		refusal := dns.make_response(msg, .Serv_Fail, allocator)
-		attach_extended_error(&refusal, EDE_OTHER, "upstream OPT record malformed", allocator)
-		if encoded, truncated, enc_err := dns.encode_message(refusal, allocator, limit); enc_err == .None && !truncated {
-			return encoded, .Failed, true
-		}
-		out, built := dns.error_response(query, msg, .Serv_Fail, allocator, limit)
+		out, built := upstream_refusal(query, msg, "upstream OPT record malformed", limit, allocator)
 		return out, .Failed, built
 	}
 
@@ -3356,9 +3349,28 @@ unreadable_rcode_refusal :: proc(
 	// the total cannot answer between the warns.
 	upstream.note_unreadable_rcode(winner)
 
-	named := fmt.tprintf("rcode:%s", from)
+	out, built = upstream_refusal(query, msg, fmt.tprintf("upstream rcode %s", shown), limit, allocator)
+	return out, fmt.tprintf("rcode:%s", from), true, built
+}
+
+/*
+The SERVFAIL that refuses an upstream's reply, explained by RFC 8914 extended
+error 0 carrying `why` where the client has an OPT record to read it from. For
+`unreadable_rcode_refusal` and the malformed-OPT refusal in `resolve_query`.
+*/
+@(private)
+upstream_refusal :: proc(
+	query: []u8,
+	msg: dns.Message,
+	why: string,
+	limit: int,
+	allocator: mem.Allocator,
+) -> (
+	out: []u8,
+	built: bool,
+) {
 	refusal := dns.make_response(msg, .Serv_Fail, allocator)
-	attach_extended_error(&refusal, EDE_OTHER, fmt.tprintf("upstream rcode %s", shown), allocator)
+	attach_extended_error(&refusal, EDE_OTHER, why, allocator)
 	/*
 	`truncated` as well as the error, and neither is live: what this pair says is
 	that a refusal is only worth sending whole.
@@ -3385,7 +3397,7 @@ unreadable_rcode_refusal :: proc(
 	*/
 	if encoded, truncated, enc_err := dns.encode_message(refusal, allocator, limit);
 	   enc_err == .None && !truncated {
-		return encoded, named, true, true
+		return encoded, true
 	}
 	/*
 	The explanation did not fit, or the message would not build. The refusal is
@@ -3395,8 +3407,7 @@ unreadable_rcode_refusal :: proc(
 	nothing in this case; there is no reason to be the stricter of the two about
 	a SERVFAIL.
 	*/
-	response, encoded := dns.error_response(query, msg, .Serv_Fail, allocator, limit)
-	return response, named, true, encoded
+	return dns.error_response(query, msg, .Serv_Fail, allocator, limit)
 }
 
 /*

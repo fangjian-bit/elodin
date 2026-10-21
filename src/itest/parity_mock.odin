@@ -86,7 +86,7 @@ parity_synth_reply :: proc(
 	/*
 	One answer in thirty-two carries a second OPT record, in the answer section
 	where RFC 6891 section 6.1.1 says none may go - the shape of issue #353,
-	which reached a client as an OPT it never negotiated, or as two. Only behind
+	which handed on reaches a client as an OPT it never negotiated, or as two. Only behind
 	an answer with nothing written after it, so the record lands in the answer
 	section; and off the top bits of the hash rather than a draw from `r`, so
 	every other name keeps the zone it had and the committed seeds still mean

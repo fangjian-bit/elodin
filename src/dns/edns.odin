@@ -498,8 +498,9 @@ a client that asked with it. Issue #353. The wire-level counterpart of
 the reading Unbound (`parse_extract_edns_from_response_msg`) and BIND
 (`dns_message_parse`) give a reply: FORMERR, and the next server is asked.
 
-A message that cannot be walked is not reported here: what a decode would
-refuse is refused where it is decoded. Allocates nothing.
+A message that cannot be walked is not reported here, nor an OPT record past
+the point where the walk stops: `find_opt_span` cannot reach one there either,
+and nor can a client's decoder. Allocates nothing.
 */
 peek_opt_unreadable :: proc(msg: []u8) -> bool {
 	if len(msg) < HEADER_SIZE {

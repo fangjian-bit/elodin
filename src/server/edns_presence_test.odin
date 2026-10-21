@@ -516,8 +516,8 @@ refused, SERVFAIL, rather than handed on. Issue #353.
 RFC 6891 section 6.1.1 puts the record in the additional section and allows one
 per message. `find_opt` and `find_opt_span` read that one alone, so a record of
 type OPT anywhere else - or a second one, or one whose options do not parse -
-walks past `match_client_opt`: a client that asked without EDNS was handed an OPT
-record it never negotiated, and one that asked with EDNS was handed two.
+walks past `match_client_opt`: handed on, it gives a client that asked without
+EDNS an OPT record it never negotiated, and one that asked with EDNS two.
 
 The four shapes are the four `edns_opt_readable` refuses on the query side.
 */
