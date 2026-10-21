@@ -44,10 +44,11 @@ UNIT_FILE :: "packaging/elodin.service"
 
 // The `KEY=VALUE` assignments of the unit's Environment= lines. Quoting,
 // specifiers, an empty line (which resets the list), an assignment without `=`,
-// a key set twice (where systemd takes the last and getenv the first) and any
-// other environment directive (UnsetEnvironment=, EnvironmentFile=,
-// PassEnvironment=) are refused rather than interpreted, so a value this does
-// not read cannot pass as one.
+// a key set twice (where systemd takes the last and getenv the first), an
+// Environment= outside [Service] (which systemd ignores) and any other
+// environment directive (UnsetEnvironment=, EnvironmentFile=, PassEnvironment=)
+// are refused rather than interpreted, so a value this does not read cannot
+// pass as one.
 @(private = "file")
 unit_environment :: proc(r: ^Runner) -> (env: [dynamic]string, ok: bool) {
 	data, err := os.read_entire_file(UNIT_FILE, context.temp_allocator)
@@ -57,9 +58,14 @@ unit_environment :: proc(r: ^Runner) -> (env: [dynamic]string, ok: bool) {
 	}
 	env = make([dynamic]string, context.temp_allocator)
 	text := string(data)
+	in_service := false
 	for raw in strings.split_lines_iterator(&text) {
 		// systemd strips ASCII blanks around the directive and its `=`.
 		line := strings.trim_left(raw, " \t")
+		if strings.has_prefix(line, "[") {
+			in_service = strings.trim_right(line, " \t\r") == "[Service]"
+			continue
+		}
 		eq := strings.index_byte(line, '=')
 		if eq < 0 || strings.has_prefix(line, "#") || strings.has_prefix(line, ";") {
 			continue
@@ -69,7 +75,7 @@ unit_environment :: proc(r: ^Runner) -> (env: [dynamic]string, ok: bool) {
 			continue
 		}
 		value := line[eq + 1:]
-		if directive != "Environment" || strings.contains_any(value, `"'\%`) || strings.trim_space(value) == "" {
+		if directive != "Environment" || !in_service || strings.contains_any(value, `"'\%`) || strings.trim_space(value) == "" {
 			fail(r, "%s: %q is not read here", UNIT_FILE, line)
 			return
 		}
@@ -176,7 +182,7 @@ run_list_memory_cases :: proc(r: ^Runner) {
 	// case ends, and a skip from here ends none.
 	exe, xerr := os.read_entire_file(r.binary, context.allocator)
 	if xerr != nil {
-		skip_case(r, NAME, "cannot read the binary")
+		fail(r, "%s: cannot read %s: %v", NAME, r.binary, xerr)
 		return
 	}
 	asan := strings.contains(string(exe), "__asan_init")
@@ -197,22 +203,24 @@ run_list_memory_cases :: proc(r: ^Runner) {
 	werr := os.write_entire_file(list_path, b.buf[:])
 	strings.builder_destroy(&b)
 	if werr != nil {
-		skip_case(r, NAME, "cannot write the list")
+		fail(r, "%s: cannot write %s: %v", NAME, list_path, werr)
 		return
 	}
 	defer os.remove(list_path)
 
 	// Without any MALLOC_ setting or GLIBC_TUNABLES of the suite's own (either
-	// sets the threshold), so the control is the allocator's defaults and the
-	// unit's arm is only what the unit sets.
+	// sets the threshold) or an LD_PRELOAD (which can replace the allocator), so
+	// the control is glibc's defaults and the unit's arm is only what the unit
+	// sets. Its capacity keeps `control[:]` non-nil when every variable is
+	// dropped: a nil environment is the suite's own, MALLOC_ settings included.
 	inherited, eerr := os.environ(context.temp_allocator)
 	if eerr != nil {
-		skip_case(r, NAME, "cannot read the environment")
+		fail(r, "%s: cannot read the environment: %v", NAME, eerr)
 		return
 	}
-	control := make([dynamic]string, context.temp_allocator)
+	control := make([dynamic]string, 0, len(inherited), context.temp_allocator)
 	for kv in inherited {
-		if !strings.has_prefix(kv, "MALLOC_") && !strings.has_prefix(kv, "GLIBC_TUNABLES=") {
+		if !strings.has_prefix(kv, "MALLOC_") && !strings.has_prefix(kv, "GLIBC_TUNABLES=") && !strings.has_prefix(kv, "LD_PRELOAD=") {
 			append(&control, kv)
 		}
 	}
