@@ -139,7 +139,7 @@ so the housekeeping on the tick keeps its pace. `Rebuilt` comes before
 its own at once.
 */
 @(private)
-wait_for_tick :: proc(deadline: time.Time, rebuild: ^server.Rebuild) -> Wait_Outcome {
+wait_for_tick :: proc(deadline: time.Tick, rebuild: ^server.Rebuild) -> Wait_Outcome {
 	SLICE :: 200 * time.Millisecond
 	for {
 		if sync.atomic_load(&stop_requested) {
@@ -151,7 +151,7 @@ wait_for_tick :: proc(deadline: time.Time, rebuild: ^server.Rebuild) -> Wait_Out
 		if sync.atomic_exchange(&reload_requested, false) {
 			return .Reload
 		}
-		remaining := time.diff(time.now(), deadline)
+		remaining := time.tick_diff(time.tick_now(), deadline)
 		if remaining <= 0 {
 			return .Tick
 		}
@@ -939,7 +939,7 @@ maintenance_loop :: proc(
 	TICK :: 30 * time.Second
 	m := Maintenance {
 		rebuild      = rebuild,
-		next_tick    = time.time_add(time.now(), TICK),
+		next_tick    = time.tick_add(time.tick_now(), TICK),
 		last_refresh = time.now(),
 		last_report  = time.now(),
 	}
@@ -960,7 +960,7 @@ maintenance_loop :: proc(
 		case .Rebuilt:
 			collect(s, opts, &m)
 		case .Tick:
-			m.next_tick = time.time_add(time.now(), TICK)
+			m.next_tick = time.tick_add(time.tick_now(), TICK)
 			tick(s, listeners, opts, &m)
 		}
 		if released := server.reap_generations(s); released > 0 {
@@ -974,7 +974,8 @@ maintenance_loop :: proc(
 @(private)
 Maintenance :: struct {
 	rebuild:        ^server.Rebuild,
-	next_tick:      time.Time,
+	// Monotonic, so a step of the wall clock neither stalls nor rushes the tick.
+	next_tick:      time.Tick,
 	// The running rebuild is the one a reload asked for, which starts the
 	// retries afresh; a refresh's goes on from `retry`.
 	after_reload:   bool,

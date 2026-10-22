@@ -419,7 +419,8 @@ run_list_refresh_signal_cases :: proc(r: ^Runner) {
 				reload_to(r, &srv, config_for_refresh_signals(udp_port, upstream_port, http_port, added), "changed=blocking,rewrites", 3 * time.Second),
 				"the reload waited for the refresh",
 			)
-			check(r, log_contains(&srv, "rebuilt once the rebuild in progress is over"), "the reload's rebuild did not wait for the refresh")
+			// Logged after the `reloaded` line, so waited for rather than read at once.
+			check(r, wait_for_log(&srv, "rebuilt once the rebuild in progress is over", 2 * time.Second), "the reload's rebuild did not wait for the refresh")
 			check(r, !log_contains(&srv, "download failed"), "SIGHUP cut the download short")
 			if res := query_udp(udp_port, build_query("during.test.", u16(dns.Type.A))); check(r, res.ok, "no response during the refresh") {
 				addrs := answer_addresses(r, res.wire)

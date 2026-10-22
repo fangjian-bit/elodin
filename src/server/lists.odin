@@ -26,8 +26,7 @@ FETCH_TIMEOUT :: 30 * time.Second
 The whole download, redirects included (#445): `FETCH_TIMEOUT` bounds one read,
 and a host sending a little just inside it could otherwise hold the refresh -
 and every rebuild after it, a reload's change to the rules included, which
-waits for it (see `Rebuild`) - for
-as long as the body limit allows.
+waits for it (see `Rebuild`) - for as long as the body limit allows.
 Five minutes is a 64 MB list, the most `fetch_url` accepts, at under 2 Mbit/s.
 */
 FETCH_DEADLINE :: 5 * time.Minute
