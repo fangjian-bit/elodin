@@ -302,7 +302,7 @@ Signals while a list download waits on a host that has stopped answering (#416).
 The rule sets are rebuilt off the maintenance loop, so a SIGHUP is acted on and a
 SIGTERM ends the process while a download waits, rather than once `FETCH_TIMEOUT`
 has run out for each read; and the signal does not cut the download short as a
-failed one, as it did on the thread that took it. A silent host is a socket that
+failed one, as it would on a thread that took it. A silent host is a socket that
 listens and never accepts: the kernel completes the handshake, and nothing is
 sent. Closing it resets the connection, which ends the download at once.
 */

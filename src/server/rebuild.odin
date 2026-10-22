@@ -31,6 +31,8 @@ Rebuild :: struct {
 // Start a rebuild; the caller has checked none is running. With no thread to
 // be had it runs on the caller's.
 rebuild_start :: proc(r: ^Rebuild, s: ^Server, network: bool) {
+	// A second start would overwrite what the running thread still writes to.
+	assert(!rebuild_busy(r), "a rebuild is already running")
 	r^ = Rebuild {
 		s       = s,
 		network = network,
@@ -62,8 +64,9 @@ rebuild_thread :: proc(r: ^Rebuild) {
 
 @(private = "file")
 rebuild_run :: proc(r: ^Rebuild) {
+	// The temp allocator is left alone: on the rebuild's thread it is destroyed
+	// with the thread, and on the caller's it may hold what the caller still uses.
 	r.current, _ = rebuild_rules(r.s, r.network)
-	free_all(context.temp_allocator)
 	sync.atomic_store(&r.done, true)
 }
 

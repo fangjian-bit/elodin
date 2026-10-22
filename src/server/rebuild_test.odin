@@ -28,7 +28,12 @@ test_a_rebuild_does_not_take_the_signals_main_acts_on :: proc(t: ^testing.T) {
 	if !testing.expectf(t, lerr == nil, "cannot listen on loopback: %v", lerr) {
 		return
 	}
-	defer net.close(listener)
+	// Closed before the rebuild is waited for, rather than deferred: a connection
+	// still in its backlog is then reset, which ends a download it holds.
+	listener_open := true
+	defer if listener_open {
+		net.close(listener)
+	}
 	bound, _ := net.bound_endpoint(listener)
 	_ = net.set_option(listener, .Receive_Timeout, 5 * time.Second)
 
@@ -82,12 +87,20 @@ test_a_rebuild_does_not_take_the_signals_main_acts_on :: proc(t: ^testing.T) {
 	}
 
 	// The host gone, the download fails and the rebuild is over.
+	net.close(listener)
+	listener_open = false
 	deadline := time.tick_add(time.tick_now(), 10 * time.Second)
 	for !rebuild_done(&r) && time.tick_diff(time.tick_now(), deadline) > 0 {
 		time.sleep(10 * time.Millisecond)
 	}
+	testing.expect(t, rebuild_done(&r), "the rebuild did not end once its host was gone")
+	// Its thread reads `s`, `cfg` and the engine, which are this frame's: it is
+	// waited for even past the deadline, as `FETCH_DEADLINE` bounds it.
+	for !rebuild_done(&r) {
+		time.sleep(10 * time.Millisecond)
+	}
 	current, over := rebuild_collect(&r)
-	testing.expect(t, over, "the rebuild did not end once its host was gone")
+	testing.expect(t, over, "a rebuild that is over was not collected")
 	testing.expect(t, !current, "a rebuild whose download failed was current")
 	testing.expect(t, !rebuild_busy(&r), "a collected rebuild is still busy")
 }

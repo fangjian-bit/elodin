@@ -769,7 +769,9 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 				logx.infof("signal received, shutting down")
 				os.exit(0)
 			}
-			time.sleep(200 * time.Millisecond)
+			// Short, as the listeners wait on it: lists loaded from the cache are
+			// over in a moment.
+			time.sleep(10 * time.Millisecond)
 		}
 	}
 
