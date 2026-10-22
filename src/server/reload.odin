@@ -157,7 +157,8 @@ reads_list_files :: proc(cfg: ^config.Config) -> bool {
 }
 
 /*
-Build the rule sets the current configuration asks for, or take them away.
+Build the rule sets `cfg` asks for, or take them away. It reads the blocking
+section and the bootstrap servers, and no other part (see `rebuild_snapshot`).
 
 `lists_current` is `reload_filters`'s. A list that loaded before and cannot be
 had now leaves the rules already in effect, and the retry it schedules applies
@@ -165,16 +166,14 @@ the change once the list is back.
 
 On any thread, one at a time.
 */
-rebuild_rules :: proc(s: ^Server, allow_network: bool) -> (lists_current: bool) {
-	pin(s)
-	defer unpin(s)
-	if !live(s).cfg.blocking.enabled {
+rebuild_rules :: proc(s: ^Server, cfg: ^config.Config, allow_network: bool) -> (lists_current: bool) {
+	if !cfg.blocking.enabled {
 		clear_filters(s)
 		// The line a rebuild ends with, as `reload_filters` logs its own.
 		logx.infof("filter: blocking is off; no rules in effect")
 		return true
 	}
-	return reload_filters(s, allow_network)
+	return reload_filters_from(s, cfg, allow_network)
 }
 
 /*

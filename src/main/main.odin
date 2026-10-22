@@ -764,7 +764,7 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 		if !server.rebuild_start(&rebuild, &s, !opts.no_fetch) {
 			// Here, then: nothing listens yet for a stop to drain.
 			logx.warnf("blocklists: cannot start a thread to build the rules; building them here")
-			lists_current = server.rebuild_rules(&s, !opts.no_fetch)
+			lists_current = server.rebuild_rules(&s, server.live_config(&s), !opts.no_fetch)
 		}
 		for server.rebuild_busy(&rebuild) {
 			if current, over := server.rebuild_collect(&rebuild); over {
@@ -940,8 +940,8 @@ maintenance_loop :: proc(
 	m := Maintenance {
 		rebuild      = rebuild,
 		next_tick    = time.tick_add(time.tick_now(), TICK),
-		last_refresh = time.now(),
-		last_report  = time.now(),
+		last_refresh = time.tick_now(),
+		last_report  = time.tick_now(),
 	}
 	refresh := server.live_config(s).blocking.refresh
 	if !lists_current && !opts.no_fetch && refresh > 0 {
@@ -983,11 +983,13 @@ Maintenance :: struct {
 	// before it, or when no thread could be had: another follows once that one
 	// is over, or at the next tick.
 	rebuild_again:  bool,
-	last_refresh:   time.Time,
+	// Monotonic too, so a step of the wall clock neither holds nor hurries a
+	// refresh or a report.
+	last_refresh:   time.Tick,
 	// Zero while the lists are current; otherwise the wait before the next
 	// attempt, which `refresh_retry` stretches on each failure (#411).
 	retry:          time.Duration,
-	last_report:    time.Time,
+	last_report:    time.Tick,
 	// What the kernel had dropped at the last report, so the line below is
 	// about the interval rather than about the whole run. A counter that only
 	// grows says nothing about whether it is still growing.
@@ -1023,6 +1025,10 @@ reload :: proc(s: ^server.Server, listeners: ^server.Listeners, opts: Options, m
 		server.unpin(s)
 	}
 	if out.blocking {
+		// One over and not yet collected is not in progress.
+		if server.rebuild_done(m.rebuild) {
+			collect(s, opts, m)
+		}
 		if server.rebuild_busy(m.rebuild) {
 			logx.infof("reload: the rules are rebuilt once the rebuild in progress is over")
 			m.rebuild_again = true
@@ -1049,7 +1055,7 @@ collect :: proc(s: ^server.Server, opts: Options, m: ^Maintenance) {
 		start_rebuild(s, opts, m, after_reload = true)
 		return
 	}
-	m.last_refresh = time.now()
+	m.last_refresh = time.tick_now()
 	refresh := server.live_config(s).blocking.refresh
 	switch {
 	case current || opts.no_fetch || refresh <= 0:
@@ -1103,16 +1109,16 @@ tick :: proc(s: ^server.Server, listeners: ^server.Listeners, opts: Options, m: 
 		switch {
 		case m.rebuild_again:
 			start_rebuild(s, opts, m, after_reload = true)
-		case refreshing && time.diff(m.last_refresh, time.now()) >= server.refresh_wait(m.retry, cfg.blocking.refresh):
+		case refreshing && time.tick_since(m.last_refresh) >= server.refresh_wait(m.retry, cfg.blocking.refresh):
 			logx.infof("refreshing blocklists")
 			start_rebuild(s, opts, m, after_reload = false)
 		}
 	}
 
-	if time.diff(m.last_report, time.now()) >= 5 * time.Minute {
+	if time.tick_since(m.last_report) >= 5 * time.Minute {
 		report(s, answers)
 		report_udp_drops(listeners, &m.last_udp_drops)
-		m.last_report = time.now()
+		m.last_report = time.tick_now()
 	}
 }
 

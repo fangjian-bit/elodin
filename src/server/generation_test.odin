@@ -101,7 +101,7 @@ reload_from :: proc(t: ^testing.T, f: ^Gen_Fixture, text: string) -> (out: Reloa
 	out.lists_current = true
 	if out.blocking {
 		swapped := filter.engine_generation(f.s.filters)
-		out.lists_current = rebuild_rules(&f.s, false)
+		out.lists_current = rebuild_rules(&f.s, live_config(&f.s), false)
 		out.rules = filter.engine_generation(f.s.filters) != swapped
 	}
 	return
@@ -900,4 +900,59 @@ test_a_held_connection_is_read_against_the_allow_list_in_effect :: proc(t: ^test
 	cfg.server.allow_from = []config.Prefix{narrowed}
 	testing.expect(t, !stream_source_allowed(&s, peer, .TCP), "a source the list no longer names was admitted")
 	testing.expect_value(t, s.stats.refused, 1)
+}
+
+@(test)
+test_a_rebuild_holds_no_generation_a_reload_replaces :: proc(t: ^testing.T) {
+	/*
+	A rebuild may wait minutes on a list host, and a SIGHUP meanwhile swaps in a
+	new generation. The rebuild works from its own copy of what it reads, so the
+	generation the reload replaced is released at once, not held - with every
+	one retired after it - until the download ends (#416).
+	*/
+	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if !testing.expectf(t, lerr == nil, "cannot listen on loopback: %v", lerr) {
+		return
+	}
+	listener_open := true
+	defer if listener_open {
+		net.close(listener)
+	}
+	bound, _ := net.bound_endpoint(listener)
+	_ = net.set_option(listener, .Receive_Timeout, 5 * time.Second)
+
+	stalled := swap(
+		BASE,
+		"blocking: { enabled: false }",
+		fmt.tprintf(
+			`blocking: {{ enabled: true, cache_dir: /nonexistent/elodin-test, lists: [{{ name: l, url: "http://127.0.0.1:%d/l.txt" }}] }}`,
+			bound.port,
+		),
+	)
+	f, ok := boot_fixture(t, "rebuild-pin", stalled)
+	if !ok {
+		return
+	}
+	defer close_fixture(f)
+
+	r: Rebuild
+	if !testing.expect(t, rebuild_start(&r, &f.s, true), "the rebuild did not start") {
+		return
+	}
+	// The rebuild is under way once its download has connected.
+	client, _, aerr := net.accept_tcp(listener)
+	if testing.expectf(t, aerr == nil, "the rebuild did not connect: %v", aerr) {
+		defer net.close(client)
+		out := reload_from(t, f, fmt.tprintf("%srewrites:\n  - {{ domain: r.test, answer: 192.0.2.1 }}\n", stalled))
+		testing.expect(t, out.applied, "the reload was not applied")
+		testing.expect(t, !rebuild_done(&r), "the rebuild was over before the reload")
+		testing.expect_value(t, reap_generations(&f.s), 1)
+	}
+
+	net.close(listener)
+	listener_open = false
+	for !rebuild_done(&r) {
+		time.sleep(10 * time.Millisecond)
+	}
+	rebuild_collect(&r)
 }

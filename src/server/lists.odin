@@ -616,16 +616,22 @@ blocks has to lift them, where a download is lost to the network.
 so the caller retries sooner than the interval; see `refresh_retry`.
 */
 reload_filters :: proc(s: ^Server, allow_network: bool) -> (current: bool) {
-	lists := len(live(s).cfg.blocking.lists)
-	loads := make([]List_Load, lists + len(live(s).cfg.blocking.allow_lists))
-	block, allow := build_filter_sets(live(s).cfg, allow_network, loads)
+	return reload_filters_from(s, live(s).cfg, allow_network)
+}
+
+// `reload_filters` from `cfg`, which a rebuild holds a copy of rather than a
+// pin on its generation; see `Rebuild`.
+reload_filters_from :: proc(s: ^Server, cfg: ^config.Config, allow_network: bool) -> (current: bool) {
+	lists := len(cfg.blocking.lists)
+	loads := make([]List_Load, lists + len(cfg.blocking.allow_lists))
+	block, allow := build_filter_sets(cfg, allow_network, loads)
 
 	current = true
 	for load, i in loads {
 		if load == .Current {
 			continue
 		}
-		list := live(s).cfg.blocking.lists[i] if i < lists else live(s).cfg.blocking.allow_lists[i - lists]
+		list := cfg.blocking.lists[i] if i < lists else cfg.blocking.allow_lists[i - lists]
 		// A retry is for a download. A missing `file:` list is the operator's
 		// to put back, and retrying it would rebuild every set hourly for good.
 		if list.file != "" {
@@ -642,7 +648,7 @@ reload_filters :: proc(s: ^Server, allow_network: bool) -> (current: bool) {
 	}
 	clear(&s.lists_loaded)
 	for load, i in loads {
-		list := live(s).cfg.blocking.lists[i] if i < lists else live(s).cfg.blocking.allow_lists[i - lists]
+		list := cfg.blocking.lists[i] if i < lists else cfg.blocking.allow_lists[i - lists]
 		// An empty or disabled list contributed nothing, so it has nothing to
 		// keep later. Only a load is recorded: two entries for one source share
 		// a key, and the one that loaded is the one whose rules are in effect.
