@@ -85,10 +85,24 @@ swap :: proc(text, old, new: string) -> string {
 	return out
 }
 
+// A reload and the rebuild of the rules it asks for, as the maintenance loop
+// runs them one after the other.
 @(private = "file")
-reload_from :: proc(t: ^testing.T, f: ^Gen_Fixture, text: string) -> Reload_Outcome {
+Reloaded :: struct {
+	using outcome: Reload_Outcome,
+	lists_current: bool,
+	rules:         bool,
+}
+
+@(private = "file")
+reload_from :: proc(t: ^testing.T, f: ^Gen_Fixture, text: string) -> (out: Reloaded) {
 	testing.expect(t, os.write_entire_file(f.path, text) == nil, "cannot write the reloaded configuration")
-	return reload_config(&f.s, f.path, false)
+	out.outcome = reload_config(&f.s, f.path)
+	out.lists_current = true
+	if out.blocking {
+		out.lists_current, out.rules = rebuild_rules(&f.s, false)
+	}
+	return
 }
 
 @(test)

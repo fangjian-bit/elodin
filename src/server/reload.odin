@@ -13,18 +13,11 @@ What a configuration reload did, for the caller's bookkeeping.
 */
 Reload_Outcome :: struct {
 	// A new configuration is in effect.
-	applied:       bool,
-	// The rule sets were built again: the blocking section changed, or it
-	// names `file:` lists, which every SIGHUP reads again (`reads_list_files`).
-	blocking:      bool,
-	// Whether every list the rebuilt rule sets wanted was current; see
-	// `reload_filters`. True when nothing was rebuilt.
-	lists_current: bool,
-	// The rule sets in effect were replaced. False on a blocking change too,
-	// where a list that loaded before cannot be had now and `reload_filters`
-	// keeps the rules already in effect; the retry it schedules applies the
-	// change once the list is back.
-	rules:         bool,
+	applied:  bool,
+	// The rule sets are to be built again, by the caller through
+	// `rebuild_rules`: the blocking section changed, or it names `file:` lists,
+	// which every SIGHUP reads again (`reads_list_files`).
+	blocking: bool,
 }
 
 /*
@@ -44,11 +37,13 @@ whole reload over a listener address would leave an operator choosing between
 their rewrites and a restart they did not want yet. See `keep_restart_only`.
 
 Runs on the maintenance thread, which is the only one that swaps or releases a
-generation, and must not be called with a generation pinned.
+generation, and must not be called with a generation pinned, nor while
+`rebuild_rules` runs: it moves `lists_loaded`, which a rebuild reads and writes.
+The rules are not rebuilt here, as a rebuild may download for minutes and the
+maintenance thread is where signals are acted on (#416).
 */
-reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Reload_Outcome) {
+reload_config :: proc(s: ^Server, path: string) -> (out: Reload_Outcome) {
 	assert(pinned.server == nil, "reload_config runs with no generation pinned")
-	out.lists_current = true
 	cur := s.gens.current
 
 	arena := new(virtual.Arena)
@@ -89,7 +84,6 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 		// The file is the same, and the lists it names on disk may not be.
 		logx.infof("reload: the configuration is unchanged; reading the blocklist files again")
 		out.blocking = true
-		rebuild_rules(s, cur.cfg, allow_network, &out)
 		return
 	}
 
@@ -136,14 +130,7 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 		logx.warnf("reload: cannot open the log file %q; logging where it was", g.cfg.log.file)
 	}
 
-	if out.blocking {
-		rebuild_rules(s, g.cfg, allow_network, &out)
-	}
-
 	rebuilt := parts_text(built, context.temp_allocator)
-	if out.rules {
-		rebuilt = "rules" if built == {} else strings.concatenate({rebuilt, ",rules"}, context.temp_allocator)
-	}
 	logx.eventf(.Info, "reloaded", "changed=%s rebuilt=%s cache=%s", logx.quote(changed), logx.quote(rebuilt), answers)
 	return
 }
@@ -172,19 +159,28 @@ reads_list_files :: proc(cfg: ^config.Config) -> bool {
 	return false
 }
 
-// Build the rule sets `cfg` asks for, or take them away, under the generation
-// now current; `out.rules` says whether the ones in effect were replaced.
-@(private)
-rebuild_rules :: proc(s: ^Server, cfg: ^config.Config, allow_network: bool, out: ^Reload_Outcome) {
+/*
+Build the rule sets the current configuration asks for, or take them away.
+
+`lists_current` is `reload_filters`'s. `rules` says whether the sets in effect
+were replaced: not when a list that loaded before cannot be had now and
+`reload_filters` keeps the rules already in effect; the retry it schedules
+applies the change once the list is back.
+
+On any thread, one at a time, and not beside `reload_config`; see there.
+*/
+rebuild_rules :: proc(s: ^Server, allow_network: bool) -> (lists_current, rules: bool) {
 	swapped := filter.engine_generation(s.filters)
 	pin(s)
-	if cfg.blocking.enabled {
-		out.lists_current = reload_filters(s, allow_network)
+	lists_current = true
+	if live(s).cfg.blocking.enabled {
+		lists_current = reload_filters(s, allow_network)
 	} else {
 		clear_filters(s)
 	}
 	unpin(s)
-	out.rules = filter.engine_generation(s.filters) != swapped
+	rules = filter.engine_generation(s.filters) != swapped
+	return
 }
 
 /*

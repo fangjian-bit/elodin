@@ -120,6 +120,8 @@ Wait_Outcome :: enum u8 {
 	Tick,
 	Stop,
 	Reload,
+	// The rebuild of the rule sets is over, and waits to be collected.
+	Rebuilt,
 }
 
 /*
@@ -130,10 +132,11 @@ the loop has to come back and look. Anything less often than this and an
 operator waits on a service that has already been told to go - or, for
 `Reload`, on a certificate that is already sitting on disk waiting to be
 picked up. `Reload` cuts the wait short rather than sitting out the rest of
-the tick, which otherwise could be the better part of `TICK`.
+the tick, which otherwise could be the better part of `TICK`, and so does
+`Rebuilt`, as a reload may be waiting on the rebuild.
 */
 @(private)
-wait_for_tick :: proc(tick: time.Duration) -> Wait_Outcome {
+wait_for_tick :: proc(tick: time.Duration, rebuild: ^server.Rebuild) -> Wait_Outcome {
 	SLICE :: 200 * time.Millisecond
 	deadline := time.time_add(time.now(), tick)
 	for {
@@ -142,6 +145,9 @@ wait_for_tick :: proc(tick: time.Duration) -> Wait_Outcome {
 		}
 		if sync.atomic_exchange(&reload_requested, false) {
 			return .Reload
+		}
+		if server.rebuild_done(rebuild) {
+			return .Rebuilt
 		}
 		remaining := time.diff(time.now(), deadline)
 		if remaining <= 0 {
@@ -744,8 +750,41 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 
 	defer delete(s.lists_loaded)
 	lists_current := true
+	// Here rather than in the loop, as a rebuild a stop leaves running writes
+	// to it until the process ends; see `abandoned`.
+	rebuild: server.Rebuild
 	if cfg.blocking.enabled {
-		lists_current = server.reload_filters(&s, !opts.no_fetch)
+		/*
+		On the rebuild thread, as at every refresh, so a SIGTERM is not held by
+		the downloads and no signal cuts one short (#416). Nothing listens yet,
+		so a stop has nothing to drain. A SIGHUP waits for the loop.
+		*/
+		server.rebuild_start(&rebuild, &s, !opts.no_fetch)
+		for {
+			if current, over := server.rebuild_collect(&rebuild); over {
+				lists_current = current
+				break
+			}
+			if sync.atomic_load(&stop_requested) {
+				logx.infof("signal received, shutting down")
+				os.exit(0)
+			}
+			time.sleep(200 * time.Millisecond)
+		}
+	}
+
+	/*
+	A rebuild still downloading at a stop is not waited for: it is held by the
+	network, for up to `FETCH_DEADLINE` a list, and what the drain below
+	protects is the clients. Its thread reads the generations, the engine and
+	`lists_loaded`, so once the drain is over the process ends before the defers
+	above free them. A cached copy it was writing is replaced by a rename, whole
+	or not at all.
+	*/
+	abandoned := false
+	defer if abandoned {
+		logx.infof("blocklists: not waiting for the rebuild in progress")
+		os.exit(0)
 	}
 
 	listeners: server.Listeners
@@ -814,7 +853,7 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 	)
 	server.unpin(&s)
 
-	maintenance_loop(&s, &listeners, opts, lists_current)
+	abandoned = maintenance_loop(&s, &listeners, &rebuild, opts, lists_current)
 }
 
 /*
@@ -873,47 +912,75 @@ drop_privileges :: proc(cfg: ^config.Config, service: privdrop.Identity) {
 Periodic housekeeping.
 
 Runs on the main thread, which otherwise has nothing to do once the listeners
-are up: expire cache entries, close idle upstream connections, refresh the
-blocklists when their interval comes round, release the configurations a reload
-has replaced once nothing uses them, and reload when SIGHUP asks for it.
+are up: expire cache entries, close idle upstream connections, start a rebuild
+of the blocklists when their interval comes round and collect it when it is
+over, release the configurations a reload has replaced once nothing uses them,
+and reload when SIGHUP asks for it.
+
+Returns whether a rebuild was still running at the stop; see `run`.
 */
-maintenance_loop :: proc(s: ^server.Server, listeners: ^server.Listeners, opts: Options, lists_current: bool) {
+maintenance_loop :: proc(
+	s: ^server.Server,
+	listeners: ^server.Listeners,
+	rebuild: ^server.Rebuild,
+	opts: Options,
+	lists_current: bool,
+) -> (
+	abandoned: bool,
+) {
 	TICK :: 30 * time.Second
-	last_refresh := time.now()
-	// Zero while the lists are current; otherwise the wait before the next
-	// attempt, which `refresh_retry` stretches on each failure (#411).
-	retry: time.Duration
+	m := Maintenance {
+		rebuild      = rebuild,
+		last_refresh = time.now(),
+		last_report  = time.now(),
+	}
 	refresh := server.live_config(s).blocking.refresh
 	if !lists_current && !opts.no_fetch && refresh > 0 {
-		retry = server.refresh_retry(0, refresh)
-		logx.warnf("blocklists: not every list is current; trying again in %v", retry)
+		m.retry = server.refresh_retry(0, refresh)
+		logx.warnf("blocklists: not every list is current; trying again in %v", m.retry)
 	}
-	last_report := time.now()
-	// What the kernel had dropped at the last report, so the line below is
-	// about the interval rather than about the whole run. A counter that only
-	// grows says nothing about whether it is still growing.
-	last_udp_drops: u64
 
 	for sync.atomic_load(&s.running) {
-		switch wait_for_tick(TICK) {
+		switch wait_for_tick(TICK, m.rebuild) {
 		case .Stop:
 			logx.infof("signal received, shutting down")
 			sync.atomic_store(&s.running, false)
 			continue
 		case .Reload:
-			reload(s, listeners, opts, &last_refresh, &retry)
-			server.reap_generations(s)
-			free_all(context.temp_allocator)
-			continue
+			reload(s, listeners, opts, &m)
+		case .Rebuilt:
+			collect(s, opts, &m)
 		case .Tick:
+			tick(s, listeners, opts, &m)
 		}
-
-		tick(s, listeners, opts, &last_refresh, &retry, &last_report, &last_udp_drops)
 		if released := server.reap_generations(s); released > 0 {
 			logx.debugf("reload: released %d replaced configuration(s)", released)
 		}
 		free_all(context.temp_allocator)
 	}
+	// One over just before the stop is not left behind.
+	server.rebuild_collect(m.rebuild)
+	return server.rebuild_busy(m.rebuild)
+}
+
+// What the maintenance loop carries from one turn to the next.
+@(private)
+Maintenance :: struct {
+	rebuild:        ^server.Rebuild,
+	// The running rebuild is the one a reload asked for, which starts the
+	// retries afresh; a refresh's goes on from `retry`.
+	after_reload:   bool,
+	// A SIGHUP's configuration, read once the running rebuild is over.
+	reload_waiting: bool,
+	last_refresh:   time.Time,
+	// Zero while the lists are current; otherwise the wait before the next
+	// attempt, which `refresh_retry` stretches on each failure (#411).
+	retry:          time.Duration,
+	last_report:    time.Time,
+	// What the kernel had dropped at the last report, so the line below is
+	// about the interval rather than about the whole run. A counter that only
+	// grows says nothing about whether it is still growing.
+	last_udp_drops: u64,
 }
 
 /*
@@ -921,19 +988,15 @@ What SIGHUP asks for, in the order an operator would want it.
 
 The log first, so everything the reload says lands where logrotate expects it:
 `logrotate` renames the file and sends the signal, and this is what opens the
-name again. Then the configuration, which may move the log somewhere else and
-says so. The certificates last, read from the paths the process started with -
-whether or not the rest of the file was usable, since a renewal that happens to
-coincide with a typo in the file is still a renewal.
+name again. Then the certificates, read from the paths the process started with -
+whether or not the rest of the file is usable, since a renewal that happens to
+coincide with a typo in the file is still a renewal. Then the configuration,
+which may move the log somewhere else and says so; while a rebuild of the rules
+runs, that waits for it to be over (see `server.reload_config`), and a second
+SIGHUP meanwhile asks for the same.
 */
 @(private)
-reload :: proc(
-	s: ^server.Server,
-	listeners: ^server.Listeners,
-	opts: Options,
-	last_refresh: ^time.Time,
-	retry: ^time.Duration,
-) {
+reload :: proc(s: ^server.Server, listeners: ^server.Listeners, opts: Options, m: ^Maintenance) {
 	file := server.live_config(s).log.file
 	reopened := logx.reopen(file)
 	logx.infof("SIGHUP received, reloading the configuration and the TLS certificates")
@@ -941,40 +1004,59 @@ reload :: proc(
 		logx.warnf("cannot open the log file %q again; logging where it was", file)
 	}
 
-	out := server.reload_config(s, opts.config_path, !opts.no_fetch)
-	if out.applied || out.blocking {
-		server.pin(s)
-		cfg := server.live(s).cfg
-		if out.applied {
-			log_config_warnings(cfg)
-		}
-		if out.blocking {
-			last_refresh^ = time.now()
-			retry^ = 0
-			if !out.lists_current && !opts.no_fetch && cfg.blocking.refresh > 0 {
-				retry^ = server.refresh_retry(0, cfg.blocking.refresh)
-				logx.warnf("blocklists: not every list is current; trying again in %v", retry^)
-			}
-		}
-		server.unpin(s)
-	}
-
 	// From the paths the process started with, which need no pin.
 	server.reload_tls(s, listeners)
+
+	if server.rebuild_busy(m.rebuild) {
+		logx.infof("reload: a rebuild of the blocklists is running; the configuration is read once it is over")
+		m.reload_waiting = true
+		return
+	}
+	reload_configuration(s, opts, m)
+}
+
+@(private)
+reload_configuration :: proc(s: ^server.Server, opts: Options, m: ^Maintenance) {
+	out := server.reload_config(s, opts.config_path)
+	if out.applied {
+		server.pin(s)
+		log_config_warnings(server.live(s).cfg)
+		server.unpin(s)
+	}
+	if out.blocking {
+		m.after_reload = true
+		server.rebuild_start(m.rebuild, s, !opts.no_fetch)
+	}
+}
+
+// Take in a rebuild that is over, and read a configuration a SIGHUP left
+// waiting for it.
+@(private)
+collect :: proc(s: ^server.Server, opts: Options, m: ^Maintenance) {
+	current, over := server.rebuild_collect(m.rebuild)
+	if !over {
+		return
+	}
+	m.last_refresh = time.now()
+	refresh := server.live_config(s).blocking.refresh
+	switch {
+	case current || opts.no_fetch || refresh <= 0:
+		m.retry = 0
+	case:
+		m.retry = server.refresh_retry(0 if m.after_reload else m.retry, refresh)
+		logx.warnf("blocklists: not every list is current; trying again in %v", m.retry)
+	}
+	m.after_reload = false
+	if m.reload_waiting {
+		m.reload_waiting = false
+		reload_configuration(s, opts, m)
+	}
 }
 
 // Everything the maintenance loop does on an ordinary tick, under the
 // generation current at its start.
 @(private)
-tick :: proc(
-	s: ^server.Server,
-	listeners: ^server.Listeners,
-	opts: Options,
-	last_refresh: ^time.Time,
-	retry: ^time.Duration,
-	last_report: ^time.Time,
-	last_udp_drops: ^u64,
-) {
+tick :: proc(s: ^server.Server, listeners: ^server.Listeners, opts: Options, m: ^Maintenance) {
 	server.pin(s)
 	defer server.unpin(s)
 	cfg := server.live(s).cfg
@@ -992,24 +1074,18 @@ tick :: proc(
 		logx.debugf("dnssec: dropped %d expired zone keys", dropped)
 	}
 
-	if cfg.blocking.enabled && !opts.no_fetch && cfg.blocking.refresh > 0 {
-		wait := server.refresh_wait(retry^, cfg.blocking.refresh)
-		if time.diff(last_refresh^, time.now()) >= wait {
+	if cfg.blocking.enabled && !opts.no_fetch && cfg.blocking.refresh > 0 && !server.rebuild_busy(m.rebuild) {
+		wait := server.refresh_wait(m.retry, cfg.blocking.refresh)
+		if time.diff(m.last_refresh, time.now()) >= wait {
 			logx.infof("refreshing blocklists")
-			if server.reload_filters(s, true) {
-				retry^ = 0
-			} else {
-				retry^ = server.refresh_retry(retry^, cfg.blocking.refresh)
-				logx.warnf("blocklists: not every list is current; trying again in %v", retry^)
-			}
-			last_refresh^ = time.now()
+			server.rebuild_start(m.rebuild, s, true)
 		}
 	}
 
-	if time.diff(last_report^, time.now()) >= 5 * time.Minute {
+	if time.diff(m.last_report, time.now()) >= 5 * time.Minute {
 		report(s, answers)
-		report_udp_drops(listeners, last_udp_drops)
-		last_report^ = time.now()
+		report_udp_drops(listeners, &m.last_udp_drops)
+		m.last_report = time.now()
 	}
 }
 

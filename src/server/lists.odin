@@ -25,7 +25,8 @@ FETCH_TIMEOUT :: 30 * time.Second
 /*
 The whole download, redirects included (#445): `FETCH_TIMEOUT` bounds one read,
 and a host sending a little just inside it could otherwise hold the refresh -
-and the maintenance thread it runs on - for as long as the body limit allows.
+and every refresh and reload after it, which wait for it (see `Rebuild`) - for
+as long as the body limit allows.
 Five minutes is a 64 MB list, the most `fetch_url` accepts, at under 2 Mbit/s.
 */
 FETCH_DEADLINE :: 5 * time.Minute
@@ -648,7 +649,6 @@ reload_filters :: proc(s: ^Server, allow_network: bool) -> (current: bool) {
 	}
 	delete(loads)
 
-	log_filter_sets(block, allow)
 	old_block, old_allow := filter.engine_swap(s.filters, block, allow)
 
 	/*
@@ -667,6 +667,9 @@ reload_filters :: proc(s: ^Server, allow_network: bool) -> (current: bool) {
 	// waited on, so nothing can still be reading the displaced sets.
 	filter.set_destroy(old_block)
 	filter.set_destroy(old_allow)
+	// Once the old sets are gone, so the line says the rebuild is over. Only a
+	// rebuild swaps the sets, one at a time, so these are still the ones in effect.
+	log_filter_sets(block, allow)
 	return
 }
 
