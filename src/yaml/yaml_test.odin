@@ -872,6 +872,17 @@ test_a_plain_scalar_may_not_start_with_an_indicator :: proc(t: ^testing.T) {
 			{"a: {!t k: v}\n", 1},
 			{"a: |x\n", 1},
 			{"- >x\n", 1},
+			{"a: b: c\n", 1},
+			{"a: x:\ty\n", 1},
+			{"a: x:\n", 1},
+			{"a: [x: y]\n", 1},
+			{"a: [fe80::]\n", 1},
+			{"a: {k: v w: z}\n", 1},
+			{"a: [a[b]]\n", 1},
+			{"a: {k: v[x]}\n", 1},
+			{"a: \"x\" \"y\"\n", 1},
+			{"a: 'x' 'y'\n", 1},
+			{"a: '''\n", 1},
 		}) {
 		_, err := parse(c.src, context.temp_allocator)
 		e, has := err.?
@@ -879,7 +890,7 @@ test_a_plain_scalar_may_not_start_with_an_indicator :: proc(t: ^testing.T) {
 	}
 	// A `,` that separates nothing is no more YAML than one that starts a
 	// plain scalar, and two entries need one between them.
-	for src in ([]string{"a: [,x]\n", "a: [x,,y]\n", "a: [ ,]\n", "a: {, k: v}\n", "a: [x,\t,y]\n", "a: [[a] [b]]\n"}) {
+	for src in ([]string{"a: [\"x\" \"y\"]\n", "a: {k: 'x' 'y'}\n", "a: [,x]\n", "a: [x,,y]\n", "a: [ ,]\n", "a: {, k: v}\n", "a: [x,\t,y]\n", "a: [[a] [b]]\n"}) {
 		_, err := parse(src, context.temp_allocator)
 		testing.expectf(t, err != nil, "%q parsed", src)
 	}
@@ -894,6 +905,16 @@ test_a_plain_scalar_may_not_start_with_an_indicator :: proc(t: ^testing.T) {
 		v, _ := as_string(at(root, want[0]))
 		testing.expectf(t, v == want[1], "%s: %q", want[0], v)
 	}
+	// A `:` with no space after it is text, a key may end in one, and a
+	// doubled or escaped quote stays inside its scalar.
+	more, merr := parse("a:: v\nb: 12:30\nc: [fe80::1, \"::\"]\nd: 'it''s'\ne: \"say \\\"hi\\\"\"\n", context.temp_allocator)
+	testing.expectf(t, merr == nil, "parse failed: %v", merr)
+	for want in ([][2]string{{"a:", "v"}, {"b", "12:30"}, {"d", "it's"}, {"e", "say \"hi\""}}) {
+		v, _ := as_string(at(more, want[0]))
+		testing.expectf(t, v == want[1], "%s: %q", want[0], v)
+	}
+	c, cok := as_string_list(at(more, "c"), context.temp_allocator)
+	testing.expectf(t, cok && len(c) == 2 && c[0] == "fe80::1" && c[1] == "::", "c: %v", c)
 	g, gok := as_string_list(at(root, "g"), context.temp_allocator)
 	testing.expectf(t, gok && len(g) == 3 && g[0] == "-1" && g[1] == "?x" && g[2] == "!t", "g: %v", g)
 	free_all(context.temp_allocator)

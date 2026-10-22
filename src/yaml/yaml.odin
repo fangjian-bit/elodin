@@ -20,7 +20,10 @@ complex `?` key and a multi-line plain scalar do not fit the "one key, one
 value, indentation decides nesting" shape every line is read against. Anchors,
 aliases and tags start with an indicator no plain scalar may start with (YAML
 1.2.2 section 7.3.3), so `file: &f /tmp/x.log` and `domain: *.lan` are refused
-by `plain_first_ok` rather than read as the text they hold.
+by `plain_first_ok` rather than read as the text they hold. The same section
+keeps `: ` out of a plain scalar, a `:` from ending a value, and the flow
+indicators out of one inside a flow collection, so `a: b: c`, `[x: y]` and
+`[fe80::]`, which YAML reads as mappings or refuses, are refused here too.
 
 Document markers are skipped rather than acted on: `scan_lines` drops any line
 that is exactly `---` or `...`, so a file holding several documents is read as
@@ -370,7 +373,7 @@ parse_mapping :: proc(p: ^Parser, indent: int) -> ^Node {
 			return fail(p, line.num, "expected 'key: value'")
 		}
 		raw_key := strings.trim_space(line.text[:colon])
-		key, kerr := unquote_scalar(p, raw_key, line.num)
+		key, kerr := unquote_scalar(p, raw_key, line.num, key = true)
 		if kerr {
 			return fail(p, line.num, "malformed key")
 		}
@@ -668,7 +671,7 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 			append(&node.seq, new_scalar(p, value, quoted, line_num))
 		} else {
 			colon := find_key_colon(item) or_return
-			key, kbad := unquote_scalar(p, strings.trim_space(item[:colon]), line_num, flow = true)
+			key, kbad := unquote_scalar(p, strings.trim_space(item[:colon]), line_num, flow = true, key = true)
 			if kbad {
 				return nil, 0, false
 			}
@@ -765,10 +768,16 @@ is_quoted :: proc(s: string) -> bool {
 }
 
 @(private)
-unquote_scalar :: proc(p: ^Parser, s: string, line_num: int, flow := false) -> (out: string, bad: bool) {
+unquote_scalar :: proc(p: ^Parser, s: string, line_num: int, flow := false, key := false) -> (out: string, bad: bool) {
 	if !is_quoted(s) {
 		if len(s) > 0 && !plain_first_ok(s, flow) {
 			fail(p, line_num, strings.concatenate({"a plain scalar may not start with `", s[:1], "` (YAML 1.2.2 section 7.3.3): quote it"}, p.allocator))
+			return "", true
+		}
+		// A key is followed by its own `: `, so only a value can end on a `:`
+		// that YAML would read as a mapping indicator.
+		if strings.contains(s, ": ") || strings.contains(s, ":\t") || (!key && strings.has_suffix(s, ":")) || (flow && strings.contains_any(s, "[]{}")) {
+			fail(p, line_num, "a plain scalar may not hold `: `, end in `:`, or hold a bracket inside a flow collection (YAML 1.2.2 section 7.3.3): quote it")
 			return "", true
 		}
 		return s, false
@@ -779,13 +788,18 @@ unquote_scalar :: proc(p: ^Parser, s: string, line_num: int, flow := false) -> (
 			return "", true
 		}
 		inner := s[1:len(s) - 1]
-		if !strings.contains(inner, "''") {
+		if strings.index_byte(inner, '\'') < 0 {
 			return inner, false
 		}
+		// Inside single quotes a `'` is written `''`; a lone one ends the
+		// scalar, so `'x' 'y'` is two scalars rather than the text `x' 'y`.
 		b := strings.builder_make(p.allocator)
 		i := 0
 		for i < len(inner) {
-			if inner[i] == '\'' && i + 1 < len(inner) && inner[i + 1] == '\'' {
+			if inner[i] == '\'' {
+				if i + 1 >= len(inner) || inner[i + 1] != '\'' {
+					return "", true
+				}
 				strings.write_byte(&b, '\'')
 				i += 2
 				continue
@@ -800,12 +814,16 @@ unquote_scalar :: proc(p: ^Parser, s: string, line_num: int, flow := false) -> (
 			return "", true
 		}
 		inner := s[1:len(s) - 1]
-		if !strings.contains(inner, "\\") {
+		if strings.index_any(inner, "\\\"") < 0 {
 			return inner, false
 		}
 		b := strings.builder_make(p.allocator)
 		i := 0
 		for i < len(inner) {
+			// An unescaped `"` ends the scalar, as in `"x" "y"`.
+			if inner[i] == '"' {
+				return "", true
+			}
 			if inner[i] != '\\' {
 				strings.write_byte(&b, inner[i])
 				i += 1
