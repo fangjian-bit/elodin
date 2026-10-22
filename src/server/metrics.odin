@@ -4,7 +4,6 @@ import "core:fmt"
 import "core:net"
 import "core:strings"
 import "core:sync"
-import "core:thread"
 import "core:time"
 import "elodin:cache"
 import "elodin:dnssec"
@@ -172,7 +171,7 @@ start_metrics :: proc(s: ^Server, l: ^Listeners) -> bool {
 	// Not `conn_spawn`: that thread would sit in `l.conns` and be joined by
 	// `conn_manager_shutdown` along with every client connection, which is
 	// exactly the wait this loop is meant to survive. See `stop_metrics`.
-	t := thread.create_and_start_with_data(ctx, metrics_accept_loop)
+	t := pool.spawn(rawptr(ctx), metrics_accept_loop)
 	if t == nil {
 		logx.errorf("metrics: cannot start the accept loop")
 		// Nothing was ever handed it, so it is ours to release.

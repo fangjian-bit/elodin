@@ -109,7 +109,11 @@ root; the first arrangement avoids it.
 `SIGTERM` and `SIGINT` stop the listeners and let the worker pools drain. An idle
 client connection is only noticed when its read times out, so stopping can take
 up to `server.client_timeout` (ten seconds by default). A second signal
-terminates immediately.
+terminates immediately. Blocklists are downloaded and the rule sets built on a
+thread of their own, so a signal is acted on at once whatever a download is
+waiting for; a stop does not wait for a rebuild in progress (`blocklists: not
+waiting for the rebuild in progress`), and one during the downloads at startup
+exits before anything is listening.
 
 `SIGHUP` (`systemctl reload elodin`) reloads without dropping a connection or a
 cached answer it has no reason to, in this order:
@@ -121,7 +125,9 @@ cached answer it has no reason to, in this order:
    is built before anything is swapped in. A file that fails any of that is
    logged (`reload: ... is not usable; keeping the configuration already in
    effect`) and changes nothing. A query already being answered finishes under
-   the configuration it started with.
+   the configuration it started with. A change to the rule sets rebuilds them
+   afterwards on the blocklists' own thread, once any rebuild in progress is
+   over (`reload: the rules are rebuilt once the rebuild in progress is over`).
 3. The DoT/DoH certificate and key are read again from the paths the process
    started with, whether or not the file loaded. A session in progress keeps the
    certificate it handshook with; one that fails to load is logged and the
@@ -135,7 +141,9 @@ ts=2026-10-19T19:35:57Z level=info msg=reloaded changed=upstream,rewrites rebuil
 ```
 
 `changed` is the sections that differ; `rebuilt` the parts built afresh
-(`upstreams`, `validator`, `cookies`, `limiter`, `answers`, `rules`, or `none`);
+(`upstreams`, `validator`, `cookies`, `limiter`, `answers`, or `none`); rule
+sets rebuilt after it log their own `filter:` line (`filter: blocking is off; no
+rules in effect` when turned off), or keep the rules in effect;
 `cache` is `kept`, `flushed`, `new` or `off`.
 
 | section | on reload |

@@ -13,18 +13,11 @@ What a configuration reload did, for the caller's bookkeeping.
 */
 Reload_Outcome :: struct {
 	// A new configuration is in effect.
-	applied:       bool,
-	// The rule sets were built again: the blocking section changed, or it
-	// names `file:` lists, which every SIGHUP reads again (`reads_list_files`).
-	blocking:      bool,
-	// Whether every list the rebuilt rule sets wanted was current; see
-	// `reload_filters`. True when nothing was rebuilt.
-	lists_current: bool,
-	// The rule sets in effect were replaced. False on a blocking change too,
-	// where a list that loaded before cannot be had now and `reload_filters`
-	// keeps the rules already in effect; the retry it schedules applies the
-	// change once the list is back.
-	rules:         bool,
+	applied:  bool,
+	// The rule sets are to be built again, by the caller through
+	// `rebuild_rules`: the blocking section changed, or it names `file:` lists,
+	// which every SIGHUP reads again (`reads_list_files`).
+	blocking: bool,
 }
 
 /*
@@ -44,11 +37,14 @@ whole reload over a listener address would leave an operator choosing between
 their rewrites and a restart they did not want yet. See `keep_restart_only`.
 
 Runs on the maintenance thread, which is the only one that swaps or releases a
-generation, and must not be called with a generation pinned.
+generation, and must not be called with a generation pinned. The rules are not
+rebuilt here, as a rebuild may download for minutes and the maintenance thread
+is where signals are acted on (#416); nor are they or their history touched, so
+it runs beside a rebuild, which reads its own copy of the configuration and pins
+no generation (see `Rebuild`).
 */
-reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Reload_Outcome) {
+reload_config :: proc(s: ^Server, path: string) -> (out: Reload_Outcome) {
 	assert(pinned.server == nil, "reload_config runs with no generation pinned")
-	out.lists_current = true
 	cur := s.gens.current
 
 	arena := new(virtual.Arena)
@@ -89,7 +85,6 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 		// The file is the same, and the lists it names on disk may not be.
 		logx.infof("reload: the configuration is unchanged; reading the blocklist files again")
 		out.blocking = true
-		rebuild_rules(s, cur.cfg, allow_network, &out)
 		return
 	}
 
@@ -117,9 +112,6 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 
 	changed := changed_sections(cur.cfg, g.cfg, context.temp_allocator)
 	out.blocking = rules_changed(cur.cfg.blocking, g.cfg.blocking) || reads_list_files(g.cfg)
-	if out.blocking {
-		remap_lists_loaded(s, cur.cfg, g.cfg)
-	}
 	log_file_moved := g.cfg.log.file != cur.cfg.log.file
 
 	swap_generation(s, g, carried)
@@ -136,14 +128,7 @@ reload_config :: proc(s: ^Server, path: string, allow_network: bool) -> (out: Re
 		logx.warnf("reload: cannot open the log file %q; logging where it was", g.cfg.log.file)
 	}
 
-	if out.blocking {
-		rebuild_rules(s, g.cfg, allow_network, &out)
-	}
-
 	rebuilt := parts_text(built, context.temp_allocator)
-	if out.rules {
-		rebuilt = "rules" if built == {} else strings.concatenate({rebuilt, ",rules"}, context.temp_allocator)
-	}
 	logx.eventf(.Info, "reloaded", "changed=%s rebuilt=%s cache=%s", logx.quote(changed), logx.quote(rebuilt), answers)
 	return
 }
@@ -172,19 +157,24 @@ reads_list_files :: proc(cfg: ^config.Config) -> bool {
 	return false
 }
 
-// Build the rule sets `cfg` asks for, or take them away, under the generation
-// now current; `out.rules` says whether the ones in effect were replaced.
-@(private)
-rebuild_rules :: proc(s: ^Server, cfg: ^config.Config, allow_network: bool, out: ^Reload_Outcome) {
-	swapped := filter.engine_generation(s.filters)
-	pin(s)
-	if cfg.blocking.enabled {
-		out.lists_current = reload_filters(s, allow_network)
-	} else {
+/*
+Build the rule sets `cfg` asks for, or take them away. It reads the blocking
+section and the bootstrap servers, and no other part (see `rebuild_snapshot`).
+
+`lists_current` is `reload_filters`'s. A list that loaded before and cannot be
+had now leaves the rules already in effect, and the retry it schedules applies
+the change once the list is back.
+
+On any thread, one at a time.
+*/
+rebuild_rules :: proc(s: ^Server, cfg: ^config.Config, allow_network: bool) -> (lists_current: bool) {
+	if !cfg.blocking.enabled {
 		clear_filters(s)
+		// The line a rebuild ends with, as `reload_filters` logs its own.
+		logx.infof("filter: blocking is off; no rules in effect")
+		return true
 	}
-	unpin(s)
-	out.rules = filter.engine_generation(s.filters) != swapped
+	return reload_filters_from(s, cfg, allow_network)
 }
 
 /*
@@ -353,44 +343,6 @@ parts_text :: proc(parts: Parts, allocator := context.allocator) -> string {
 		return "none"
 	}
 	return strings.join(names[:], ",", allocator)
-}
-
-/*
-Carry each list's "loaded before" over to where it sits in the new
-configuration.
-
-`lists_loaded` is indexed by position, and a reload that adds or removes a list
-moves every position after it. A list is the same list if it is fetched from
-the same place, and only such a list keeps its history; a new one starts with
-none, which is what it would have at startup.
-*/
-@(private)
-remap_lists_loaded :: proc(s: ^Server, old, cfg: ^config.Config) {
-	if s.lists_loaded == nil {
-		return
-	}
-	fresh := make([]bool, len(cfg.blocking.lists) + len(cfg.blocking.allow_lists))
-	remap_kind(fresh[:len(cfg.blocking.lists)], cfg.blocking.lists, old.blocking.lists, s.lists_loaded[:len(old.blocking.lists)])
-	remap_kind(
-		fresh[len(cfg.blocking.lists):],
-		cfg.blocking.allow_lists,
-		old.blocking.allow_lists,
-		s.lists_loaded[len(old.blocking.lists):],
-	)
-	delete(s.lists_loaded)
-	s.lists_loaded = fresh
-}
-
-@(private)
-remap_kind :: proc(fresh: []bool, lists, old: []config.Block_List, was: []bool) {
-	for list, i in lists {
-		for o, j in old {
-			if o.url == list.url && o.file == list.file {
-				fresh[i] = was[j]
-				break
-			}
-		}
-	}
 }
 
 /*

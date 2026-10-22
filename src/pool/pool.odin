@@ -89,7 +89,7 @@ make_pool :: proc(workers: int, limit := 0, allocator := context.allocator) -> ^
 
 	for i in 0 ..< n {
 		p.workers[i].pool = p
-		p.threads[i] = thread.create_and_start_with_poly_data(&p.workers[i], worker_loop)
+		p.threads[i] = spawn(&p.workers[i], worker_loop)
 	}
 	return p
 }

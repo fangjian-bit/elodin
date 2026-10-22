@@ -690,15 +690,46 @@ test_an_empty_download_with_no_copy_does_not_hold_the_others_back :: proc(t: ^te
 	}
 	defer delete(s.lists_loaded)
 	// As if it had loaded at the last refresh.
-	s.lists_loaded = make([]bool, 1)
-	s.lists_loaded[0] = true
+	key := list_key(cfg.blocking.lists[0], false)
+	s.lists_loaded[key] = true
 	generation := filter.engine_generation(engine)
 
 	testing.expect(t, !reload_filters(&s, true), "an empty download was reported current")
 	testing.expect(t, filter.engine_generation(engine) != generation, "an empty download held the refresh back")
 	testing.expect(t, !os.exists(list_cache_path(&cfg, cfg.blocking.lists[0])), "an empty download was cached")
 	// It added nothing, so losing it later has no rules of its to keep.
-	testing.expect(t, !s.lists_loaded[0], "an empty list was recorded as loaded")
+	testing.expect(t, !s.lists_loaded[key], "an empty list was recorded as loaded")
+}
+
+@(test)
+test_a_disabled_entry_does_not_lend_its_source_a_history :: proc(t: ^testing.T) {
+	/*
+	`lists_loaded` is keyed by where a list comes from, and two entries for one
+	url are one list. A disabled one adds nothing, so it says nothing about
+	whether that source's rules are in effect: an enabled entry that never
+	loaded holds nothing back when it is unavailable again.
+	*/
+	cfg := config.default_config()
+	cfg.blocking.cache_dir = "/nonexistent/elodin-lists-test-disabled-twin"
+	cfg.blocking.refresh = 0
+	url := "http://127.0.0.1:1/twin.txt"
+	cfg.blocking.lists = []config.Block_List {
+		{name = "twin", url = url, format = .Hosts, enabled = true},
+		{name = "twin-off", url = url, format = .Hosts, enabled = false},
+	}
+	engine := filter.engine_make()
+	defer filter.engine_destroy(engine)
+	s := Server {
+		cfg     = &cfg,
+		filters = engine,
+	}
+	defer delete(s.lists_loaded)
+
+	testing.expect(t, !reload_filters(&s, true), "an unreachable list was reported current")
+	testing.expect(t, !s.lists_loaded[list_key(cfg.blocking.lists[0], false)], "a list that never loaded was recorded as loaded")
+	generation := filter.engine_generation(engine)
+	reload_filters(&s, true)
+	testing.expect(t, filter.engine_generation(engine) != generation, "a list that never loaded held the refresh back")
 }
 
 @(test)

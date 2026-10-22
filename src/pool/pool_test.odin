@@ -1,7 +1,9 @@
 package pool
 
 import "core:sync"
+import "core:sys/posix"
 import "core:testing"
+import "core:thread"
 import "core:time"
 
 /*
@@ -291,5 +293,39 @@ test_an_idle_pool_reuses_its_warmest_worker :: proc(t: ^testing.T) {
 			first = who.worker
 		}
 		testing.expect(t, who.worker == first)
+	}
+}
+
+@(private = "file")
+Mask_Probe :: struct {
+	blocked: [3]bool,
+}
+
+@(test)
+test_a_spawned_thread_holds_the_signals_main_acts_on :: proc(t: ^testing.T) {
+	// See `spawn`: a thread that took one in a timed read would fail the read.
+	before: Mask_Probe
+	read_mask(&before)
+	probe: Mask_Probe
+	th := spawn(&probe, read_mask)
+	if !testing.expect(t, th != nil, "no thread") {
+		return
+	}
+	thread.join(th)
+	thread.destroy(th)
+	testing.expect_value(t, probe.blocked, [3]bool{true, true, true})
+
+	// And the caller's own mask is put back as it was.
+	after: Mask_Probe
+	read_mask(&after)
+	testing.expect_value(t, after.blocked, before.blocked)
+}
+
+@(private = "file")
+read_mask :: proc(p: ^Mask_Probe) {
+	cur: posix.sigset_t
+	posix.pthread_sigmask(.BLOCK, nil, &cur)
+	for sig, i in ([]posix.Signal{.SIGTERM, .SIGINT, .SIGHUP}) {
+		p.blocked[i] = posix.sigismember(&cur, sig) == 1
 	}
 }

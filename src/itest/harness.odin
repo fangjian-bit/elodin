@@ -607,6 +607,22 @@ log_count :: proc(srv: ^Server, needle: string) -> int {
 	}
 }
 
+// One field of a /proc status file, such as `VmRSS` or `SigBlk`, trimmed; not
+// ok when the file cannot be read (a thread that has just ended) or lacks it.
+proc_status_field :: proc(path, field: string) -> (value: string, ok: bool) {
+	data, err := os.read_entire_file(path, context.temp_allocator)
+	if err != nil {
+		return
+	}
+	text := string(data)
+	for line in strings.split_lines_iterator(&text) {
+		if strings.has_prefix(line, field) && strings.has_prefix(line[len(field):], ":") {
+			return strings.trim_space(line[len(field) + 1:]), true
+		}
+	}
+	return
+}
+
 // --- DNS message helpers ---------------------------------------------------
 
 /*

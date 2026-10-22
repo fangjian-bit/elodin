@@ -25,7 +25,8 @@ FETCH_TIMEOUT :: 30 * time.Second
 /*
 The whole download, redirects included (#445): `FETCH_TIMEOUT` bounds one read,
 and a host sending a little just inside it could otherwise hold the refresh -
-and the maintenance thread it runs on - for as long as the body limit allows.
+and every rebuild after it, a reload's change to the rules included, which
+waits for it (see `Rebuild`) - for as long as the body limit allows.
 Five minutes is a 64 MB list, the most `fetch_url` accepts, at under 2 Mbit/s.
 */
 FETCH_DEADLINE :: 5 * time.Minute
@@ -597,9 +598,9 @@ make_directories :: proc(path: string) {
 /*
 Reload every list and swap the result in.
 
-Called at startup and again on the refresh interval. The old rule sets are
-destroyed only after the swap returns them, at which point no new query can
-reach them.
+A rebuild calls `reload_filters_from` with its copy of the configuration (see
+`rebuild_rules`); this reads the one in effect. The old rule sets are destroyed
+only after the swap returns them, at which point no new query can reach them.
 
 A list that loaded last time and is unavailable now - no download and no
 readable cached copy, say a cleared tmpfs `cache_dir` during an outage - would
@@ -615,23 +616,29 @@ blocks has to lift them, where a download is lost to the network.
 so the caller retries sooner than the interval; see `refresh_retry`.
 */
 reload_filters :: proc(s: ^Server, allow_network: bool) -> (current: bool) {
-	lists := len(live(s).cfg.blocking.lists)
-	loads := make([]List_Load, lists + len(live(s).cfg.blocking.allow_lists))
-	block, allow := build_filter_sets(live(s).cfg, allow_network, loads)
+	return reload_filters_from(s, live(s).cfg, allow_network)
+}
+
+// `reload_filters` from `cfg`, which a rebuild holds a copy of rather than a
+// pin on its generation; see `Rebuild`.
+reload_filters_from :: proc(s: ^Server, cfg: ^config.Config, allow_network: bool) -> (current: bool) {
+	lists := len(cfg.blocking.lists)
+	loads := make([]List_Load, lists + len(cfg.blocking.allow_lists))
+	block, allow := build_filter_sets(cfg, allow_network, loads)
 
 	current = true
 	for load, i in loads {
 		if load == .Current {
 			continue
 		}
-		list := live(s).cfg.blocking.lists[i] if i < lists else live(s).cfg.blocking.allow_lists[i - lists]
+		list := cfg.blocking.lists[i] if i < lists else cfg.blocking.allow_lists[i - lists]
 		// A retry is for a download. A missing `file:` list is the operator's
 		// to put back, and retrying it would rebuild every set hourly for good.
 		if list.file != "" {
 			continue
 		}
 		current = false
-		if load == .Unavailable && s.lists_loaded != nil && s.lists_loaded[i] {
+		if load == .Unavailable && s.lists_loaded[list_key(list, i >= lists)] {
 			logx.warnf("list %s: loaded before and unavailable now; keeping the rules already in effect", list.name)
 			filter.set_destroy(block)
 			filter.set_destroy(allow)
@@ -639,16 +646,18 @@ reload_filters :: proc(s: ^Server, allow_network: bool) -> (current: bool) {
 			return false
 		}
 	}
-	if s.lists_loaded == nil {
-		s.lists_loaded = make([]bool, len(loads))
-	}
+	clear(&s.lists_loaded)
 	for load, i in loads {
-		// An empty list contributed nothing, so it has nothing to keep later.
-		s.lists_loaded[i] = load == .Current || load == .Stale
+		list := cfg.blocking.lists[i] if i < lists else cfg.blocking.allow_lists[i - lists]
+		// An empty or disabled list contributed nothing, so it has nothing to
+		// keep later. Only a load is recorded: two entries for one source share
+		// a key, and the one that loaded is the one whose rules are in effect.
+		if list.enabled && (load == .Current || load == .Stale) {
+			s.lists_loaded[list_key(list, i >= lists)] = true
+		}
 	}
 	delete(loads)
 
-	log_filter_sets(block, allow)
 	old_block, old_allow := filter.engine_swap(s.filters, block, allow)
 
 	/*
@@ -667,7 +676,19 @@ reload_filters :: proc(s: ^Server, allow_network: bool) -> (current: bool) {
 	// waited on, so nothing can still be reading the displaced sets.
 	filter.set_destroy(old_block)
 	filter.set_destroy(old_allow)
+	// Once the old sets are gone, so the line says the rebuild is over. Only a
+	// rebuild swaps the sets, one at a time, so these are still the ones in effect.
+	log_filter_sets(block, allow)
 	return
+}
+
+/*
+A list as `lists_loaded` knows it: where it is fetched from, and which kind of
+list it is. A list keeps its history wherever a reload moves it, and a new one
+starts with none, which is what it would have at startup.
+*/
+list_key :: proc(list: config.Block_List, allow: bool) -> u64 {
+	return hash.fnv64a(transmute([]byte)fmt.tprintf("%v\x00%s\x00%s", allow, list.url, list.file))
 }
 
 /*

@@ -1,6 +1,7 @@
 package itest
 
 import "core:fmt"
+import "core:net"
 import "core:os"
 import "core:path/filepath"
 import "core:time"
@@ -289,6 +290,165 @@ blocking:
 			if check(r, res.ok, "no response") {
 				h := parse_header(r, res.wire)
 				check(r, h.rcode == int(dns.Rcode.NX_Domain), "the list's rules were lost in the refresh")
+			}
+		}
+	}
+	end_case(r)
+}
+
+/*
+Signals while a list download waits on a host that has stopped answering (#416).
+
+The rule sets are rebuilt off the maintenance loop, so a SIGHUP is acted on and a
+SIGTERM ends the process while a download waits, rather than once `FETCH_TIMEOUT`
+has run out for each read; and the signal does not cut the download short as a
+failed one, as it would on a thread that took it. A silent host is a socket that
+listens and never accepts: the kernel completes the handshake, and nothing is
+sent. Closing it resets the connection, which ends the download at once.
+*/
+@(private = "file")
+config_for_refresh_signals :: proc(udp_port, upstream_port, http_port: int, extra: string) -> string {
+	return fmt.tprintf(
+		`log: {{ level: info }}
+listeners:
+  udp: {{ enabled: true, address: "127.0.0.1", port: %d }}
+  tcp: {{ enabled: false }}
+upstream:
+  timeout: 3s
+  servers: ["127.0.0.1:%d"]
+cache: {{ enabled: false }}
+blocking:
+  enabled: true
+  response: nxdomain
+  cache_dir: /proc/elodin-cannot-write-here
+  refresh: 1s
+  lists:
+    - {{ name: hosts-list, url: "http://127.0.0.1:%d/hosts.txt", format: hosts }}
+%s`,
+		udp_port,
+		upstream_port,
+		http_port,
+		extra,
+	)
+}
+
+@(private = "file")
+listen_silent :: proc(r: ^Runner, port: int) -> (net.TCP_Socket, bool) {
+	sock, err := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = port})
+	return sock, check(r, err == nil, "cannot listen on port %d: %v", port, err)
+}
+
+run_list_refresh_signal_cases :: proc(r: ^Runner) {
+	upstream_port := next_port(r)
+	mock := mock_make("lists-refresh-signals", upstream_port)
+	mock_synth_all(mock, {203, 0, 113, 9})
+	if !mock_start(mock) {
+		skip_case(r, "lists: signals during a download", "cannot start the mock upstream")
+		return
+	}
+	defer mock_stop(mock)
+
+	start_case(r, "lists: SIGTERM is not held by the download at startup")
+	{
+		silent_port := next_port(r)
+		udp_port := next_port(r)
+		silent, listening := listen_silent(r, silent_port)
+		if listening {
+			defer net.close(silent)
+			config := config_for_refresh_signals(udp_port, upstream_port, silent_port, "")
+			if srv, ok := start_server_raw(r, config, udp_port, true); check(r, ok, "the server did not start") {
+				defer stop_server(&srv)
+				if check(r, wait_for_log(&srv, "list hosts-list: downloading", 5 * time.Second), "no download started") {
+					time.sleep(300 * time.Millisecond)
+					state, exited := signal_shutdown(&srv, 5 * time.Second)
+					if check(r, exited, "the server did not exit within 5s of SIGTERM during the startup download") {
+						check(r, state.success && state.exit_code == 0, "exited with code %d (success=%v)", state.exit_code, state.success)
+						check(r, !log_contains(&srv, "download failed"), "the stop waited for the download to fail")
+					}
+				}
+			}
+		}
+	}
+	end_case(r)
+
+	http_port := next_port(r)
+	http := http_mock_make(http_port)
+	http_mock_serve(http, "/hosts.txt", "0.0.0.0 refreshed.test\n")
+	if !http_mock_start(http) {
+		skip_case(r, "lists: signals during a refresh", "cannot start the HTTP mock")
+		return
+	}
+	stopped := false
+	defer if !stopped {
+		http_mock_stop(http)
+	}
+	udp_port := next_port(r)
+	stalled_port := next_port(r)
+	srv, ok := start_server(
+		r,
+		Server_Options{config = config_for_refresh_signals(udp_port, upstream_port, http_port, ""), udp_port = udp_port, allow_fetch = true},
+	)
+	if !ok {
+		skip_case(r, "lists: signals during a refresh", "server did not start")
+		return
+	}
+	defer stop_server(&srv)
+
+	start_case(r, "lists: SIGHUP and SIGTERM are not held by a refresh, nor cut it short")
+	{
+		http_mock_stop(http)
+		stopped = true
+		silent, listening := listen_silent(r, http_port)
+		stalled, stalling := listen_silent(r, stalled_port)
+		defer if stalling {
+			net.close(stalled)
+		}
+		// Closed below to end the refresh; here when the premise fails first.
+		defer if listening {
+			net.close(silent)
+		}
+		// The premise: a refresh has started its download and is waiting on it.
+		if listening && stalling && check(r, wait_for_log_count(&srv, "list hosts-list: downloading", 2, 45 * time.Second), "no refresh ran") {
+			time.sleep(500 * time.Millisecond)
+			check(r, !log_contains(&srv, "download failed"), "the download did not wait")
+
+			// A list added by the reload, from a host that stays silent.
+			added := fmt.tprintf(
+				"    - {{ name: stalled-list, url: \"http://127.0.0.1:%d/hosts.txt\", format: hosts }}\nrewrites:\n  - {{ domain: during.test, answer: 192.0.2.7 }}\n",
+				stalled_port,
+			)
+			// Applied at once, its rule change left for after the refresh.
+			check(
+				r,
+				reload_to(r, &srv, config_for_refresh_signals(udp_port, upstream_port, http_port, added), "changed=blocking,rewrites", 3 * time.Second),
+				"the reload waited for the refresh",
+			)
+			// Logged after the `reloaded` line, so waited for rather than read at once.
+			check(r, wait_for_log(&srv, "rebuilt once the rebuild in progress is over", 2 * time.Second), "the reload's rebuild did not wait for the refresh")
+			check(r, !log_contains(&srv, "download failed"), "SIGHUP cut the download short")
+			if res := query_udp(udp_port, build_query("during.test.", u16(dns.Type.A))); check(r, res.ok, "no response during the refresh") {
+				addrs := answer_addresses(r, res.wire)
+				check(r, len(addrs) == 1 && addrs[0] == "192.0.2.7", "the reloaded rewrite is not in effect during the refresh: %v", addrs)
+			}
+			res := query_udp(udp_port, build_query("refreshed.test.", u16(dns.Type.A)))
+			if check(r, res.ok, "no response during the refresh") {
+				h := parse_header(r, res.wire)
+				check(r, h.rcode == int(dns.Rcode.NX_Domain), "the list's rules are not in effect during the refresh")
+			}
+
+			// The refresh fails, and the rebuild the reload asked for starts:
+			// it waits on the added list.
+			check(r, !log_contains(&srv, "list stalled-list: downloading"), "the reload's rebuild ran beside the refresh")
+			net.close(silent)
+			listening = false
+			check(r, wait_for_log(&srv, "list stalled-list: downloading", 5 * time.Second), "the reload's rebuild did not download the added list")
+			time.sleep(300 * time.Millisecond)
+
+			state, exited := signal_shutdown(&srv, 5 * time.Second)
+			if check(r, exited, "the server did not exit within 5s of SIGTERM during a rebuild") {
+				check(r, state.success && state.exit_code == 0, "exited with code %d (success=%v)", state.exit_code, state.success)
+				check(r, !log_contains(&srv, "list stalled-list: download failed"), "the stop waited for the download to fail")
+				check(r, log_contains(&srv, "not waiting for the rebuild in progress"), "the stop did not say it left the rebuild")
 			}
 		}
 	}

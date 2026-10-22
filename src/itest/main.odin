@@ -244,6 +244,7 @@ main :: proc() {
 	run_list_download_cases(&r)
 	run_name_cases(&r)
 	run_list_refresh_cases(&r)
+	run_list_refresh_signal_cases(&r)
 	run_list_bad_download_cases(&r)
 	run_list_redirect_cases(&r)
 	run_list_memory_cases(&r)

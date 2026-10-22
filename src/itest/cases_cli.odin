@@ -3,6 +3,7 @@ package itest
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
+import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
 import "core:time"
@@ -459,6 +460,47 @@ blocking: {{ enabled: false }}
 	)
 }
 
+/*
+Which of the server's threads would take SIGTERM, SIGINT or SIGHUP (#416).
+
+The kernel hands a process-directed signal to any thread that has it unblocked,
+and one taken in a timed socket read fails that read with EINTR: a list
+download, or an upstream read and the query behind it. Only the main thread,
+whose reads are none of those, is to take them, so every other is started with
+them blocked (`pool.spawn`). Read from each thread's SigBlk, the mask the kernel
+consults.
+*/
+@(private = "file")
+STOP_AND_RELOAD_MASK :: u64(1) << (u64(posix.Signal.SIGHUP) - 1) | u64(1) << (u64(posix.Signal.SIGINT) - 1) | u64(1) << (u64(posix.Signal.SIGTERM) - 1)
+
+@(private = "file")
+threads_taking_signals :: proc(pid: int) -> (main_takes: bool, others, taking: int, ok: bool) {
+	entries, err := os.read_directory_by_path(fmt.tprintf("/proc/%d/task", pid), -1, context.temp_allocator)
+	if err != nil {
+		return
+	}
+	for e in entries {
+		mask, read := proc_status_field(fmt.tprintf("/proc/%d/task/%s/status", pid, e.name), "SigBlk")
+		if !read {
+			continue // a thread that has just ended
+		}
+		blocked, parsed := strconv.parse_u64_of_base(mask, 16)
+		if !parsed {
+			return
+		}
+		takes := blocked & STOP_AND_RELOAD_MASK != STOP_AND_RELOAD_MASK
+		if e.name == fmt.tprintf("%d", pid) {
+			main_takes = takes
+			continue
+		}
+		others += 1
+		if takes {
+			taking += 1
+		}
+	}
+	return main_takes, others, taking, true
+}
+
 run_shutdown_cases :: proc(r: ^Runner) {
 	f := fixture("a")
 	upstream_port := next_port(r)
@@ -480,6 +522,19 @@ run_shutdown_cases :: proc(r: ^Runner) {
 		return
 	}
 	defer stop_server(&srv)
+
+	start_case(r, "signals: only the main thread takes SIGTERM, SIGINT and SIGHUP")
+	{
+		res := query_udp(udp_port, from_hex(f.query))
+		check(r, res.ok, "the server did not answer")
+		main_takes, others, taking, read := threads_taking_signals(srv.process.pid)
+		if check(r, read, "cannot read the server's thread masks") {
+			check(r, main_takes, "the main thread blocks them, so no handler would run")
+			check(r, others > 0, "the server runs no other thread to check")
+			check(r, taking == 0, "%d of %d other threads would take them, and fail a read they are in", taking, others)
+		}
+	}
+	end_case(r)
 
 	start_case(r, "shutdown: SIGTERM is answered by an orderly exit")
 	{
