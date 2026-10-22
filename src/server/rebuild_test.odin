@@ -56,11 +56,7 @@ test_a_rebuild_does_not_take_the_signals_main_acts_on :: proc(t: ^testing.T) {
 	defer delete(s.lists_loaded)
 
 	r: Rebuild
-	rebuild_start(&r, &s, true)
-	if !testing.expect(t, r.thread != nil, "the rebuild did not get a thread of its own") {
-		for !rebuild_done(&r) {
-			time.sleep(time.Millisecond)
-		}
+	if !testing.expect(t, rebuild_start(&r, &s, true), "the rebuild did not get a thread of its own") {
 		return
 	}
 	client, _, aerr := net.accept_tcp(listener)

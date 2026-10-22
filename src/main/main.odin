@@ -133,14 +133,14 @@ operator waits on a service that has already been told to go - or, for
 `Reload`, on a certificate that is already sitting on disk waiting to be
 picked up. `Reload` cuts the wait short rather than sitting out the rest of
 the tick, which otherwise could be the better part of `TICK`, and so does
-`Rebuilt`, as a reload may have asked for another. `Rebuilt` comes before
+`Rebuilt`, as a reload may have asked for another. Neither moves `deadline`,
+so the housekeeping on the tick keeps its pace. `Rebuilt` comes before
 `Reload`, so a SIGHUP that lands as a rebuild ends finds it collected and starts
 its own at once.
 */
 @(private)
-wait_for_tick :: proc(tick: time.Duration, rebuild: ^server.Rebuild) -> Wait_Outcome {
+wait_for_tick :: proc(deadline: time.Time, rebuild: ^server.Rebuild) -> Wait_Outcome {
 	SLICE :: 200 * time.Millisecond
-	deadline := time.time_add(time.now(), tick)
 	for {
 		if sync.atomic_load(&stop_requested) {
 			return .Stop
@@ -753,7 +753,7 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 	defer delete(s.lists_loaded)
 	lists_current := true
 	// Here rather than in the loop, as a rebuild a stop leaves running writes
-	// to it until the process ends; see `abandoned`.
+	// to it until the process ends; see the deferred stop below.
 	rebuild: server.Rebuild
 	if cfg.blocking.enabled {
 		/*
@@ -761,8 +761,12 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 		the downloads and no signal cuts one short (#416). Nothing listens yet,
 		so a stop has nothing to drain. A SIGHUP waits for the loop.
 		*/
-		server.rebuild_start(&rebuild, &s, !opts.no_fetch)
-		for {
+		if !server.rebuild_start(&rebuild, &s, !opts.no_fetch) {
+			// Here, then: nothing listens yet for a stop to drain.
+			logx.warnf("blocklists: cannot start a thread to build the rules; building them here")
+			lists_current = server.rebuild_rules(&s, !opts.no_fetch)
+		}
+		for server.rebuild_busy(&rebuild) {
 			if current, over := server.rebuild_collect(&rebuild); over {
 				lists_current = current
 				break
@@ -785,9 +789,8 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 	above free them. A cached copy it was writing is replaced by a rename, whole
 	or not at all.
 	*/
-	abandoned := false
-	defer if abandoned {
-		// One that ended during the drain is joined, and the defers above run.
+	defer if server.rebuild_busy(&rebuild) {
+		// One that ended by the end of the drain is joined, and the defers above run.
 		if _, over := server.rebuild_collect(&rebuild); !over {
 			logx.infof("blocklists: not waiting for the rebuild in progress")
 			os.exit(0)
@@ -860,7 +863,7 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 	)
 	server.unpin(&s)
 
-	abandoned = maintenance_loop(&s, &listeners, &rebuild, opts, lists_current)
+	maintenance_loop(&s, &listeners, &rebuild, opts, lists_current)
 }
 
 /*
@@ -924,7 +927,7 @@ of the blocklists when their interval comes round and collect it when it is
 over, release the configurations a reload has replaced once nothing uses them,
 and reload when SIGHUP asks for it.
 
-Returns whether a rebuild was still running at the stop; see `run`.
+A rebuild still running at the stop is left to `run`.
 */
 maintenance_loop :: proc(
 	s: ^server.Server,
@@ -932,12 +935,11 @@ maintenance_loop :: proc(
 	rebuild: ^server.Rebuild,
 	opts: Options,
 	lists_current: bool,
-) -> (
-	abandoned: bool,
 ) {
 	TICK :: 30 * time.Second
 	m := Maintenance {
 		rebuild      = rebuild,
+		next_tick    = time.time_add(time.now(), TICK),
 		last_refresh = time.now(),
 		last_report  = time.now(),
 	}
@@ -948,7 +950,7 @@ maintenance_loop :: proc(
 	}
 
 	for sync.atomic_load(&s.running) {
-		switch wait_for_tick(TICK, m.rebuild) {
+		switch wait_for_tick(m.next_tick, m.rebuild) {
 		case .Stop:
 			logx.infof("signal received, shutting down")
 			sync.atomic_store(&s.running, false)
@@ -958,6 +960,7 @@ maintenance_loop :: proc(
 		case .Rebuilt:
 			collect(s, opts, &m)
 		case .Tick:
+			m.next_tick = time.time_add(time.now(), TICK)
 			tick(s, listeners, opts, &m)
 		}
 		if released := server.reap_generations(s); released > 0 {
@@ -965,20 +968,19 @@ maintenance_loop :: proc(
 		}
 		free_all(context.temp_allocator)
 	}
-	// One over just before the stop is not left behind.
-	server.rebuild_collect(m.rebuild)
-	return server.rebuild_busy(m.rebuild)
 }
 
 // What the maintenance loop carries from one turn to the next.
 @(private)
 Maintenance :: struct {
 	rebuild:        ^server.Rebuild,
+	next_tick:      time.Time,
 	// The running rebuild is the one a reload asked for, which starts the
 	// retries afresh; a refresh's goes on from `retry`.
 	after_reload:   bool,
 	// A reload changed the rules while a rebuild ran under the configuration
-	// before it: another follows once that one is over.
+	// before it, or when no thread could be had: another follows once that one
+	// is over, or at the next tick.
 	rebuild_again:  bool,
 	last_refresh:   time.Time,
 	// Zero while the lists are current; otherwise the wait before the next
@@ -1024,8 +1026,7 @@ reload :: proc(s: ^server.Server, listeners: ^server.Listeners, opts: Options, m
 			logx.infof("reload: the rules are rebuilt once the rebuild in progress is over")
 			m.rebuild_again = true
 		} else {
-			m.after_reload = true
-			server.rebuild_start(m.rebuild, s, !opts.no_fetch)
+			start_rebuild(s, opts, m, after_reload = true)
 		}
 	}
 
@@ -1041,6 +1042,12 @@ collect :: proc(s: ^server.Server, opts: Options, m: ^Maintenance) {
 	if !over {
 		return
 	}
+	// Built under the configuration a reload has since replaced: the rebuild it
+	// asked for decides what is current, and starts the retries afresh.
+	if m.rebuild_again {
+		start_rebuild(s, opts, m, after_reload = true)
+		return
+	}
 	m.last_refresh = time.now()
 	refresh := server.live_config(s).blocking.refresh
 	switch {
@@ -1051,11 +1058,22 @@ collect :: proc(s: ^server.Server, opts: Options, m: ^Maintenance) {
 		logx.warnf("blocklists: not every list is current; trying again in %v", m.retry)
 	}
 	m.after_reload = false
-	if m.rebuild_again {
+}
+
+/*
+Start the rebuild a refresh or a reload asks for. With no thread to be had it
+stays wanted, and the next tick tries again: run on this thread, it would hold
+the signals the loop acts on (#416). A refresh that cannot start is still due.
+*/
+@(private)
+start_rebuild :: proc(s: ^server.Server, opts: Options, m: ^Maintenance, after_reload: bool) {
+	if server.rebuild_start(m.rebuild, s, !opts.no_fetch) {
+		m.after_reload = after_reload
 		m.rebuild_again = false
-		m.after_reload = true
-		server.rebuild_start(m.rebuild, s, !opts.no_fetch)
+		return
 	}
+	m.rebuild_again = m.rebuild_again || after_reload
+	logx.warnf("blocklists: cannot start a thread to rebuild the rules; trying again at the next tick")
 }
 
 // Everything the maintenance loop does on an ordinary tick, under the
@@ -1079,11 +1097,14 @@ tick :: proc(s: ^server.Server, listeners: ^server.Listeners, opts: Options, m: 
 		logx.debugf("dnssec: dropped %d expired zone keys", dropped)
 	}
 
-	if cfg.blocking.enabled && !opts.no_fetch && cfg.blocking.refresh > 0 && !server.rebuild_busy(m.rebuild) {
-		wait := server.refresh_wait(m.retry, cfg.blocking.refresh)
-		if time.diff(m.last_refresh, time.now()) >= wait {
+	refreshing := cfg.blocking.enabled && !opts.no_fetch && cfg.blocking.refresh > 0
+	if !server.rebuild_busy(m.rebuild) {
+		switch {
+		case m.rebuild_again:
+			start_rebuild(s, opts, m, after_reload = true)
+		case refreshing && time.diff(m.last_refresh, time.now()) >= server.refresh_wait(m.retry, cfg.blocking.refresh):
 			logx.infof("refreshing blocklists")
-			server.rebuild_start(m.rebuild, s, true)
+			start_rebuild(s, opts, m, after_reload = false)
 		}
 	}
 

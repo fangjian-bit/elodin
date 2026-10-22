@@ -28,9 +28,10 @@ Rebuild :: struct {
 	current: bool,
 }
 
-// Start a rebuild; the caller has checked none is running. With no thread to
-// be had it runs on the caller's.
-rebuild_start :: proc(r: ^Rebuild, s: ^Server, network: bool) {
+// Start a rebuild; the caller has checked none is running. False when no
+// thread can be had, and nothing is started: run on the caller's thread, it
+// would hold the signals that thread acts on.
+rebuild_start :: proc(r: ^Rebuild, s: ^Server, network: bool) -> (started: bool) {
 	// A second start would overwrite what the running thread still writes to.
 	assert(!rebuild_busy(r), "a rebuild is already running")
 	r^ = Rebuild {
@@ -41,25 +42,20 @@ rebuild_start :: proc(r: ^Rebuild, s: ^Server, network: bool) {
 	// freed by the caller's thread; `thread` gives it a temp allocator of its own.
 	r.thread = pool.spawn(r, rebuild_thread, context)
 	if r.thread == nil {
-		rebuild_run(r)
+		r^ = {}
+		return false
 	}
+	return true
 }
 
 @(private = "file")
 rebuild_thread :: proc(r: ^Rebuild) {
-	rebuild_run(r)
+	r.current = rebuild_rules(r.s, r.network)
+	sync.atomic_store(&r.done, true)
 	// Handed a context, `thread` leaves its temp allocator to the thread.
 	if context.temp_allocator.procedure == runtime.default_temp_allocator_proc {
 		runtime.default_temp_allocator_destroy(auto_cast context.temp_allocator.data)
 	}
-}
-
-@(private = "file")
-rebuild_run :: proc(r: ^Rebuild) {
-	// The temp allocator is left alone: on the rebuild's thread it is destroyed
-	// with the thread, and on the caller's it may hold what the caller still uses.
-	r.current = rebuild_rules(r.s, r.network)
-	sync.atomic_store(&r.done, true)
 }
 
 // Started and not yet collected.
