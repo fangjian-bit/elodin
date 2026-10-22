@@ -15,18 +15,17 @@ indicators), and comments.
 Not supported: anchors and aliases, tags, multiple documents in one stream,
 complex (?) keys, and multi-line plain scalars.
 
-Two of those are refused, and the other three are not, which is worth knowing
-before trusting a file this parser accepted. A complex `?` key and a multi-line
-plain scalar are refused: neither fits the "one key, one value, indentation
-decides nesting" shape every line is read against, so both come back as a parse
-error naming their line.
-
-Anchors, aliases and tags are not recognised at all. There is no syntax for them
-here, so `&name`, `*name` and `!!tag` are read as part of the plain scalar they
-sit in - `file: &f /tmp/x.log` yields the literal value `&f /tmp/x.log`, spaces
-and all. That surfaces as an error only when the value goes on to fail a typed
-conversion in `config`, which is where `level: &lvl warn` is caught; on a
-string-typed key it is accepted as written.
+All but multiple documents are refused, as a parse error naming their line. A
+complex `?` key and a multi-line plain scalar do not fit the "one key, one
+value, indentation decides nesting" shape every line is read against. Anchors,
+aliases and tags start with an indicator no plain scalar may start with (YAML
+1.2.2 section 7.3.3), so `file: &f /tmp/x.log` and `domain: *.lan` are refused
+by `plain_first_ok` rather than read as the text they hold. The same section
+keeps `: ` out of a plain scalar, a `:` from ending a value, and the flow
+indicators out of one inside a flow collection, so `a: b: c`, `[x: y]` and
+`[fe80::]`, which YAML reads as mappings or refuses, are refused here too.
+A quote opens a quoted scalar only where a scalar starts (`Quote_State`), so
+the `'` in `a: don't # c` is text and the comment after it is still dropped.
 
 Document markers are skipped rather than acted on: `scan_lines` drops any line
 that is exactly `---` or `...`, so a file holding several documents is read as
@@ -35,9 +34,6 @@ like any other key written twice; keys it does not repeat are added to the
 first document's rather than rejected. That is the one case where the reading
 differs from YAML's without saying so, and it is kept because a leading `---`
 is common and harmless in a single-document file.
-
-A parser this size is the right trade for one configuration file, but "it
-parsed" is not "it means what YAML says it means" for the three above.
 */
 
 Kind :: enum u8 {
@@ -248,38 +244,95 @@ scan_block_scalar :: proc(p: ^Parser, rest: ^string, num: ^int, parent: int) {
 	}
 }
 
+/*
+Tracks quoting across a line for the scanners that split it before any scalar
+is parsed: strip_comment, find_key_colon and parse_flow's item scanner. They
+have to agree, or one reads a quote the next does not.
+
+A quote opens a quoted scalar only where a scalar starts (YAML 1.2.2 sections
+7.3.1 and 7.3.2): at the start of the text, after a `- `, `? ` or `: `
+indicator, or after a flow collection's `[`, `{` or `,`. Anywhere else it is
+text in a plain scalar - `don't`, `5"` - and taking it for an opening quote
+would hide the comment or separator behind it.
+*/
+@(private)
+Quote_State :: struct {
+	in_single, in_double: bool,
+	// The next byte that is not whitespace starts a scalar.
+	at_start:             bool,
+	// Flow collections open, so `,` is a separator rather than text.
+	depth:                int,
+}
+
+// Steps over the byte at `i`, returning how many bytes it took and whether
+// they sat inside quotes; callers act on a byte only when it did not.
+@(private)
+quote_step :: proc(q: ^Quote_State, s: string, i: int) -> (n: int, quoted: bool) {
+	c := s[i]
+	if q.in_single {
+		// `''` is an escaped quote inside single quotes, not a close and reopen.
+		if c == '\'' {
+			if i + 1 < len(s) && s[i + 1] == '\'' {
+				return 2, true
+			}
+			q.in_single = false
+		}
+		return 1, true
+	}
+	if q.in_double {
+		// A backslash escapes the byte after it, `\"` included, so both are
+		// stepped over: otherwise an escaped quote closes the scalar early.
+		if c == '\\' {
+			return 2, true
+		}
+		if c == '"' {
+			q.in_double = false
+		}
+		return 1, true
+	}
+	if c == ' ' || c == '\t' {
+		return 1, false
+	}
+	start := q.at_start
+	q.at_start = false
+	followed_by_space := blank_or_end(s, i + 1)
+	switch c {
+	case '\'', '"':
+		if start {
+			q.in_single, q.in_double = c == '\'', c == '"'
+			return 1, true
+		}
+	case '[', '{':
+		if start || q.depth > 0 {
+			q.depth += 1
+			q.at_start = true
+		}
+	case ']', '}':
+		if q.depth > 0 {
+			q.depth -= 1
+		}
+	case ',':
+		q.at_start = q.depth > 0
+	case '-', '?':
+		q.at_start = start && followed_by_space
+	case ':':
+		q.at_start = followed_by_space
+	}
+	return 1, false
+}
+
 // A `#` only opens a comment when it follows whitespace and sits outside quotes.
 @(private)
 strip_comment :: proc(s: string) -> string {
-	in_single, in_double := false, false
-	for i := 0; i < len(s); i += 1 {
-		c := s[i]
-		switch {
-		case in_single:
-			if c == '\'' {
-				in_single = false
-			}
-		case in_double:
-			// A backslash escapes the byte after it, `\"` included, so that byte
-			// has to be stepped over: leaving it to the next turn of the loop lets
-			// an escaped quote close the scalar early, and the rest of the line is
-			// then read unquoted.
-			if c == '\\' {
-				i += 1
-				continue
-			}
-			if c == '"' {
-				in_double = false
-			}
-		case c == '\'':
-			in_single = true
-		case c == '"':
-			in_double = true
-		case c == '#':
-			if i == 0 || s[i - 1] == ' ' || s[i - 1] == '\t' {
-				return s[:i]
-			}
+	q := Quote_State {
+		at_start = true,
+	}
+	for i := 0; i < len(s); {
+		n, quoted := quote_step(&q, s, i)
+		if !quoted && s[i] == '#' && (i == 0 || s[i - 1] == ' ' || s[i - 1] == '\t') {
+			return s[:i]
 		}
+		i += n
 	}
 	return s
 }
@@ -379,7 +432,7 @@ parse_mapping :: proc(p: ^Parser, indent: int) -> ^Node {
 			return fail(p, line.num, "expected 'key: value'")
 		}
 		raw_key := strings.trim_space(line.text[:colon])
-		key, kerr := unquote_scalar(p, raw_key, line.num)
+		key, kerr := unquote_scalar(p, raw_key, line.num, key = true)
 		if kerr {
 			return fail(p, line.num, "malformed key")
 		}
@@ -486,9 +539,10 @@ parse_block_scalar :: proc(p: ^Parser, header: string, indent: int, line_num: in
 	// The header is `|` or `>` with at most one chomping indicator, the same
 	// shapes the scanner recognizes. Anything else — `|x`, `|+x`, `| x` — is
 	// invalid YAML and is rejected here rather than misread, `|+x` as `|+`
-	// with the trailing byte dropped.
+	// with the trailing byte dropped. An indentation indicator (`|2`) is valid
+	// YAML this parser does not take, so the message names both remedies.
 	if !is_block_header(header) {
-		return fail(p, line_num, "unsupported block scalar indicator")
+		return fail(p, line_num, "unsupported block scalar header: this parser takes `|` or `>` with at most one of `-` or `+` and no indentation indicator; drop the indicator, or quote a value that only starts with `|` or `>`")
 	}
 	folded := header[0] == '>'
 	chomp := byte(0)
@@ -580,7 +634,7 @@ parse_flow_or_scalar :: proc(p: ^Parser, text: string, line_num: int) -> ^Node {
 	if bad {
 		return fail(p, line_num, "malformed quoted scalar")
 	}
-	quoted := len(text) >= 2 && (text[0] == '"' || text[0] == '\'')
+	quoted := is_quoted(text)
 	return new_scalar(p, value, quoted, line_num)
 }
 
@@ -596,9 +650,12 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 	is_seq := text[0] == '['
 	node = new_sequence(p, line_num) if is_seq else new_mapping(p, line_num)
 
+	// Entries are separated by exactly one `,`, and one may trail the last:
+	// `[,x]`, `[x,,y]` and `[[a] [b]]` are not YAML.
 	i := 1
+	want_entry := true
 	for {
-		for i < len(text) && (text[i] == ' ' || text[i] == ',') {
+		for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
 			i += 1
 		}
 		if i >= len(text) {
@@ -607,6 +664,18 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 		if text[i] == closing {
 			return node, i + 1, true
 		}
+		if text[i] == ',' {
+			if want_entry {
+				return nil, 0, false
+			}
+			want_entry = true
+			i += 1
+			continue
+		}
+		if !want_entry {
+			return nil, 0, false
+		}
+		want_entry = false
 		// Any other bracket here closes a collection this one never opened, as
 		// in `[1, 2}`. It has to be rejected on the spot: the item scanner
 		// below stops on a closer without consuming it, so leaving it would
@@ -626,27 +695,19 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 		}
 
 		start := i
-		depth := 0
-		in_single, in_double := false, false
+		// Inside this collection already, so the item ends at a `,` or a
+		// closer back at depth 1.
+		q := Quote_State {
+			at_start = true,
+			depth    = 1,
+		}
 		for i < len(text) {
 			c := text[i]
-			if in_single {
-				if c == '\'' {in_single = false}
-			} else if in_double {
-				if c == '\\' {i += 1} else if c == '"' {in_double = false}
-			} else if c == '\'' {
-				in_single = true
-			} else if c == '"' {
-				in_double = true
-			} else if c == '[' || c == '{' {
-				depth += 1
-			} else if c == ']' || c == '}' {
-				if depth == 0 {break}
-				depth -= 1
-			} else if c == ',' && depth == 0 {
+			if !q.in_single && !q.in_double && q.depth == 1 && (c == ',' || c == ']' || c == '}') {
 				break
 			}
-			i += 1
+			n, _ := quote_step(&q, text, i)
+			i += n
 		}
 		if i > len(text) {
 			return nil, 0, false
@@ -654,15 +715,15 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 		item := strings.trim_space(text[start:i])
 
 		if is_seq {
-			value, bad := unquote_scalar(p, item, line_num)
+			value, bad := unquote_scalar(p, item, line_num, flow = true)
 			if bad {
 				return nil, 0, false
 			}
-			quoted := len(item) >= 2 && (item[0] == '"' || item[0] == '\'')
+			quoted := is_quoted(item)
 			append(&node.seq, new_scalar(p, value, quoted, line_num))
 		} else {
 			colon := find_key_colon(item) or_return
-			key, kbad := unquote_scalar(p, strings.trim_space(item[:colon]), line_num)
+			key, kbad := unquote_scalar(p, strings.trim_space(item[:colon]), line_num, flow = true, key = true)
 			if kbad {
 				return nil, 0, false
 			}
@@ -686,11 +747,11 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 				continue
 			}
 
-			value, vbad := unquote_scalar(p, val_text, line_num)
+			value, vbad := unquote_scalar(p, val_text, line_num, flow = true)
 			if vbad {
 				return nil, 0, false
 			}
-			quoted := len(val_text) >= 2 && (val_text[0] == '"' || val_text[0] == '\'')
+			quoted := is_quoted(val_text)
 			node.fields[key] = new_scalar(p, value, quoted, line_num)
 		}
 	}
@@ -700,40 +761,73 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 // space or end the string, and must not sit inside quotes or a flow collection.
 @(private)
 find_key_colon :: proc(s: string) -> (idx: int, ok: bool) {
-	depth := 0
-	in_single, in_double := false, false
-	for i := 0; i < len(s); i += 1 {
-		c := s[i]
-		switch {
-		case in_single:
-			if c == '\'' {in_single = false}
-		case in_double:
-			// Step over the escaped byte; see strip_comment.
-			if c == '\\' {
-				i += 1
-				continue
-			}
-			if c == '"' {in_double = false}
-		case c == '\'':
-			in_single = true
-		case c == '"':
-			in_double = true
-		case c == '[', c == '{':
-			depth += 1
-		case c == ']', c == '}':
-			depth -= 1
-		case c == ':' && depth == 0:
-			if i + 1 == len(s) || s[i + 1] == ' ' || s[i + 1] == '\t' {
-				return i, true
-			}
+	q := Quote_State {
+		at_start = true,
+	}
+	for i := 0; i < len(s); {
+		n, quoted := quote_step(&q, s, i)
+		// A `:` leaves the depth as it was, so it is read after the step.
+		if !quoted && q.depth == 0 && s[i] == ':' && blank_or_end(s, i + 1) {
+			return i, true
 		}
+		i += n
 	}
 	return 0, false
 }
 
+// Whether `s` ends at `i` or holds a space or tab there.
 @(private)
-unquote_scalar :: proc(p: ^Parser, s: string, line_num: int) -> (out: string, bad: bool) {
-	if len(s) < 2 {
+blank_or_end :: proc(s: string, i: int) -> bool {
+	return i >= len(s) || s[i] == ' ' || s[i] == '\t'
+}
+
+// YAML 1.2.2 section 7.3.3 (ns-plain-first): a plain scalar may not start with
+// a c-indicator, and may start with `-`, `?` or `:` only when a character it
+// could hold follows. In a flow collection that excludes the flow indicators,
+// which unquote_scalar refuses anywhere in a flow item.
+// This parser has no anchors, aliases, tags or directives, so a plain `&f x` or
+// `*.lan` - an anchor and an alias to every other YAML reader - is refused with
+// its line rather than read as text.
+@(private)
+plain_first_ok :: proc(s: string) -> bool {
+	switch s[0] {
+	case '-', '?', ':':
+		return !blank_or_end(s, 1)
+	case ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`':
+		return false
+	}
+	return true
+}
+
+// Whether `s` is written as a quoted scalar, which is what sets a node's
+// `quoted`. A lone quote is not one, so it is checked as a plain scalar.
+@(private)
+is_quoted :: proc(s: string) -> bool {
+	return len(s) >= 2 && (s[0] == '"' || s[0] == '\'')
+}
+
+@(private)
+unquote_scalar :: proc(p: ^Parser, s: string, line_num: int, flow := false, key := false) -> (out: string, bad: bool) {
+	if !is_quoted(s) {
+		if len(s) > 0 && !plain_first_ok(s) {
+			fail(p, line_num, strings.concatenate({"a plain scalar may not start with `", s[:1], "` (YAML 1.2.2 section 7.3.3): quote it"}, p.allocator))
+			return "", true
+		}
+		// A key is followed by its own `: `, so only a value can end on a `:`
+		// that YAML would read as a mapping indicator.
+		why := ""
+		switch {
+		case strings.contains(s, ": ") || strings.contains(s, ":\t"):
+			why = "a plain scalar may not hold `: `"
+		case !key && strings.has_suffix(s, ":"):
+			why = "a plain value may not end in `:`"
+		case flow && strings.contains_any(s, "[]{}"):
+			why = "a plain scalar in a flow collection may not hold a bracket"
+		}
+		if why != "" {
+			fail(p, line_num, strings.concatenate({why, " (YAML 1.2.2 section 7.3.3): quote it"}, p.allocator))
+			return "", true
+		}
 		return s, false
 	}
 	switch s[0] {
@@ -742,13 +836,18 @@ unquote_scalar :: proc(p: ^Parser, s: string, line_num: int) -> (out: string, ba
 			return "", true
 		}
 		inner := s[1:len(s) - 1]
-		if !strings.contains(inner, "''") {
+		if strings.index_byte(inner, '\'') < 0 {
 			return inner, false
 		}
+		// Inside single quotes a `'` is written `''`; a lone one ends the
+		// scalar, so `'x' 'y'` is two scalars rather than the text `x' 'y`.
 		b := strings.builder_make(p.allocator)
 		i := 0
 		for i < len(inner) {
-			if inner[i] == '\'' && i + 1 < len(inner) && inner[i + 1] == '\'' {
+			if inner[i] == '\'' {
+				if i + 1 >= len(inner) || inner[i + 1] != '\'' {
+					return "", true
+				}
 				strings.write_byte(&b, '\'')
 				i += 2
 				continue
@@ -763,12 +862,16 @@ unquote_scalar :: proc(p: ^Parser, s: string, line_num: int) -> (out: string, ba
 			return "", true
 		}
 		inner := s[1:len(s) - 1]
-		if !strings.contains(inner, "\\") {
+		if strings.index_any(inner, "\\\"") < 0 {
 			return inner, false
 		}
 		b := strings.builder_make(p.allocator)
 		i := 0
 		for i < len(inner) {
+			// An unescaped `"` ends the scalar, as in `"x" "y"`.
+			if inner[i] == '"' {
+				return "", true
+			}
 			if inner[i] != '\\' {
 				strings.write_byte(&b, inner[i])
 				i += 1

@@ -832,3 +832,117 @@ test_duplicate_keys_are_refused :: proc(t: ^testing.T) {
 	}
 	free_all(context.temp_allocator)
 }
+
+/*
+YAML 1.2.2 section 7.3.3 (ns-plain-first): a plain scalar may not start with a
+c-indicator, and `-`, `?` and `:` only when a non-space follows. A conforming
+parser reads `&f x` as an anchor and `*.lan` as an alias, so taking either as
+text would give the file a meaning no other YAML reader gives it.
+*/
+@(test)
+test_a_plain_scalar_may_not_start_with_an_indicator :: proc(t: ^testing.T) {
+	for c in ([]struct {
+			src:  string,
+			line: int,
+		} {
+			{"log:\n  file: &f /tmp/x.log\n", 2},
+			{"rewrites:\n  - domain: *.lan\n", 2},
+			{"a: !!str x\n", 1},
+			{"a: %x\n", 1},
+			{"a: @x\n", 1},
+			{"a: `x\n", 1},
+			{"a: ,x\n", 1},
+			{"a: ]x\n", 1},
+			{"a: }x\n", 1},
+			{"a: \"\n", 1},
+			{"a: '\n", 1},
+			{"a: ? x\n", 1},
+			{"a: ?\n", 1},
+			{"a: :\n", 1},
+			{"a: - x\n", 1},
+			{"a: -\n", 1},
+			{"- *x\n", 1},
+			{"&a key: v\n", 1},
+			{"? key: v\n", 1},
+			{"a: [1, *x]\n", 1},
+			{"a: [|x]\n", 1},
+			{"a: [#x]\n", 1},
+			{"a: [-[x]]\n", 1},
+			{"a: {k: &x v}\n", 1},
+			{"a: {!t k: v}\n", 1},
+			{"a: |x\n", 1},
+			{"- >x\n", 1},
+			{"a: b: c\n", 1},
+			{"a: x:\ty\n", 1},
+			{"a: x:\n", 1},
+			{"a: [x: y]\n", 1},
+			{"a: [fe80::]\n", 1},
+			{"a: {k: v w: z}\n", 1},
+			{"a: [a[b]]\n", 1},
+			{"a: {k: v[x]}\n", 1},
+			{"a: -\tx\n", 1},
+		}) {
+		_, err := parse(c.src, context.temp_allocator)
+		e, has := err.?
+		// "quote it" or "quote a value", not the "quoted" of a generic message.
+		testing.expectf(t, has && e.line == c.line && strings.contains(e.msg, "quote ") && !strings.contains(e.msg, "malformed"), "%q: %v", c.src, err)
+	}
+	// Each 7.3.3 rule names itself, so `fd00::` says what to fix.
+	for c in ([][2]string{{"a: fd00::\n", "end in"}, {"a: b: c\n", "hold `: `"}, {"a: [a[b]]\n", "bracket"}}) {
+		_, err := parse(c[0], context.temp_allocator)
+		e, _ := err.?
+		testing.expectf(t, strings.contains(e.msg, c[1]), "%q: %v", c[0], err)
+	}
+	// A quote left unescaped inside a quoted scalar ends it, and a `,` that
+	// separates nothing is no more YAML than one that starts a plain scalar;
+	// two entries need one between them.
+	for src in ([]string{"a: \"x\" \"y\"\n", "a: 'x' 'y'\n", "a: '''\n", "a: [\"x\" \"y\"]\n", "a: {k: 'x' 'y'}\n", "a: [,x]\n", "a: [x,,y]\n", "a: [ ,]\n", "a: {, k: v}\n", "a: [x,\t,y]\n", "a: [[a] [b]]\n"}) {
+		_, err := parse(src, context.temp_allocator)
+		testing.expectf(t, err != nil, "%q parsed", src)
+	}
+	// A trailing `,` is.
+	trail, terr := parse("a: [x, ]\nb: {k: v,}\n", context.temp_allocator)
+	testing.expectf(t, terr == nil && len(items(at(trail, "a"))) == 1 && len(keys(at(trail, "b"))) == 1, "trailing comma: %v", terr)
+	// Each indicator is fine quoted, inside a scalar, and where 7.3.3 lets
+	// `-`, `?` and `:` lead.
+	root, err := parse("a: \"*.lan\"\nb: '&f'\nc: x*y&z!\nd: -1\ne: ?x\nf: :x\ng: [-1, ?x, \"!t\"]\nh: -[x]\n", context.temp_allocator)
+	testing.expectf(t, err == nil, "parse failed: %v", err)
+	for want in ([][2]string{{"a", "*.lan"}, {"b", "&f"}, {"c", "x*y&z!"}, {"d", "-1"}, {"e", "?x"}, {"f", ":x"}, {"h", "-[x]"}}) {
+		v, _ := as_string(at(root, want[0]))
+		testing.expectf(t, v == want[1], "%s: %q", want[0], v)
+	}
+	// A `:` with no space after it is text, a key may end in one, and a
+	// doubled or escaped quote stays inside its scalar.
+	more, merr := parse("a:: v\nb: 12:30\nc: [fe80::1, \"::\"]\nd: 'it''s'\ne: \"say \\\"hi\\\"\"\n", context.temp_allocator)
+	testing.expectf(t, merr == nil, "parse failed: %v", merr)
+	for want in ([][2]string{{"a:", "v"}, {"b", "12:30"}, {"d", "it's"}, {"e", "say \"hi\""}}) {
+		v, _ := as_string(at(more, want[0]))
+		testing.expectf(t, v == want[1], "%s: %q", want[0], v)
+	}
+	c, cok := as_string_list(at(more, "c"), context.temp_allocator)
+	testing.expectf(t, cok && len(c) == 2 && c[0] == "fe80::1" && c[1] == "::", "c: %v", c)
+	// A quote inside a plain scalar is text, and hides neither a comment, a
+	// key's `: ` nor a flow `,` behind it (YAML 1.2.2 sections 7.3.1-7.3.3).
+	// A quote after `:` and a tab, or after a flow `,`, opens one, `''` does
+	// not close it, and a stray closer leaves the depth at zero.
+	mid, mderr := parse("a: don't # c\nb: 5\" # c\nc: [x'y, z]\ndon't: x\ne: x 'y # c\nf: x - 'y # c'\ng:\t'x # y'\nh: [x, 'y # z']\ni: 'it''s # x'\nj]: v\n", context.temp_allocator)
+	testing.expectf(t, mderr == nil, "parse failed: %v", mderr)
+	hl, hok := as_string_list(at(mid, "h"), context.temp_allocator)
+	testing.expectf(t, hok && len(hl) == 2 && hl[1] == "y # z", "h: %v", hl)
+	for want in ([][2]string{{"a", "don't"}, {"b", "5\""}, {"don't", "x"}, {"e", "x 'y"}, {"f", "x - 'y"}, {"g", "x # y"}, {"i", "it's # x"}, {"j]", "v"}}) {
+		v, _ := as_string(at(mid, want[0]))
+		testing.expectf(t, v == want[1], "%s: %q", want[0], v)
+	}
+	mc, mcok := as_string_list(at(mid, "c"), context.temp_allocator)
+	testing.expectf(t, mcok && len(mc) == 2 && mc[0] == "x'y" && mc[1] == "z", "c: %v", mc)
+	seq, serr := parse("- 'a # b'\n- [\"x, y\", z]\n", context.temp_allocator)
+	testing.expectf(t, serr == nil && len(items(seq)) == 2, "quoted entries: %v", serr)
+	if serr == nil && len(items(seq)) == 2 {
+		v, _ := as_string(items(seq)[0])
+		testing.expectf(t, v == "a # b", "entry: %q", v)
+		testing.expect_value(t, len(items(items(seq)[1])), 2)
+	}
+	g, gok := as_string_list(at(root, "g"), context.temp_allocator)
+	testing.expectf(t, gok && len(g) == 3 && g[0] == "-1" && g[1] == "?x" && g[2] == "!t", "g: %v", g)
+	free_all(context.temp_allocator)
+}

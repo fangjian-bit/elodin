@@ -221,6 +221,18 @@ run_cli_cases :: proc(r: ^Runner) {
 	}
 	end_case(r)
 
+	// YAML reads `*.lan` as an alias (1.2.2 section 7.3.3), so a file holding
+	// it unquoted means something else to every other YAML reader.
+	start_case(r, "cli: a plain value starting with a YAML indicator is refused")
+	{
+		path := filepath.join({r.work_dir, "indicator.yaml"}, context.temp_allocator) or_else ""
+		_ = os.write_entire_file(path, transmute([]u8)string("upstream:\n  servers: [1.1.1.1]\nrewrites:\n  - domain: *.lan\n    answer: 192.168.1.10\n"))
+		res := new_check(r, path, "check-yaml-indicator")
+		check(r, res.exit_code != 0, "an unquoted *.lan exited 0: %q", res.output)
+		check(r, strings.contains(res.output, "line 4") && strings.contains(res.output, "quote"), "the line and the remedy were not given: %q", res.output)
+	}
+	end_case(r)
+
 	start_case(r, "cli: a DoT listener without a certificate is refused")
 	{
 		path := filepath.join({r.work_dir, "nocert.yaml"}, context.temp_allocator) or_else ""
