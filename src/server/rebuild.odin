@@ -74,10 +74,9 @@ rebuild_collect :: proc(r: ^Rebuild) -> (current, over: bool) {
 	if !rebuild_done(r) {
 		return
 	}
-	if r.thread != nil {
-		thread.join(r.thread)
-		thread.destroy(r.thread)
-	}
+	// `done` is set only by a thread `rebuild_start` started.
+	thread.join(r.thread)
+	thread.destroy(r.thread)
 	current = r.current
 	r^ = {}
 	return current, true

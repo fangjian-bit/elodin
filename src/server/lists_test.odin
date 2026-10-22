@@ -702,6 +702,37 @@ test_an_empty_download_with_no_copy_does_not_hold_the_others_back :: proc(t: ^te
 }
 
 @(test)
+test_a_disabled_entry_does_not_lend_its_source_a_history :: proc(t: ^testing.T) {
+	/*
+	`lists_loaded` is keyed by where a list comes from, and two entries for one
+	url are one list. A disabled one adds nothing, so it says nothing about
+	whether that source's rules are in effect: an enabled entry that never
+	loaded holds nothing back when it is unavailable again.
+	*/
+	cfg := config.default_config()
+	cfg.blocking.cache_dir = "/nonexistent/elodin-lists-test-disabled-twin"
+	cfg.blocking.refresh = 0
+	url := "http://127.0.0.1:1/twin.txt"
+	cfg.blocking.lists = []config.Block_List {
+		{name = "twin", url = url, format = .Hosts, enabled = true},
+		{name = "twin-off", url = url, format = .Hosts, enabled = false},
+	}
+	engine := filter.engine_make()
+	defer filter.engine_destroy(engine)
+	s := Server {
+		cfg     = &cfg,
+		filters = engine,
+	}
+	defer delete(s.lists_loaded)
+
+	testing.expect(t, !reload_filters(&s, true), "an unreachable list was reported current")
+	testing.expect(t, !s.lists_loaded[list_key(cfg.blocking.lists[0], false)], "a list that never loaded was recorded as loaded")
+	generation := filter.engine_generation(engine)
+	reload_filters(&s, true)
+	testing.expect(t, filter.engine_generation(engine) != generation, "a list that never loaded held the refresh back")
+}
+
+@(test)
 test_an_empty_cached_copy_is_not_a_list :: proc(t: ^testing.T) {
 	// An empty download an earlier build cached, or a copy its in-place write
 	// truncated before a crash.

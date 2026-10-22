@@ -480,19 +480,12 @@ threads_taking_signals :: proc(pid: int) -> (main_takes: bool, others, taking: i
 		return
 	}
 	for e in entries {
-		data, rerr := os.read_entire_file(fmt.tprintf("/proc/%d/task/%s/status", pid, e.name), context.temp_allocator)
-		if rerr != nil {
+		mask, read := proc_status_field(fmt.tprintf("/proc/%d/task/%s/status", pid, e.name), "SigBlk")
+		if !read {
 			continue // a thread that has just ended
 		}
-		text := string(data)
-		blocked: u64
-		found := false
-		for line in strings.split_lines_iterator(&text) {
-			if strings.has_prefix(line, "SigBlk:") {
-				blocked, found = strconv.parse_u64_of_base(strings.trim_space(line[len("SigBlk:"):]), 16)
-			}
-		}
-		if !found {
+		blocked, parsed := strconv.parse_u64_of_base(mask, 16)
+		if !parsed {
 			return
 		}
 		takes := blocked & STOP_AND_RELOAD_MASK != STOP_AND_RELOAD_MASK

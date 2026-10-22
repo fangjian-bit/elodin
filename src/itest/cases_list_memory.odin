@@ -124,17 +124,8 @@ blocking:
 
 @(private = "file")
 rss_kib :: proc(pid: int) -> (kib: int, ok: bool) {
-	data, err := os.read_entire_file(fmt.tprintf("/proc/%d/status", pid), context.temp_allocator)
-	if err != nil {
-		return
-	}
-	text := string(data)
-	for line in strings.split_lines_iterator(&text) {
-		if strings.has_prefix(line, "VmRSS:") {
-			return strconv.parse_int(strings.trim_space(strings.trim_suffix(line[len("VmRSS:"):], "kB")))
-		}
-	}
-	return
+	value := proc_status_field(fmt.tprintf("/proc/%d/status", pid), "VmRSS") or_return
+	return strconv.parse_int(strings.trim_space(strings.trim_suffix(value, "kB")))
 }
 
 /*

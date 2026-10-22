@@ -25,7 +25,8 @@ FETCH_TIMEOUT :: 30 * time.Second
 /*
 The whole download, redirects included (#445): `FETCH_TIMEOUT` bounds one read,
 and a host sending a little just inside it could otherwise hold the refresh -
-and every refresh and reload after it, which wait for it (see `Rebuild`) - for
+and every rebuild after it, a reload's change to the rules included, which
+waits for it (see `Rebuild`) - for
 as long as the body limit allows.
 Five minutes is a 64 MB list, the most `fetch_url` accepts, at under 2 Mbit/s.
 */
@@ -643,8 +644,12 @@ reload_filters :: proc(s: ^Server, allow_network: bool) -> (current: bool) {
 	clear(&s.lists_loaded)
 	for load, i in loads {
 		list := live(s).cfg.blocking.lists[i] if i < lists else live(s).cfg.blocking.allow_lists[i - lists]
-		// An empty list contributed nothing, so it has nothing to keep later.
-		s.lists_loaded[list_key(list, i >= lists)] = load == .Current || load == .Stale
+		// An empty or disabled list contributed nothing, so it has nothing to
+		// keep later. Only a load is recorded: two entries for one source share
+		// a key, and the one that loaded is the one whose rules are in effect.
+		if list.enabled && (load == .Current || load == .Stale) {
+			s.lists_loaded[list_key(list, i >= lists)] = true
+		}
 	}
 	delete(loads)
 
