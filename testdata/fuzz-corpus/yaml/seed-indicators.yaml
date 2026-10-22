@@ -1,0 +1,7 @@
+log:
+  file: &f /tmp/x.log
+rewrites:
+  - domain: *.lan
+    answer: !!str x
+flow: [-1, ?x, *a, {k: &x v}, -[x], "!t"]
+key: -[x]

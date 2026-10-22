@@ -15,18 +15,12 @@ indicators), and comments.
 Not supported: anchors and aliases, tags, multiple documents in one stream,
 complex (?) keys, and multi-line plain scalars.
 
-Two of those are refused, and the other three are not, which is worth knowing
-before trusting a file this parser accepted. A complex `?` key and a multi-line
-plain scalar are refused: neither fits the "one key, one value, indentation
-decides nesting" shape every line is read against, so both come back as a parse
-error naming their line.
-
-Anchors, aliases and tags are not recognised at all. There is no syntax for them
-here, so `&name`, `*name` and `!!tag` are read as part of the plain scalar they
-sit in - `file: &f /tmp/x.log` yields the literal value `&f /tmp/x.log`, spaces
-and all. That surfaces as an error only when the value goes on to fail a typed
-conversion in `config`, which is where `level: &lvl warn` is caught; on a
-string-typed key it is accepted as written.
+All but multiple documents are refused, as a parse error naming their line. A
+complex `?` key and a multi-line plain scalar do not fit the "one key, one
+value, indentation decides nesting" shape every line is read against. Anchors,
+aliases and tags start with an indicator no plain scalar may start with (YAML
+1.2.2 section 7.3.3), so `file: &f /tmp/x.log` and `domain: *.lan` are refused
+by `plain_first_ok` rather than read as the text they hold.
 
 Document markers are skipped rather than acted on: `scan_lines` drops any line
 that is exactly `---` or `...`, so a file holding several documents is read as
@@ -35,9 +29,6 @@ like any other key written twice; keys it does not repeat are added to the
 first document's rather than rejected. That is the one case where the reading
 differs from YAML's without saying so, and it is kept because a leading `---`
 is common and harmless in a single-document file.
-
-A parser this size is the right trade for one configuration file, but "it
-parsed" is not "it means what YAML says it means" for the three above.
 */
 
 Kind :: enum u8 {
@@ -654,7 +645,7 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 		item := strings.trim_space(text[start:i])
 
 		if is_seq {
-			value, bad := unquote_scalar(p, item, line_num)
+			value, bad := unquote_scalar(p, item, line_num, flow = true)
 			if bad {
 				return nil, 0, false
 			}
@@ -662,7 +653,7 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 			append(&node.seq, new_scalar(p, value, quoted, line_num))
 		} else {
 			colon := find_key_colon(item) or_return
-			key, kbad := unquote_scalar(p, strings.trim_space(item[:colon]), line_num)
+			key, kbad := unquote_scalar(p, strings.trim_space(item[:colon]), line_num, flow = true)
 			if kbad {
 				return nil, 0, false
 			}
@@ -686,7 +677,7 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 				continue
 			}
 
-			value, vbad := unquote_scalar(p, val_text, line_num)
+			value, vbad := unquote_scalar(p, val_text, line_num, flow = true)
 			if vbad {
 				return nil, 0, false
 			}
@@ -731,8 +722,33 @@ find_key_colon :: proc(s: string) -> (idx: int, ok: bool) {
 	return 0, false
 }
 
+// YAML 1.2.2 section 7.3.3 (ns-plain-first): a plain scalar may not start with
+// a c-indicator, and may start with `-`, `?` or `:` only when a character it
+// could hold follows, which in a flow collection excludes the flow indicators.
+// This parser has no anchors, aliases, tags or directives, so a plain `&f x` or
+// `*.lan` - an anchor and an alias to every other YAML reader - is refused with
+// its line rather than read as text.
 @(private)
-unquote_scalar :: proc(p: ^Parser, s: string, line_num: int) -> (out: string, bad: bool) {
+plain_first_ok :: proc(s: string, flow: bool) -> bool {
+	switch s[0] {
+	case '-', '?', ':':
+		if len(s) < 2 || s[1] == ' ' || s[1] == '\t' {
+			return false
+		}
+		return !flow || strings.index_byte(",[]{}", s[1]) < 0
+	case ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`':
+		return false
+	}
+	return true
+}
+
+@(private)
+unquote_scalar :: proc(p: ^Parser, s: string, line_num: int, flow := false) -> (out: string, bad: bool) {
+	// A lone quote is no quoted scalar, so it lands here with the rest.
+	if len(s) > 0 && (len(s) < 2 || (s[0] != '\'' && s[0] != '"')) && !plain_first_ok(s, flow) {
+		fail(p, line_num, strings.concatenate({"a plain value may not start with \"", s[:1], "\" (YAML 1.2.2 section 7.3.3): quote it"}, p.allocator))
+		return "", true
+	}
 	if len(s) < 2 {
 		return s, false
 	}

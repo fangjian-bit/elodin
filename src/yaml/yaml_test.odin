@@ -832,3 +832,56 @@ test_duplicate_keys_are_refused :: proc(t: ^testing.T) {
 	}
 	free_all(context.temp_allocator)
 }
+
+/*
+YAML 1.2.2 section 7.3.3 (ns-plain-first): a plain scalar may not start with a
+c-indicator, and `-`, `?` and `:` only when a non-space follows. A conforming
+parser reads `&f x` as an anchor and `*.lan` as an alias, so taking either as
+text would give the file a meaning no other YAML reader gives it.
+*/
+@(test)
+test_a_plain_scalar_may_not_start_with_an_indicator :: proc(t: ^testing.T) {
+	for c in ([]struct {
+			src:  string,
+			line: int,
+		} {
+			{"log:\n  file: &f /tmp/x.log\n", 2},
+			{"rewrites:\n  - domain: *.lan\n", 2},
+			{"a: !!str x\n", 1},
+			{"a: %x\n", 1},
+			{"a: @x\n", 1},
+			{"a: `x\n", 1},
+			{"a: ,x\n", 1},
+			{"a: ]x\n", 1},
+			{"a: }x\n", 1},
+			{"a: \"\n", 1},
+			{"a: '\n", 1},
+			{"a: ? x\n", 1},
+			{"a: ?\n", 1},
+			{"a: :\n", 1},
+			{"a: - x\n", 1},
+			{"a: -\n", 1},
+			{"- *x\n", 1},
+			{"&a key: v\n", 1},
+			{"? key: v\n", 1},
+			{"a: [1, *x]\n", 1},
+			{"a: [|x]\n", 1},
+			{"a: [#x]\n", 1},
+			{"a: [-[x]]\n", 1},
+			{"a: {k: &x v}\n", 1},
+			{"a: {!t k: v}\n", 1},
+		}) {
+		_, err := parse(c.src, context.temp_allocator)
+		e, has := err.?
+		testing.expectf(t, has && e.line == c.line && strings.contains(e.msg, "quote"), "%q: %v", c.src, err)
+	}
+	// Each indicator is fine quoted, inside a scalar, and where 7.3.3 lets
+	// `-`, `?` and `:` lead.
+	root, err := parse("a: \"*.lan\"\nb: '&f'\nc: x*y&z!\nd: -1\ne: ?x\nf: :x\ng: [-1, ?x, \"!t\"]\nh: -[x]\n", context.temp_allocator)
+	testing.expectf(t, err == nil, "parse failed: %v", err)
+	for want in ([][2]string{{"a", "*.lan"}, {"b", "&f"}, {"c", "x*y&z!"}, {"d", "-1"}, {"e", "?x"}, {"f", ":x"}, {"h", "-[x]"}}) {
+		v, _ := as_string(at(root, want[0]))
+		testing.expectf(t, v == want[1], "%s: %q", want[0], v)
+	}
+	free_all(context.temp_allocator)
+}
