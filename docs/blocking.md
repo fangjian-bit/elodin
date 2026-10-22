@@ -101,6 +101,8 @@ digits, `-`, `_` and `.` become `_` in the file name, so `a/b` and `a_b` share o
 | `/^ads[0-9]+\.foo\.com$/`  | names the regex matches          |
 
 - Allow rules always win.
+- In `blocking.rules` and `blocking.allow`, quote each rule: a leading `*`,
+  `@`, `|` or `!` is YAML syntax, and the file is refused with it unquoted.
 - `format: auto`, the default, reads the list's first 50 lines that are
   neither blank nor a `#` comment. A `[Adblock` header, a `!` comment, a `@@`,
   `address=/` or `server=/` prefix, or a `||` ahead of any `#` or `!` makes

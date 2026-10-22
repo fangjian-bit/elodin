@@ -479,7 +479,7 @@ parse_block_scalar :: proc(p: ^Parser, header: string, indent: int, line_num: in
 	// invalid YAML and is rejected here rather than misread, `|+x` as `|+`
 	// with the trailing byte dropped.
 	if !is_block_header(header) {
-		return fail(p, line_num, "unsupported block scalar indicator")
+		return fail(p, line_num, "unsupported block scalar header: a block scalar opens with `|` or `>` and at most one of `-` or `+`; quote a value that starts with either")
 	}
 	folded := header[0] == '>'
 	chomp := byte(0)
@@ -571,7 +571,7 @@ parse_flow_or_scalar :: proc(p: ^Parser, text: string, line_num: int) -> ^Node {
 	if bad {
 		return fail(p, line_num, "malformed quoted scalar")
 	}
-	quoted := len(text) >= 2 && (text[0] == '"' || text[0] == '\'')
+	quoted := is_quoted(text)
 	return new_scalar(p, value, quoted, line_num)
 }
 
@@ -587,9 +587,12 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 	is_seq := text[0] == '['
 	node = new_sequence(p, line_num) if is_seq else new_mapping(p, line_num)
 
+	// Entries are separated by exactly one `,`, and one may trail the last:
+	// `[,x]`, `[x,,y]` and `[[a] [b]]` are not YAML.
 	i := 1
+	want_entry := true
 	for {
-		for i < len(text) && (text[i] == ' ' || text[i] == ',') {
+		for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
 			i += 1
 		}
 		if i >= len(text) {
@@ -598,6 +601,18 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 		if text[i] == closing {
 			return node, i + 1, true
 		}
+		if text[i] == ',' {
+			if want_entry {
+				return nil, 0, false
+			}
+			want_entry = true
+			i += 1
+			continue
+		}
+		if !want_entry {
+			return nil, 0, false
+		}
+		want_entry = false
 		// Any other bracket here closes a collection this one never opened, as
 		// in `[1, 2}`. It has to be rejected on the spot: the item scanner
 		// below stops on a closer without consuming it, so leaving it would
@@ -649,7 +664,7 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 			if bad {
 				return nil, 0, false
 			}
-			quoted := len(item) >= 2 && (item[0] == '"' || item[0] == '\'')
+			quoted := is_quoted(item)
 			append(&node.seq, new_scalar(p, value, quoted, line_num))
 		} else {
 			colon := find_key_colon(item) or_return
@@ -681,7 +696,7 @@ parse_flow :: proc(p: ^Parser, text: string, line_num: int) -> (node: ^Node, con
 			if vbad {
 				return nil, 0, false
 			}
-			quoted := len(val_text) >= 2 && (val_text[0] == '"' || val_text[0] == '\'')
+			quoted := is_quoted(val_text)
 			node.fields[key] = new_scalar(p, value, quoted, line_num)
 		}
 	}
@@ -742,14 +757,20 @@ plain_first_ok :: proc(s: string, flow: bool) -> bool {
 	return true
 }
 
+// Whether `s` is written as a quoted scalar, which is what sets a node's
+// `quoted`. A lone quote is not one, so it is checked as a plain scalar.
+@(private)
+is_quoted :: proc(s: string) -> bool {
+	return len(s) >= 2 && (s[0] == '"' || s[0] == '\'')
+}
+
 @(private)
 unquote_scalar :: proc(p: ^Parser, s: string, line_num: int, flow := false) -> (out: string, bad: bool) {
-	// A lone quote is no quoted scalar, so it lands here with the rest.
-	if len(s) > 0 && (len(s) < 2 || (s[0] != '\'' && s[0] != '"')) && !plain_first_ok(s, flow) {
-		fail(p, line_num, strings.concatenate({"a plain value may not start with \"", s[:1], "\" (YAML 1.2.2 section 7.3.3): quote it"}, p.allocator))
-		return "", true
-	}
-	if len(s) < 2 {
+	if !is_quoted(s) {
+		if len(s) > 0 && !plain_first_ok(s, flow) {
+			fail(p, line_num, strings.concatenate({"a plain scalar may not start with `", s[:1], "` (YAML 1.2.2 section 7.3.3): quote it"}, p.allocator))
+			return "", true
+		}
 		return s, false
 	}
 	switch s[0] {

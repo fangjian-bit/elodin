@@ -870,11 +870,22 @@ test_a_plain_scalar_may_not_start_with_an_indicator :: proc(t: ^testing.T) {
 			{"a: [-[x]]\n", 1},
 			{"a: {k: &x v}\n", 1},
 			{"a: {!t k: v}\n", 1},
+			{"a: |x\n", 1},
+			{"- >x\n", 1},
 		}) {
 		_, err := parse(c.src, context.temp_allocator)
 		e, has := err.?
 		testing.expectf(t, has && e.line == c.line && strings.contains(e.msg, "quote"), "%q: %v", c.src, err)
 	}
+	// A `,` that separates nothing is no more YAML than one that starts a
+	// plain scalar, and two entries need one between them.
+	for src in ([]string{"a: [,x]\n", "a: [x,,y]\n", "a: [ ,]\n", "a: {, k: v}\n", "a: [x,\t,y]\n", "a: [[a] [b]]\n"}) {
+		_, err := parse(src, context.temp_allocator)
+		testing.expectf(t, err != nil, "%q parsed", src)
+	}
+	// A trailing `,` is.
+	trail, terr := parse("a: [x, ]\nb: {k: v,}\n", context.temp_allocator)
+	testing.expectf(t, terr == nil && len(items(at(trail, "a"))) == 1 && len(keys(at(trail, "b"))) == 1, "trailing comma: %v", terr)
 	// Each indicator is fine quoted, inside a scalar, and where 7.3.3 lets
 	// `-`, `?` and `:` lead.
 	root, err := parse("a: \"*.lan\"\nb: '&f'\nc: x*y&z!\nd: -1\ne: ?x\nf: :x\ng: [-1, ?x, \"!t\"]\nh: -[x]\n", context.temp_allocator)
@@ -883,5 +894,7 @@ test_a_plain_scalar_may_not_start_with_an_indicator :: proc(t: ^testing.T) {
 		v, _ := as_string(at(root, want[0]))
 		testing.expectf(t, v == want[1], "%s: %q", want[0], v)
 	}
+	g, gok := as_string_list(at(root, "g"), context.temp_allocator)
+	testing.expectf(t, gok && len(g) == 3 && g[0] == "-1" && g[1] == "?x" && g[2] == "!t", "g: %v", g)
 	free_all(context.temp_allocator)
 }
