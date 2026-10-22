@@ -133,9 +133,9 @@ operator waits on a service that has already been told to go - or, for
 `Reload`, on a certificate that is already sitting on disk waiting to be
 picked up. `Reload` cuts the wait short rather than sitting out the rest of
 the tick, which otherwise could be the better part of `TICK`, and so does
-`Rebuilt`, as a reload may be waiting on the rebuild. `Rebuilt` comes before
-`Reload`, so a SIGHUP that lands as a rebuild ends finds it collected rather
-than waits for it.
+`Rebuilt`, as a reload may have asked for another. `Rebuilt` comes before
+`Reload`, so a SIGHUP that lands as a rebuild ends finds it collected and starts
+its own at once.
 */
 @(private)
 wait_for_tick :: proc(tick: time.Duration, rebuild: ^server.Rebuild) -> Wait_Outcome {
@@ -787,8 +787,11 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 	*/
 	abandoned := false
 	defer if abandoned {
-		logx.infof("blocklists: not waiting for the rebuild in progress")
-		os.exit(0)
+		// One that ended during the drain is joined, and the defers above run.
+		if _, over := server.rebuild_collect(&rebuild); !over {
+			logx.infof("blocklists: not waiting for the rebuild in progress")
+			os.exit(0)
+		}
 	}
 
 	listeners: server.Listeners
@@ -974,8 +977,9 @@ Maintenance :: struct {
 	// The running rebuild is the one a reload asked for, which starts the
 	// retries afresh; a refresh's goes on from `retry`.
 	after_reload:   bool,
-	// A SIGHUP's configuration, read once the running rebuild is over.
-	reload_waiting: bool,
+	// A reload changed the rules while a rebuild ran under the configuration
+	// before it: another follows once that one is over.
+	rebuild_again:  bool,
 	last_refresh:   time.Time,
 	// Zero while the lists are current; otherwise the wait before the next
 	// attempt, which `refresh_retry` stretches on each failure (#411).
@@ -992,12 +996,13 @@ What SIGHUP asks for, in the order an operator would want it.
 
 The log first, so everything the reload says lands where logrotate expects it:
 `logrotate` renames the file and sends the signal, and this is what opens the
-name again. Then the certificates, read from the paths the process started with -
-whether or not the rest of the file is usable, since a renewal that happens to
-coincide with a typo in the file is still a renewal. Then the configuration,
-which may move the log somewhere else and says so; while a rebuild of the rules
-runs, that waits for it to be over (see `server.reload_config`), and a second
-SIGHUP meanwhile asks for the same.
+name again. Then the configuration, which may move the log somewhere else and
+says so. The certificates last, read from the paths the process started with -
+whether or not the rest of the file was usable, since a renewal that happens to
+coincide with a typo in the file is still a renewal.
+
+None of it waits for a rebuild of the rules in progress. One the configuration
+asks for starts once that is over; see `collect`.
 */
 @(private)
 reload :: proc(s: ^server.Server, listeners: ^server.Listeners, opts: Options, m: ^Maintenance) {
@@ -1008,19 +1013,6 @@ reload :: proc(s: ^server.Server, listeners: ^server.Listeners, opts: Options, m
 		logx.warnf("cannot open the log file %q again; logging where it was", file)
 	}
 
-	// From the paths the process started with, which need no pin.
-	server.reload_tls(s, listeners)
-
-	if server.rebuild_busy(m.rebuild) {
-		logx.infof("reload: a rebuild of the blocklists is running; the configuration is read once it is over")
-		m.reload_waiting = true
-		return
-	}
-	reload_configuration(s, opts, m)
-}
-
-@(private)
-reload_configuration :: proc(s: ^server.Server, opts: Options, m: ^Maintenance) {
 	out := server.reload_config(s, opts.config_path)
 	if out.applied {
 		server.pin(s)
@@ -1028,13 +1020,21 @@ reload_configuration :: proc(s: ^server.Server, opts: Options, m: ^Maintenance) 
 		server.unpin(s)
 	}
 	if out.blocking {
-		m.after_reload = true
-		server.rebuild_start(m.rebuild, s, !opts.no_fetch)
+		if server.rebuild_busy(m.rebuild) {
+			logx.infof("reload: the rules are rebuilt once the rebuild in progress is over")
+			m.rebuild_again = true
+		} else {
+			m.after_reload = true
+			server.rebuild_start(m.rebuild, s, !opts.no_fetch)
+		}
 	}
+
+	// From the paths the process started with, which need no pin.
+	server.reload_tls(s, listeners)
 }
 
-// Take in a rebuild that is over, and read a configuration a SIGHUP left
-// waiting for it.
+// Take in a rebuild that is over, and start the one a reload asked for
+// meanwhile.
 @(private)
 collect :: proc(s: ^server.Server, opts: Options, m: ^Maintenance) {
 	current, over := server.rebuild_collect(m.rebuild)
@@ -1051,9 +1051,10 @@ collect :: proc(s: ^server.Server, opts: Options, m: ^Maintenance) {
 		logx.warnf("blocklists: not every list is current; trying again in %v", m.retry)
 	}
 	m.after_reload = false
-	if m.reload_waiting {
-		m.reload_waiting = false
-		reload_configuration(s, opts, m)
+	if m.rebuild_again {
+		m.rebuild_again = false
+		m.after_reload = true
+		server.rebuild_start(m.rebuild, s, !opts.no_fetch)
 	}
 }
 

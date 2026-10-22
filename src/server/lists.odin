@@ -632,7 +632,7 @@ reload_filters :: proc(s: ^Server, allow_network: bool) -> (current: bool) {
 			continue
 		}
 		current = false
-		if load == .Unavailable && s.lists_loaded != nil && s.lists_loaded[i] {
+		if load == .Unavailable && s.lists_loaded[list_key(list, i >= lists)] {
 			logx.warnf("list %s: loaded before and unavailable now; keeping the rules already in effect", list.name)
 			filter.set_destroy(block)
 			filter.set_destroy(allow)
@@ -640,12 +640,11 @@ reload_filters :: proc(s: ^Server, allow_network: bool) -> (current: bool) {
 			return false
 		}
 	}
-	if s.lists_loaded == nil {
-		s.lists_loaded = make([]bool, len(loads))
-	}
+	clear(&s.lists_loaded)
 	for load, i in loads {
+		list := live(s).cfg.blocking.lists[i] if i < lists else live(s).cfg.blocking.allow_lists[i - lists]
 		// An empty list contributed nothing, so it has nothing to keep later.
-		s.lists_loaded[i] = load == .Current || load == .Stale
+		s.lists_loaded[list_key(list, i >= lists)] = load == .Current || load == .Stale
 	}
 	delete(loads)
 
@@ -671,6 +670,15 @@ reload_filters :: proc(s: ^Server, allow_network: bool) -> (current: bool) {
 	// rebuild swaps the sets, one at a time, so these are still the ones in effect.
 	log_filter_sets(block, allow)
 	return
+}
+
+/*
+A list as `lists_loaded` knows it: where it is fetched from, and which kind of
+list it is. A list keeps its history wherever a reload moves it, and a new one
+starts with none, which is what it would have at startup.
+*/
+list_key :: proc(list: config.Block_List, allow: bool) -> u64 {
+	return hash.fnv64a(transmute([]byte)fmt.tprintf("%v\x00%s\x00%s", allow, list.url, list.file))
 }
 
 /*

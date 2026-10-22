@@ -413,23 +413,28 @@ run_list_refresh_signal_cases :: proc(r: ^Runner) {
 				"    - {{ name: stalled-list, url: \"http://127.0.0.1:%d/hosts.txt\", format: hosts }}\nrewrites:\n  - {{ domain: during.test, answer: 192.0.2.7 }}\n",
 				stalled_port,
 			)
+			// Applied at once, its rule change left for after the refresh.
 			check(
 				r,
-				reload_to(r, &srv, config_for_refresh_signals(udp_port, upstream_port, http_port, added), "SIGHUP received", 3 * time.Second),
-				"SIGHUP waited for the refresh",
+				reload_to(r, &srv, config_for_refresh_signals(udp_port, upstream_port, http_port, added), "changed=blocking,rewrites", 3 * time.Second),
+				"the reload waited for the refresh",
 			)
-			check(r, wait_for_log(&srv, "the configuration is read once it is over", 2 * time.Second), "the reload did not wait for the rebuild")
+			check(r, log_contains(&srv, "rebuilt once the rebuild in progress is over"), "the reload's rebuild did not wait for the refresh")
 			check(r, !log_contains(&srv, "download failed"), "SIGHUP cut the download short")
+			if res := query_udp(udp_port, build_query("during.test.", u16(dns.Type.A))); check(r, res.ok, "no response during the refresh") {
+				addrs := answer_addresses(r, res.wire)
+				check(r, len(addrs) == 1 && addrs[0] == "192.0.2.7", "the reloaded rewrite is not in effect during the refresh: %v", addrs)
+			}
 			res := query_udp(udp_port, build_query("refreshed.test.", u16(dns.Type.A)))
 			if check(r, res.ok, "no response during the refresh") {
 				h := parse_header(r, res.wire)
 				check(r, h.rcode == int(dns.Rcode.NX_Domain), "the list's rules are not in effect during the refresh")
 			}
 
-			// The refresh fails, and the configuration waiting for it is read:
-			// its rebuild then waits on the added list.
+			// The refresh fails, and the rebuild the reload asked for starts:
+			// it waits on the added list.
+			check(r, !log_contains(&srv, "list stalled-list: downloading"), "the reload's rebuild ran beside the refresh")
 			net.close(silent)
-			check(r, wait_for_log(&srv, "changed=blocking,rewrites", 5 * time.Second), "the waiting configuration was not read")
 			check(r, wait_for_log(&srv, "list stalled-list: downloading", 5 * time.Second), "the reload's rebuild did not download the added list")
 			time.sleep(300 * time.Millisecond)
 

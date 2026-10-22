@@ -37,10 +37,10 @@ whole reload over a listener address would leave an operator choosing between
 their rewrites and a restart they did not want yet. See `keep_restart_only`.
 
 Runs on the maintenance thread, which is the only one that swaps or releases a
-generation, and must not be called with a generation pinned, nor while
-`rebuild_rules` runs: it moves `lists_loaded`, which a rebuild reads and writes.
-The rules are not rebuilt here, as a rebuild may download for minutes and the
-maintenance thread is where signals are acted on (#416).
+generation, and must not be called with a generation pinned. The rules are not
+rebuilt here, as a rebuild may download for minutes and the maintenance thread
+is where signals are acted on (#416); nor are they or their history touched, so
+it runs beside a rebuild, which reads the generation it pinned.
 */
 reload_config :: proc(s: ^Server, path: string) -> (out: Reload_Outcome) {
 	assert(pinned.server == nil, "reload_config runs with no generation pinned")
@@ -111,9 +111,6 @@ reload_config :: proc(s: ^Server, path: string) -> (out: Reload_Outcome) {
 
 	changed := changed_sections(cur.cfg, g.cfg, context.temp_allocator)
 	out.blocking = rules_changed(cur.cfg.blocking, g.cfg.blocking) || reads_list_files(g.cfg)
-	if out.blocking {
-		remap_lists_loaded(s, cur.cfg, g.cfg)
-	}
 	log_file_moved := g.cfg.log.file != cur.cfg.log.file
 
 	swap_generation(s, g, carried)
@@ -162,25 +159,22 @@ reads_list_files :: proc(cfg: ^config.Config) -> bool {
 /*
 Build the rule sets the current configuration asks for, or take them away.
 
-`lists_current` is `reload_filters`'s. `rules` says whether the sets in effect
-were replaced: not when a list that loaded before cannot be had now and
-`reload_filters` keeps the rules already in effect; the retry it schedules
-applies the change once the list is back.
+`lists_current` is `reload_filters`'s. A list that loaded before and cannot be
+had now leaves the rules already in effect, and the retry it schedules applies
+the change once the list is back.
 
-On any thread, one at a time, and not beside `reload_config`; see there.
+On any thread, one at a time.
 */
-rebuild_rules :: proc(s: ^Server, allow_network: bool) -> (lists_current, rules: bool) {
-	swapped := filter.engine_generation(s.filters)
+rebuild_rules :: proc(s: ^Server, allow_network: bool) -> (lists_current: bool) {
 	pin(s)
-	lists_current = true
-	if live(s).cfg.blocking.enabled {
-		lists_current = reload_filters(s, allow_network)
-	} else {
+	defer unpin(s)
+	if !live(s).cfg.blocking.enabled {
 		clear_filters(s)
+		// The line a rebuild ends with, as `reload_filters` logs its own.
+		logx.infof("filter: blocking is off; no rules in effect")
+		return true
 	}
-	unpin(s)
-	rules = filter.engine_generation(s.filters) != swapped
-	return
+	return reload_filters(s, allow_network)
 }
 
 /*
@@ -349,44 +343,6 @@ parts_text :: proc(parts: Parts, allocator := context.allocator) -> string {
 		return "none"
 	}
 	return strings.join(names[:], ",", allocator)
-}
-
-/*
-Carry each list's "loaded before" over to where it sits in the new
-configuration.
-
-`lists_loaded` is indexed by position, and a reload that adds or removes a list
-moves every position after it. A list is the same list if it is fetched from
-the same place, and only such a list keeps its history; a new one starts with
-none, which is what it would have at startup.
-*/
-@(private)
-remap_lists_loaded :: proc(s: ^Server, old, cfg: ^config.Config) {
-	if s.lists_loaded == nil {
-		return
-	}
-	fresh := make([]bool, len(cfg.blocking.lists) + len(cfg.blocking.allow_lists))
-	remap_kind(fresh[:len(cfg.blocking.lists)], cfg.blocking.lists, old.blocking.lists, s.lists_loaded[:len(old.blocking.lists)])
-	remap_kind(
-		fresh[len(cfg.blocking.lists):],
-		cfg.blocking.allow_lists,
-		old.blocking.allow_lists,
-		s.lists_loaded[len(old.blocking.lists):],
-	)
-	delete(s.lists_loaded)
-	s.lists_loaded = fresh
-}
-
-@(private)
-remap_kind :: proc(fresh: []bool, lists, old: []config.Block_List, was: []bool) {
-	for list, i in lists {
-		for o, j in old {
-			if o.url == list.url && o.file == list.file {
-				fresh[i] = was[j]
-				break
-			}
-		}
-	}
 }
 
 /*

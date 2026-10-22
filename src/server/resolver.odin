@@ -203,10 +203,12 @@ Server :: struct {
 	using live:   Live,
 	gens:         Generations,
 	filters:      ^filter.Engine,
-	// Which lists the rules in `filters` were built with, one slot per list as
-	// `build_filter_sets` numbers them; nil before the first load. The caller
-	// that built this `Server` frees it. See `reload_filters`.
-	lists_loaded: []bool,
+	// Which lists the rules in `filters` were built with, by `list_key`: by
+	// where a list comes from rather than its position, so a reload that adds,
+	// removes or moves lists leaves it as it is and never touches it beside a
+	// running rebuild. Nil before the first load. The caller that built this
+	// `Server` frees it. See `reload_filters`.
+	lists_loaded: map[u64]bool,
 	/*
 	What signs the Apple configuration profile, or nil when the DoH listener or
 	its profile endpoint is off.

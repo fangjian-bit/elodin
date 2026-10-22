@@ -100,7 +100,9 @@ reload_from :: proc(t: ^testing.T, f: ^Gen_Fixture, text: string) -> (out: Reloa
 	out.outcome = reload_config(&f.s, f.path)
 	out.lists_current = true
 	if out.blocking {
-		out.lists_current, out.rules = rebuild_rules(&f.s, false)
+		swapped := filter.engine_generation(f.s.filters)
+		out.lists_current = rebuild_rules(&f.s, false)
+		out.rules = filter.engine_generation(f.s.filters) != swapped
 	}
 	return
 }
@@ -539,38 +541,6 @@ dnssec:
 	b.rebind.allow_domains = []string{"other.example"}
 	b.blocking.rules = []string{"||ads.example^", "||more.example^"}
 	testing.expect_value(t, changed_sections(&a, &b, context.temp_allocator), "blocking,rebind")
-}
-
-@(test)
-test_a_lists_history_follows_it_to_its_new_position :: proc(t: ^testing.T) {
-	/*
-	`reload_filters` keeps the rules in effect when a list that loaded before is
-	unavailable now, and reads "loaded before" by position. A list added ahead
-	of it moves that position, so the history has to move with the list - and a
-	list that is new has none.
-	*/
-	old := config.default_config()
-	old.blocking.lists = []config.Block_List{{url = "http://a.example/l"}, {url = "http://b.example/l"}}
-	old.blocking.allow_lists = []config.Block_List{{file = "/etc/allow"}}
-	cfg := config.default_config()
-	cfg.blocking.lists = []config.Block_List{{url = "http://new.example/l"}, {url = "http://b.example/l"}, {url = "http://a.example/l"}}
-	cfg.blocking.allow_lists = []config.Block_List{{file = "/etc/allow"}}
-
-	s: Server
-	s.lists_loaded = make([]bool, 3)
-	s.lists_loaded[0] = true
-	s.lists_loaded[1] = false
-	s.lists_loaded[2] = true
-	defer delete(s.lists_loaded)
-
-	remap_lists_loaded(&s, &old, &cfg)
-	if !testing.expect_value(t, len(s.lists_loaded), 4) {
-		return
-	}
-	testing.expect_value(t, s.lists_loaded[0], false)
-	testing.expect_value(t, s.lists_loaded[1], false)
-	testing.expect_value(t, s.lists_loaded[2], true)
-	testing.expect_value(t, s.lists_loaded[3], true)
 }
 
 @(test)

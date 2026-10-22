@@ -13,8 +13,8 @@ the maintenance thread, where signals are acted on and housekeeping runs, that
 would hold a SIGTERM past an init system's stop timeout, which then kills the
 process undrained; and a signal the kernel handed that thread would cut the
 download it is in short, as a failed one. So the loop starts a rebuild here and
-goes on. One runs at a time, and `reload_config`, which moves the history a
-rebuild reads, waits for it.
+goes on. One runs at a time, under the generation it pinned; a reload meanwhile
+goes ahead, and the rebuild it asks for follows.
 
 Like every thread, it starts with the signals `main` acts on blocked, so the
 kernel hands them to a thread that is not downloading; see `pool.spawn`.
@@ -58,7 +58,7 @@ rebuild_thread :: proc(r: ^Rebuild) {
 rebuild_run :: proc(r: ^Rebuild) {
 	// The temp allocator is left alone: on the rebuild's thread it is destroyed
 	// with the thread, and on the caller's it may hold what the caller still uses.
-	r.current, _ = rebuild_rules(r.s, r.network)
+	r.current = rebuild_rules(r.s, r.network)
 	sync.atomic_store(&r.done, true)
 }
 
