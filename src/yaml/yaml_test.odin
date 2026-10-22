@@ -880,17 +880,23 @@ test_a_plain_scalar_may_not_start_with_an_indicator :: proc(t: ^testing.T) {
 			{"a: {k: v w: z}\n", 1},
 			{"a: [a[b]]\n", 1},
 			{"a: {k: v[x]}\n", 1},
-			{"a: \"x\" \"y\"\n", 1},
-			{"a: 'x' 'y'\n", 1},
-			{"a: '''\n", 1},
+			{"a: -\tx\n", 1},
 		}) {
 		_, err := parse(c.src, context.temp_allocator)
 		e, has := err.?
-		testing.expectf(t, has && e.line == c.line && strings.contains(e.msg, "quote"), "%q: %v", c.src, err)
+		// "quote it" or "quote a value", not the "quoted" of a generic message.
+		testing.expectf(t, has && e.line == c.line && strings.contains(e.msg, "quote ") && !strings.contains(e.msg, "malformed"), "%q: %v", c.src, err)
 	}
-	// A `,` that separates nothing is no more YAML than one that starts a
-	// plain scalar, and two entries need one between them.
-	for src in ([]string{"a: [\"x\" \"y\"]\n", "a: {k: 'x' 'y'}\n", "a: [,x]\n", "a: [x,,y]\n", "a: [ ,]\n", "a: {, k: v}\n", "a: [x,\t,y]\n", "a: [[a] [b]]\n"}) {
+	// Each 7.3.3 rule names itself, so `fd00::` says what to fix.
+	for c in ([][2]string{{"a: fd00::\n", "end in"}, {"a: b: c\n", "hold `: `"}, {"a: [a[b]]\n", "bracket"}}) {
+		_, err := parse(c[0], context.temp_allocator)
+		e, _ := err.?
+		testing.expectf(t, strings.contains(e.msg, c[1]), "%q: %v", c[0], err)
+	}
+	// A quote left unescaped inside a quoted scalar ends it, and a `,` that
+	// separates nothing is no more YAML than one that starts a plain scalar;
+	// two entries need one between them.
+	for src in ([]string{"a: \"x\" \"y\"\n", "a: 'x' 'y'\n", "a: '''\n", "a: [\"x\" \"y\"]\n", "a: {k: 'x' 'y'}\n", "a: [,x]\n", "a: [x,,y]\n", "a: [ ,]\n", "a: {, k: v}\n", "a: [x,\t,y]\n", "a: [[a] [b]]\n"}) {
 		_, err := parse(src, context.temp_allocator)
 		testing.expectf(t, err != nil, "%q parsed", src)
 	}
@@ -917,9 +923,13 @@ test_a_plain_scalar_may_not_start_with_an_indicator :: proc(t: ^testing.T) {
 	testing.expectf(t, cok && len(c) == 2 && c[0] == "fe80::1" && c[1] == "::", "c: %v", c)
 	// A quote inside a plain scalar is text, and hides neither a comment, a
 	// key's `: ` nor a flow `,` behind it (YAML 1.2.2 sections 7.3.1-7.3.3).
-	mid, mderr := parse("a: don't # c\nb: 5\" # c\nc: [x'y, z]\ndon't: x\ne: x 'y # c\nf: x - 'y # c'\n", context.temp_allocator)
+	// A quote after `:` and a tab, or after a flow `,`, opens one, `''` does
+	// not close it, and a stray closer leaves the depth at zero.
+	mid, mderr := parse("a: don't # c\nb: 5\" # c\nc: [x'y, z]\ndon't: x\ne: x 'y # c\nf: x - 'y # c'\ng:\t'x # y'\nh: [x, 'y # z']\ni: 'it''s # x'\nj]: v\n", context.temp_allocator)
 	testing.expectf(t, mderr == nil, "parse failed: %v", mderr)
-	for want in ([][2]string{{"a", "don't"}, {"b", "5\""}, {"don't", "x"}, {"e", "x 'y"}, {"f", "x - 'y"}}) {
+	hl, hok := as_string_list(at(mid, "h"), context.temp_allocator)
+	testing.expectf(t, hok && len(hl) == 2 && hl[1] == "y # z", "h: %v", hl)
+	for want in ([][2]string{{"a", "don't"}, {"b", "5\""}, {"don't", "x"}, {"e", "x 'y"}, {"f", "x - 'y"}, {"g", "x # y"}, {"i", "it's # x"}, {"j]", "v"}}) {
 		v, _ := as_string(at(mid, want[0]))
 		testing.expectf(t, v == want[1], "%s: %q", want[0], v)
 	}

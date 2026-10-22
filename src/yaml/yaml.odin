@@ -295,7 +295,7 @@ quote_step :: proc(q: ^Quote_State, s: string, i: int) -> (n: int, quoted: bool)
 	}
 	start := q.at_start
 	q.at_start = false
-	followed_by_space := i + 1 == len(s) || s[i + 1] == ' ' || s[i + 1] == '\t'
+	followed_by_space := blank_or_end(s, i + 1)
 	switch c {
 	case '\'', '"':
 		if start {
@@ -765,14 +765,20 @@ find_key_colon :: proc(s: string) -> (idx: int, ok: bool) {
 		at_start = true,
 	}
 	for i := 0; i < len(s); {
-		depth := q.depth
 		n, quoted := quote_step(&q, s, i)
-		if !quoted && depth == 0 && s[i] == ':' && (i + 1 == len(s) || s[i + 1] == ' ' || s[i + 1] == '\t') {
+		// A `:` leaves the depth as it was, so it is read after the step.
+		if !quoted && q.depth == 0 && s[i] == ':' && blank_or_end(s, i + 1) {
 			return i, true
 		}
 		i += n
 	}
 	return 0, false
+}
+
+// Whether `s` ends at `i` or holds a space or tab there.
+@(private)
+blank_or_end :: proc(s: string, i: int) -> bool {
+	return i >= len(s) || s[i] == ' ' || s[i] == '\t'
 }
 
 // YAML 1.2.2 section 7.3.3 (ns-plain-first): a plain scalar may not start with
@@ -786,10 +792,7 @@ find_key_colon :: proc(s: string) -> (idx: int, ok: bool) {
 plain_first_ok :: proc(s: string) -> bool {
 	switch s[0] {
 	case '-', '?', ':':
-		if len(s) < 2 || s[1] == ' ' || s[1] == '\t' {
-			return false
-		}
-		return true
+		return !blank_or_end(s, 1)
 	case ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`':
 		return false
 	}
@@ -812,8 +815,17 @@ unquote_scalar :: proc(p: ^Parser, s: string, line_num: int, flow := false, key 
 		}
 		// A key is followed by its own `: `, so only a value can end on a `:`
 		// that YAML would read as a mapping indicator.
-		if strings.contains(s, ": ") || strings.contains(s, ":\t") || (!key && strings.has_suffix(s, ":")) || (flow && strings.contains_any(s, "[]{}")) {
-			fail(p, line_num, "a plain scalar may not hold `: `, end in `:`, or hold a bracket inside a flow collection (YAML 1.2.2 section 7.3.3): quote it")
+		why := ""
+		switch {
+		case strings.contains(s, ": ") || strings.contains(s, ":\t"):
+			why = "a plain scalar may not hold `: `"
+		case !key && strings.has_suffix(s, ":"):
+			why = "a plain value may not end in `:`"
+		case flow && strings.contains_any(s, "[]{}"):
+			why = "a plain scalar in a flow collection may not hold a bracket"
+		}
+		if why != "" {
+			fail(p, line_num, strings.concatenate({why, " (YAML 1.2.2 section 7.3.3): quote it"}, p.allocator))
 			return "", true
 		}
 		return s, false
