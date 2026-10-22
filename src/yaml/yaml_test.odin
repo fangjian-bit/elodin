@@ -915,6 +915,23 @@ test_a_plain_scalar_may_not_start_with_an_indicator :: proc(t: ^testing.T) {
 	}
 	c, cok := as_string_list(at(more, "c"), context.temp_allocator)
 	testing.expectf(t, cok && len(c) == 2 && c[0] == "fe80::1" && c[1] == "::", "c: %v", c)
+	// A quote inside a plain scalar is text, and hides neither a comment, a
+	// key's `: ` nor a flow `,` behind it (YAML 1.2.2 sections 7.3.1-7.3.3).
+	mid, mderr := parse("a: don't # c\nb: 5\" # c\nc: [x'y, z]\ndon't: x\ne: x 'y # c\nf: x - 'y # c'\n", context.temp_allocator)
+	testing.expectf(t, mderr == nil, "parse failed: %v", mderr)
+	for want in ([][2]string{{"a", "don't"}, {"b", "5\""}, {"don't", "x"}, {"e", "x 'y"}, {"f", "x - 'y"}}) {
+		v, _ := as_string(at(mid, want[0]))
+		testing.expectf(t, v == want[1], "%s: %q", want[0], v)
+	}
+	mc, mcok := as_string_list(at(mid, "c"), context.temp_allocator)
+	testing.expectf(t, mcok && len(mc) == 2 && mc[0] == "x'y" && mc[1] == "z", "c: %v", mc)
+	seq, serr := parse("- 'a # b'\n- [\"x, y\", z]\n", context.temp_allocator)
+	testing.expectf(t, serr == nil && len(items(seq)) == 2, "quoted entries: %v", serr)
+	if serr == nil && len(items(seq)) == 2 {
+		v, _ := as_string(items(seq)[0])
+		testing.expectf(t, v == "a # b", "entry: %q", v)
+		testing.expect_value(t, len(items(items(seq)[1])), 2)
+	}
 	g, gok := as_string_list(at(root, "g"), context.temp_allocator)
 	testing.expectf(t, gok && len(g) == 3 && g[0] == "-1" && g[1] == "?x" && g[2] == "!t", "g: %v", g)
 	free_all(context.temp_allocator)
