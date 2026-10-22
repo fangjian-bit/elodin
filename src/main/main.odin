@@ -784,9 +784,9 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 	/*
 	A rebuild still downloading at a stop is not waited for: it is held by the
 	network, for up to `FETCH_DEADLINE` a list, and what the drain below
-	protects is the clients. Its thread reads the generations, the engine and
-	`lists_loaded`, so once the drain is over the process ends before the defers
-	above free them. A cached copy it was writing is replaced by a rename, whole
+	protects is the clients. Its thread reads the engine and `lists_loaded`, and
+	allocates from this thread's allocator, so once the drain is over the process
+	ends before the defers above free them. A cached copy it was writing is replaced by a rename, whole
 	or not at all.
 	*/
 	defer if server.rebuild_busy(&rebuild) {
@@ -940,7 +940,7 @@ maintenance_loop :: proc(
 	m := Maintenance {
 		rebuild      = rebuild,
 		next_tick    = time.tick_add(time.tick_now(), TICK),
-		last_refresh = time.tick_now(),
+		last_refresh = time.now(),
 		last_report  = time.tick_now(),
 	}
 	refresh := server.live_config(s).blocking.refresh
@@ -983,12 +983,15 @@ Maintenance :: struct {
 	// before it, or when no thread could be had: another follows once that one
 	// is over, or at the next tick.
 	rebuild_again:  bool,
-	// Monotonic too, so a step of the wall clock neither holds nor hurries a
-	// refresh or a report.
-	last_refresh:   time.Tick,
+	// On the wall clock, as the cached copies' ages are by their mtime: a
+	// monotonic clock stops while the machine is suspended, and a day's
+	// refresh would wait for a day awake.
+	last_refresh:   time.Time,
 	// Zero while the lists are current; otherwise the wait before the next
 	// attempt, which `refresh_retry` stretches on each failure (#411).
 	retry:          time.Duration,
+	// Monotonic, as `next_tick` is, so a step of the wall clock neither holds
+	// nor hurries the report.
 	last_report:    time.Tick,
 	// What the kernel had dropped at the last report, so the line below is
 	// about the interval rather than about the whole run. A counter that only
@@ -1055,7 +1058,7 @@ collect :: proc(s: ^server.Server, opts: Options, m: ^Maintenance) {
 		start_rebuild(s, opts, m, after_reload = true)
 		return
 	}
-	m.last_refresh = time.tick_now()
+	m.last_refresh = time.now()
 	refresh := server.live_config(s).blocking.refresh
 	switch {
 	case current || opts.no_fetch || refresh <= 0:
@@ -1109,7 +1112,7 @@ tick :: proc(s: ^server.Server, listeners: ^server.Listeners, opts: Options, m: 
 		switch {
 		case m.rebuild_again:
 			start_rebuild(s, opts, m, after_reload = true)
-		case refreshing && time.tick_since(m.last_refresh) >= server.refresh_wait(m.retry, cfg.blocking.refresh):
+		case refreshing && time.since(m.last_refresh) >= server.refresh_wait(m.retry, cfg.blocking.refresh):
 			logx.infof("refreshing blocklists")
 			start_rebuild(s, opts, m, after_reload = false)
 		}

@@ -598,9 +598,9 @@ make_directories :: proc(path: string) {
 /*
 Reload every list and swap the result in.
 
-Called at startup and again on the refresh interval. The old rule sets are
-destroyed only after the swap returns them, at which point no new query can
-reach them.
+A rebuild calls `reload_filters_from` with its copy of the configuration (see
+`rebuild_rules`); this reads the one in effect. The old rule sets are destroyed
+only after the swap returns them, at which point no new query can reach them.
 
 A list that loaded last time and is unavailable now - no download and no
 readable cached copy, say a cleared tmpfs `cache_dir` during an outage - would

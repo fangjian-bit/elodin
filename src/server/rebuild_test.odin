@@ -90,7 +90,7 @@ test_a_rebuild_does_not_take_the_signals_main_acts_on :: proc(t: ^testing.T) {
 		time.sleep(10 * time.Millisecond)
 	}
 	testing.expect(t, rebuild_done(&r), "the rebuild did not end once its host was gone")
-	// Its thread reads `s`, `cfg` and the engine, which are this frame's: it is
+	// Its thread reads `s` and the engine, which are this frame's: it is
 	// waited for even past the deadline, as `FETCH_DEADLINE` bounds it.
 	for !rebuild_done(&r) {
 		time.sleep(10 * time.Millisecond)

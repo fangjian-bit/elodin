@@ -40,7 +40,8 @@ Runs on the maintenance thread, which is the only one that swaps or releases a
 generation, and must not be called with a generation pinned. The rules are not
 rebuilt here, as a rebuild may download for minutes and the maintenance thread
 is where signals are acted on (#416); nor are they or their history touched, so
-it runs beside a rebuild, which reads the generation it pinned.
+it runs beside a rebuild, which reads its own copy of the configuration and pins
+no generation (see `Rebuild`).
 */
 reload_config :: proc(s: ^Server, path: string) -> (out: Reload_Outcome) {
 	assert(pinned.server == nil, "reload_config runs with no generation pinned")

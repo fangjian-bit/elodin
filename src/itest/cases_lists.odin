@@ -403,6 +403,10 @@ run_list_refresh_signal_cases :: proc(r: ^Runner) {
 		defer if stalling {
 			net.close(stalled)
 		}
+		// Closed below to end the refresh; here when the premise fails first.
+		defer if listening {
+			net.close(silent)
+		}
 		// The premise: a refresh has started its download and is waiting on it.
 		if listening && stalling && check(r, wait_for_log_count(&srv, "list hosts-list: downloading", 2, 45 * time.Second), "no refresh ran") {
 			time.sleep(500 * time.Millisecond)
@@ -436,6 +440,7 @@ run_list_refresh_signal_cases :: proc(r: ^Runner) {
 			// it waits on the added list.
 			check(r, !log_contains(&srv, "list stalled-list: downloading"), "the reload's rebuild ran beside the refresh")
 			net.close(silent)
+			listening = false
 			check(r, wait_for_log(&srv, "list stalled-list: downloading", 5 * time.Second), "the reload's rebuild did not download the added list")
 			time.sleep(300 * time.Millisecond)
 
