@@ -2,8 +2,8 @@ package server
 
 import "base:runtime"
 import "core:sync"
-import "core:sys/posix"
 import "core:thread"
+import "elodin:pool"
 
 /*
 A rebuild of the rule sets, on a thread of its own (#416).
@@ -16,8 +16,8 @@ download it is in short, as a failed one. So the loop starts a rebuild here and
 goes on. One runs at a time, and `reload_config`, which moves the history a
 rebuild reads, waits for it.
 
-The thread starts with the signals `main` acts on blocked - SIGTERM, SIGINT and
-SIGHUP - so the kernel hands them to a thread that is not downloading.
+Like every thread, it starts with the signals `main` acts on blocked, so the
+kernel hands them to a thread that is not downloading; see `pool.spawn`.
 */
 Rebuild :: struct {
 	s:       ^Server,
@@ -37,17 +37,9 @@ rebuild_start :: proc(r: ^Rebuild, s: ^Server, network: bool) {
 		s       = s,
 		network = network,
 	}
-	set, old: posix.sigset_t
-	posix.sigemptyset(&set)
-	for sig in ([]posix.Signal{.SIGTERM, .SIGINT, .SIGHUP}) {
-		posix.sigaddset(&set, sig)
-	}
-	// A signal that arrives meanwhile is held, and delivered on the restore.
-	posix.pthread_sigmask(.BLOCK, &set, &old)
 	// The caller's allocators, as the sets and `lists_loaded` built there are
 	// freed by the caller's thread; `thread` gives it a temp allocator of its own.
-	r.thread = thread.create_and_start_with_poly_data(r, rebuild_thread, context)
-	posix.pthread_sigmask(.SETMASK, &old, nil)
+	r.thread = pool.spawn(r, rebuild_thread, context)
 	if r.thread == nil {
 		rebuild_run(r)
 	}

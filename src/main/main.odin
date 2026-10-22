@@ -133,7 +133,9 @@ operator waits on a service that has already been told to go - or, for
 `Reload`, on a certificate that is already sitting on disk waiting to be
 picked up. `Reload` cuts the wait short rather than sitting out the rest of
 the tick, which otherwise could be the better part of `TICK`, and so does
-`Rebuilt`, as a reload may be waiting on the rebuild.
+`Rebuilt`, as a reload may be waiting on the rebuild. `Rebuilt` comes before
+`Reload`, so a SIGHUP that lands as a rebuild ends finds it collected rather
+than waits for it.
 */
 @(private)
 wait_for_tick :: proc(tick: time.Duration, rebuild: ^server.Rebuild) -> Wait_Outcome {
@@ -143,11 +145,11 @@ wait_for_tick :: proc(tick: time.Duration, rebuild: ^server.Rebuild) -> Wait_Out
 		if sync.atomic_load(&stop_requested) {
 			return .Stop
 		}
-		if sync.atomic_exchange(&reload_requested, false) {
-			return .Reload
-		}
 		if server.rebuild_done(rebuild) {
 			return .Rebuilt
+		}
+		if sync.atomic_exchange(&reload_requested, false) {
+			return .Reload
 		}
 		remaining := time.diff(time.now(), deadline)
 		if remaining <= 0 {
