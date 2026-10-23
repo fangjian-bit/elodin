@@ -233,6 +233,11 @@ exchange_doh_h1 :: proc(
 			return resp.body, .None
 		}
 
+		// Whatever the status, the body came from `allocator`, which on the race
+		// path is the heap; the HTTP/2 twin above frees it the same way.
+		if len(resp.body) > 0 {
+			delete(resp.body, allocator)
+		}
 		if herr == .None && resp.status != 200 {
 			stream_close(&stream)
 			return nil, .HTTP_Error

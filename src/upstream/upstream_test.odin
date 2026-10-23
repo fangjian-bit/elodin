@@ -2570,6 +2570,68 @@ test_the_doh_query_that_dialled_is_retried :: proc(t: ^testing.T) {
 }
 
 /*
+A DoH reply over HTTP/1.1 that is turned away leaves the caller holding nothing.
+
+`http_exchange` hands back a body whatever the status, from the caller's
+allocator - which on the race path is the heap, freed by the worker only on
+success. So every refusal releases it: a non-200 (a 503 maintenance page, a 429
+with text), and a 200 too short to be a DNS message (#524).
+*/
+@(test)
+test_a_refused_doh_h1_reply_releases_its_body :: proc(t: ^testing.T) {
+	Case :: struct {
+		reply: string,
+		want:  Error,
+	}
+	cases := []Case {
+		{"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello", .HTTP_Error},
+		{"HTTP/1.1 429 Too Many Requests\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nslow!\r\n0\r\n\r\n", .HTTP_Error},
+		{"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello", .Bad_Response},
+	}
+	query := []u8{0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1}
+	for c in cases {
+		listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+		if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
+			return
+		}
+		bound, _ := net.bound_endpoint(listener)
+		m := Http_Mock {
+			listener = listener,
+			reply    = c.reply,
+		}
+		server := thread.create_and_start_with_poly_data(&m, http_mock_once)
+
+		// No `tls_ctx`, as in the retry test above: the body is the question.
+		u, uerr := make_upstream(
+			config.Upstream_Spec {
+				name = "refusing",
+				kind = .TCP,
+				address = "127.0.0.1",
+				port = bound.port,
+				hostname = "doh.invalid",
+				path = "/dns-query",
+			},
+			8,
+			30 * time.Second,
+		)
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		if testing.expectf(t, uerr == .None, "cannot make the upstream: %v", uerr) {
+			resp, err := exchange_doh_h1(u, query, query, 2 * time.Second, mem.tracking_allocator(&track))
+			testing.expectf(t, err == c.want, "%q: got %v, want %v", c.reply[:12], err, c.want)
+			testing.expect(t, resp == nil, "a refused reply came back as an answer")
+			expect_caller_holds_nothing(t, &track, c.reply[:12])
+			destroy(u)
+		}
+		mem.tracking_allocator_destroy(&track)
+		thread.join(server)
+		thread.destroy(server)
+		net.close(listener)
+	}
+	free_all(context.temp_allocator)
+}
+
+/*
 A reply cut in half is the server breaking, not a connection being recycled.
 
 `reader_fill` reaching EOF says the peer closed, and the two cases that reaches
