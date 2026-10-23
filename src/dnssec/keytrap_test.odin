@@ -1,5 +1,6 @@
 package dnssec
 
+import "base:runtime"
 import "core:mem"
 import "core:testing"
 import "core:time"
@@ -554,5 +555,138 @@ test_an_exhausted_key_check_is_not_a_downgrade :: proc(t: ^testing.T) {
 		budget.verifications,
 		MAX_VERIFICATIONS_PER_QUERY,
 	)
+	free_all(context.temp_allocator)
+}
+
+// Arena a padded walk to cloudflare.com. takes, from an empty arena.
+@(private = "file")
+kt_walk_arena :: proc(pads: []Padding) -> int {
+	free_all(context.temp_allocator)
+	pads := pads
+	v := make_validator(kt_query, &pads, Options{})
+	defer destroy_validator(v)
+	budget := query_budget(v)
+	arena := cast(^runtime.Arena)context.temp_allocator.data
+	before := arena.total_used
+	zone_trust(v, &budget, "cloudflare.com.", time.unix(FIXTURE_TIME, 0), context.temp_allocator)
+	return int(arena.total_used - before)
+}
+
+/*
+Both chain-walk loops render the set they check once, however many signatures
+over it a response carries (issue #527). The sets are padded with copies of
+their own records, which the canonical form drops again, so the genuine
+signature still verifies and what each forgery in front of it would cost to
+render is the set's full length.
+
+What an extra forgery may cost is reading it: its record, its parsed RRSIG and
+its key, about 1 KB. A render apiece is 8 KB of DNSKEY set and 25 KB of DS set
+on top.
+*/
+@(test)
+test_chain_walk_signatures_do_not_rerender_the_set :: proc(t: ^testing.T) {
+	PER_FORGERY :: 2048
+	for type in ([2]dns.Type{.DS, .DNSKEY}) {
+		// Each record is copied `records` times; the fixture's DNSKEY set holds
+		// two keys, and a set past `MAX_KEYS_PER_ZONE` is not tried at all.
+		records := 255 if type == .DS else MAX_KEYS_PER_ZONE / 2 - 1
+		few := kt_walk_arena([]Padding{{name = "cloudflare.com.", type = type, records = records, sigs = 1}})
+		many := kt_walk_arena([]Padding{{name = "cloudflare.com.", type = type, records = records, sigs = 41}})
+		testing.expectf(t, many - few < 40 * PER_FORGERY, "40 more %v forgeries cost %d more bytes of arena", type, many - few)
+	}
+	free_all(context.temp_allocator)
+}
+
+/*
+And the render is charged to the request, so the last thing a walk does - the
+DNSKEY set it ends on - is refused when the request has no room left for it,
+rather than paid for.
+
+Room is measured first: the whole walk's charges with nothing in the way. One
+byte less, and the last charge goes over. That is the render only if the render
+is charged, and the verification count tells which: the render comes after the
+DNSKEY signature's verification is spent, the reading before it.
+*/
+@(test)
+test_the_dnskey_render_is_charged_to_the_request :: proc(t: ^testing.T) {
+	walk :: proc(spent: ^int) -> (Status, Budget) {
+		v := make_validator(kt_query, nil, Options{})
+		defer destroy_validator(v)
+		budget := query_budget(v)
+		budget.spent = spent
+		status, _, _ := zone_trust(v, &budget, "cloudflare.com.", time.unix(FIXTURE_TIME, 0), context.temp_allocator)
+		return status, budget
+	}
+	spent := 0
+	status, untouched := walk(&spent)
+	testing.expect_value(t, status, Status.Secure)
+	room := spent
+
+	spent = dns.REQUEST_DECODE_BUDGET - room + 1
+	budget: Budget
+	status, budget = walk(&spent)
+	testing.expect_value(t, status, Status.Indeterminate)
+	testing.expect_value(t, budget.walk_stopped, READING_OVER_BUDGET)
+	testing.expect_value(t, budget.verifications, untouched.verifications)
+	free_all(context.temp_allocator)
+}
+
+/*
+The DS step's render is charged too. It sits between two readings in the walk,
+so a request one byte short of room fails at a reading either way; what tells
+them apart is the bill. The DS set is padded with copies of its own record, and
+what the padding adds to the walk's charges must be more than what reading the
+padded reply adds: the rest is the render.
+*/
+@(test)
+test_the_ds_render_is_charged_to_the_request :: proc(t: ^testing.T) {
+	walk_spent :: proc(pads: []Padding) -> (spent: int, verifications: int) {
+		pads := pads
+		v := make_validator(kt_query, &pads, Options{})
+		defer destroy_validator(v)
+		budget := query_budget(v)
+		budget.spent = &spent
+		zone_trust(v, &budget, "cloudflare.com.", time.unix(FIXTURE_TIME, 0), context.temp_allocator)
+		return spent, budget.verifications
+	}
+	read_spent :: proc(pads: []Padding) -> (spent: int) {
+		pads := pads
+		wire, _ := kt_query(&pads, "cloudflare.com.", .DS, context.temp_allocator, nil)
+		dns.decode_message(wire, context.temp_allocator, &spent)
+		return
+	}
+	padded := []Padding{{name = "cloudflare.com.", type = .DS, records = 255}}
+	plain := []Padding{{name = "cloudflare.com.", type = .DS}}
+
+	walk_plain, untouched := walk_spent(plain)
+	walk_padded, verifications := walk_spent(padded)
+	// The premise: the padding changed nothing about what verified.
+	testing.expect_value(t, verifications, untouched)
+
+	reading := read_spent(padded) - read_spent(plain)
+	rendering := walk_padded - walk_plain - reading
+	// 255 more DS RDATAs of 36 bytes, in the buffer they are rendered into.
+	testing.expectf(t, rendering >= 255 * 36, "the padded DS set's render charged %d bytes", rendering)
+	free_all(context.temp_allocator)
+}
+
+/*
+Running out of verifications says so in the same words whichever loop ran out.
+The DS step and the answer report "verification budget spent"; a DNSKEY set
+padded past the allowance is the same allowance and the same report, not
+"chain of trust unavailable", which is what a client is told about an upstream
+that did not answer.
+*/
+@(test)
+test_an_exhausted_key_check_says_which_allowance :: proc(t: ^testing.T) {
+	pads := []Padding{{name = "cloudflare.com.", type = .DNSKEY, sigs = 200}}
+	v := make_validator(kt_query, &pads, Options{})
+	defer destroy_validator(v)
+
+	budget := query_budget(v)
+	status, _, _ := zone_trust(v, &budget, "cloudflare.com.", time.unix(FIXTURE_TIME, 0), context.temp_allocator)
+	testing.expect_value(t, status, Status.Indeterminate)
+	testing.expect_value(t, budget.verifications, MAX_VERIFICATIONS_PER_QUERY)
+	testing.expect_value(t, budget.walk_stopped, "verification budget spent")
 	free_all(context.temp_allocator)
 }

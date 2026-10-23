@@ -470,8 +470,9 @@ Budget :: struct {
 	nsec3:         Nsec3_Budget,
 	/*
 	The request's running total of what it has taken out of its arena reading
-	messages, against `dns.REQUEST_DECODE_BUDGET`, or nil where nobody is
-	counting.
+	messages and rendering the canonical forms signatures are checked against
+	(see `Signing_Scratch`), against `dns.REQUEST_DECODE_BUDGET`, or nil where
+	nobody is counting.
 
 	The walk reads a reply of its own per step into the arena the request is
 	served from, up to `MAX_LOOKUPS_PER_QUERY` of them, and each of those
@@ -483,6 +484,14 @@ readings is bounded only by its own length. Borrowed from the caller
 	// The client question's upstream deadline, borrowed from the caller like
 	// `spent` and handed to every lookup. See `Query_Proc`.
 	deadline:      ^time.Tick,
+	/*
+	Which allowance the last signature loop to stop early ran out of, in the
+	words `exhausted_reason` reports it with. Written where the loop stops, as
+	`walk_stopped` is, rather than worked out afterwards: by then a reading may
+	have taken the request past its budget in a loop that stopped for want of
+	verifications, and the two would read the same.
+	*/
+	ran_out:       string,
 }
 
 /*
@@ -660,10 +669,26 @@ signature_worth_trying :: proc(sig: Rrsig, keys: []Dnskey, unix: u32) -> bool {
 @(private)
 spend_verification :: proc(budget: ^Budget) -> bool {
 	if budget.verifications >= MAX_VERIFICATIONS_PER_QUERY {
+		budget.ran_out = VERIFICATIONS_SPENT
 		return false
 	}
 	budget.verifications += 1
 	return true
+}
+
+// Why a signature loop stopped when the question had spent
+// `MAX_VERIFICATIONS_PER_QUERY`.
+VERIFICATIONS_SPENT :: "verification budget spent"
+
+/*
+Which of this server's own allowances a signature loop ran out of: the
+verification count, or the request's reading budget, which the canonical form
+each signature is checked against is charged to as well (see `Signing_Scratch`).
+Either way the answer is `Indeterminate`; the words are what tell them apart.
+*/
+@(private)
+exhausted_reason :: proc(budget: ^Budget) -> string {
+	return budget.ran_out if budget.ran_out != "" else VERIFICATIONS_SPENT
 }
 
 @(private)
@@ -2400,7 +2425,7 @@ validate_denial :: proc(
 	hands the client extended error 6.
 	*/
 	if denial_spent {
-		return {status = .Indeterminate, reason = "verification budget spent"}
+		return {status = .Indeterminate, reason = exhausted_reason(budget)}
 	}
 	if len(nsecs) == 0 && len(nsec3s) == 0 {
 		// Nothing here spoke for the name, and one reason is that the walk
@@ -2584,6 +2609,9 @@ validate_rrset :: proc(
 	unsupported := false
 	exhausted := false
 	skipped_for_shed := false
+	scratch := Signing_Scratch {
+		budget = budget,
+	}
 	/*
 	One chain walk per distinct signer, not one per signature.
 
@@ -2710,7 +2738,11 @@ validate_rrset :: proc(
 			exhausted = true
 			break
 		}
-		result, expanded_from := check_signature(sig, owner, class, records, keys, unix, allocator)
+		result, expanded_from := check_signature(sig, owner, class, records, keys, unix, allocator, &scratch)
+		if scratch.over_budget {
+			exhausted = true
+			break
+		}
 		#partial switch result {
 		case .Ok:
 			return .Secure, expanded_from, "", sig.signer, sig
@@ -2746,7 +2778,7 @@ validate_rrset :: proc(
 	worth knowing before reading that gauge as a forgery count.
 	*/
 	if exhausted {
-		return .Indeterminate, "", "verification budget spent", "", {}
+		return .Indeterminate, "", exhausted_reason(budget), "", {}
 	}
 
 	missing := "signature missing" if len(sigs) == 0 else "no valid signature"
@@ -2882,6 +2914,7 @@ check_signature :: proc(
 	keys: []Dnskey,
 	unix: u32,
 	allocator: mem.Allocator,
+	scratch: ^Signing_Scratch = nil,
 ) -> (
 	result: Verify_Result,
 	encloser: string,
@@ -2927,7 +2960,7 @@ check_signature :: proc(
 		signing_owner = wildcard_of(encloser, allocator)
 	}
 
-	data, built := signing_input(sig, signing_owner, class, records, allocator)
+	data, built := signing_input(sig, signing_owner, class, records, allocator, scratch)
 	if !built {
 		return .Bad, encloser
 	}
@@ -3117,7 +3150,7 @@ validate_wildcard_proof :: proc(
 	takes care not to say.
 	*/
 	if denial.exhausted {
-		return .Indeterminate, nil, "verification budget spent"
+		return .Indeterminate, nil, exhausted_reason(budget)
 	}
 	if len(denial.nsecs) > 0 {
 		if _, covered := nsec_covering(denial.nsecs, next_closer); covered {
@@ -3185,8 +3218,9 @@ validated_denial_records :: proc(
 	nsecs: []Nsec_Rr,
 	nsec3s: []Nsec3_Rr,
 	verified: []Authenticated_Set,
-	// True when the query's verification allowance ran out partway through, so
-	// that a caller can tell "nothing proved this" from "we stopped looking".
+	// True when the query's verification allowance or its request budget ran
+	// out partway through, so that a caller can tell "nothing proved this" from
+	// "we stopped looking". `exhausted_reason` says which.
 	exhausted: bool,
 ) {
 	out_nsec := make([dynamic]Nsec_Rr, 0, 4, allocator)
@@ -3278,13 +3312,17 @@ verified_rrset :: proc(
 	signer: string,
 	rrsig: Rrsig,
 	ok: bool,
-	// True when the query's verification allowance ran out before a signature
-	// held, which is a statement about this server and not about the records.
+	// True when the query's verification allowance or its request budget ran
+	// out before a signature held, which is a statement about this server and
+	// not about the records.
 	exhausted: bool,
 ) {
 	records = records_of(section, owner, type, class, allocator)
 	if len(records) == 0 {
 		return nil, "", {}, false, false
+	}
+	scratch := Signing_Scratch {
+		budget = budget,
 	}
 	for sig in sigs_covering(section, owner, type, class, allocator) {
 		if !dns.name_equal_fold(sig.signer, zone) {
@@ -3324,7 +3362,17 @@ verified_rrset :: proc(
 		NSEC - the record that proves NODATA for a type the wildcard lacks -
 		still comes back with no encloser and still passes.
 		*/
-		result, encloser := check_signature(sig, owner, class, records, keys, unix, allocator)
+		result, encloser := check_signature(sig, owner, class, records, keys, unix, allocator, &scratch)
+		if scratch.over_budget {
+			// Said out loud for the same reason as running out of
+			// verifications above: the set is dropped.
+			logx.debugf(
+				"dnssec: %s %s went past the request budget before a signature held; the set is dropped",
+				dns.type_name(type),
+				dns.name_trim_root(owner),
+			)
+			return nil, "", {}, false, true
+		}
 		if result == .Ok && encloser != "" {
 			// Said out loud, because the two ways to reach it look identical
 			// from the verdict: a relocated record, and a signer that wildcard
@@ -3749,6 +3797,9 @@ zone_step :: proc(
 		verified := false
 		exhausted := false
 		ds_sig: Rrsig
+		scratch := Signing_Scratch {
+			budget = budget,
+		}
 		for sig in sigs {
 			if !dns.name_equal_fold(sig.signer, parent) {
 				continue
@@ -3769,7 +3820,11 @@ zone_step :: proc(
 			// And not from a wildcard either. A DS is the parent's word about
 			// one child, so a signature made over `*.<parent>` is not the
 			// parent naming this cut; see `verified_rrset` for the rest of it.
-			result, encloser := check_signature(sig, child, class, ds_records, parent_keys, unix, allocator)
+			result, encloser := check_signature(sig, child, class, ds_records, parent_keys, unix, allocator, &scratch)
+			if scratch.over_budget {
+				exhausted = true
+				break
+			}
 			if result == .Ok && encloser == "" {
 				verified = true
 				ds_sig = sig
@@ -3781,7 +3836,7 @@ zone_step :: proc(
 			// read, which is `Indeterminate` territory rather than a broken
 			// delegation - the same distinction the denial path below makes.
 			if exhausted {
-				return walk_gave_up(budget, "verification budget spent"), nil
+				return walk_gave_up(budget, exhausted_reason(budget)), nil
 			}
 			/*
 			The third way a delegation appearing at a remembered non-cut shows
@@ -3874,7 +3929,7 @@ zone_step :: proc(
 	// A chain step this server ran out of allowance on is one it did not read,
 	// which is `Indeterminate` territory rather than a broken delegation.
 	if ds_spent {
-		return walk_gave_up(budget, "verification budget spent"), nil
+		return walk_gave_up(budget, exhausted_reason(budget)), nil
 	}
 	if len(nsecs) == 0 && len(nsec3s) == 0 {
 		/*
@@ -4177,6 +4232,11 @@ fetch_keys :: proc(
 	}
 
 	exhausted := false
+	// One for the DNSKEY set, however many DS records and keys it is tried
+	// under: the set is the same every time.
+	scratch := Signing_Scratch {
+		budget = budget,
+	}
 	ds_loop: for ds in ds_set {
 		if !algorithm_supported(ds.algorithm) || !digest_supported(ds.digest_type) {
 			continue
@@ -4226,7 +4286,11 @@ fetch_keys :: proc(
 					exhausted = true
 					break ds_loop
 				}
-				result, _ := check_signature(sig, zone, class, records, attested[:], unix, allocator)
+				result, _ := check_signature(sig, zone, class, records, attested[:], unix, allocator, &scratch)
+				if scratch.over_budget {
+					exhausted = true
+					break ds_loop
+				}
 				switch result {
 				case .Ok:
 					return parsed[:], .Secure, sig, rrset_ttl(records)
@@ -4254,6 +4318,7 @@ fetch_keys :: proc(
 	Running out is a statement about this server, so it says so.
 	*/
 	if exhausted {
+		budget.walk_stopped = exhausted_reason(budget)
 		return nil, .Indeterminate, {}, 0
 	}
 	if checkable {

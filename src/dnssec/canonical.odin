@@ -373,12 +373,140 @@ write_canonical_rdata :: proc(out: ^[dynamic]u8, rec: dns.Record) -> bool {
 }
 
 /*
+One RRset's canonical RDATA, rendered once and reused for every signature tried
+over it, and the buffer each attempt's signing input is built in.
+
+Only the RRSIG's own RDATA, the owner a wildcard signature names and the
+Original TTL differ from one signature over a set to the next; the sorted,
+de-duplicated RDATA is the same every time. A render per attempt costs about one
+and a half times the set's wire size per signature, so a 60 KB set and the
+`MAX_VERIFICATIONS_PER_QUERY` signatures a zone may publish over it would cost
+several MB of arena per query (issue #527). With one of these per RRset that is
+the set once and the buffer once.
+
+Zero-valued to start with, one per RRset: a scratch handed a different set
+renders that one instead of reusing the first.
+*/
+Signing_Scratch :: struct {
+	/*
+	The question's allowances, or nil where nobody is counting. What the scratch
+	takes is charged to its `spent`, against `dns.REQUEST_DECODE_BUDGET`, so a
+	validation's renders count with what its readings already took. Past it
+	`signing_input` refuses, `over_budget` says so, and the budget's `ran_out`
+	names the reason for whichever loop stops on it.
+	*/
+	budget:      ^Budget,
+	over_budget: bool,
+	// The set `rdatas` was rendered from, or nil before the first: a set that
+	// would not render is remembered too, so it is not attempted again per
+	// signature.
+	records:     []dns.Record,
+	// Sorted and de-duplicated, slices into one buffer; nil if it would not render.
+	rdatas:      [][]u8,
+	// Their total length.
+	rdata_bytes: int,
+	out:         [dynamic]u8,
+}
+
+/*
+Charge `n` bytes of arena to the request, and refuse once it is past its budget.
+*/
+@(private)
+charge_scratch :: proc(scratch: ^Signing_Scratch, n: int) -> bool {
+	if scratch.budget == nil || scratch.budget.spent == nil {
+		return true
+	}
+	scratch.budget.spent^ += n
+	return !scratch_over_budget(scratch)
+}
+
+// Whether the request is past its budget, and if so the scratch refuses from
+// here on, and says why in the budget.
+@(private)
+scratch_over_budget :: proc(scratch: ^Signing_Scratch) -> bool {
+	if scratch.budget == nil || !dns.over_request_budget(scratch.budget.spent) {
+		return false
+	}
+	scratch.over_budget = true
+	scratch.budget.ran_out = READING_OVER_BUDGET
+	return true
+}
+
+/*
+Each RDATA rendered once into a single buffer, then the set sorted and
+de-duplicated on those bytes, which is what "canonical order" means for an
+RRset (RFC 4034 section 6.3).
+*/
+@(private)
+render_rdatas :: proc(scratch: ^Signing_Scratch, records: []dns.Record, allocator: mem.Allocator) -> bool {
+	scratch.records = records
+	scratch.rdatas = nil
+	scratch.rdata_bytes = 0
+	/*
+	Charged as it grows, and at twice the buffer's capacity: growth that cannot
+	happen in place - past the end of an arena block - leaves every smaller copy
+	behind, and those sum to less than the last. A set's canonical form can be
+	many times its wire size, since names in RDATA arrive compressed and are
+	rendered in full, so a request that runs out stops the render at the step
+	that crossed rather than paying for the set and refusing after.
+
+	The index arrays are charged before they are taken, and with the buffer's
+	first capacity, so a request with nothing left renders nothing, as
+	`dns.decode_message` reads nothing. Both are taken before the buffer, so the
+	buffer is the last thing in the arena and grows in place.
+	*/
+	STORE_START :: 512
+	if !charge_scratch(scratch, len(records) * (size_of(int) + size_of([]u8)) + 2 * STORE_START) {
+		return false
+	}
+	ends := make([]int, len(records), allocator)
+	rdatas := make([][]u8, len(records), allocator)
+	store := make([dynamic]u8, 0, STORE_START, allocator)
+	charged := 2 * STORE_START
+	for rec, i in records {
+		start := len(store)
+		rendered := write_canonical_rdata(&store, rec) && len(store) - start <= 0xffff
+		// Before the verdict: the arena has paid for this record either way.
+		if 2 * cap(store) > charged {
+			charge_scratch(scratch, 2 * cap(store) - charged) or_return
+			charged = 2 * cap(store)
+		}
+		if !rendered {
+			return false
+		}
+		ends[i] = len(store)
+	}
+	start := 0
+	for end, i in ends {
+		rdatas[i] = store[start:end]
+		start = end
+	}
+	slice.sort_by(rdatas, proc(a, b: []u8) -> bool {
+		return mem.compare(a, b) < 0
+	})
+	n := 0
+	for rdata, i in rdatas {
+		if i > 0 && mem.compare(rdatas[n - 1], rdata) == 0 {
+			continue
+		}
+		rdatas[n] = rdata
+		n += 1
+		scratch.rdata_bytes += len(rdata)
+	}
+	scratch.rdatas = rdatas[:n]
+	return true
+}
+
+/*
 Build the byte sequence an RRSIG is computed over.
 
 That is the signature's own RDATA up to but not including the signature itself,
 followed by every record of the RRset in canonical form and canonical order.
 `owner` is the name to sign under, which is the records' owner name except for a
 wildcard expansion, where it is the wildcard the zone actually holds.
+
+The result lives in `scratch` and is overwritten by the next call with it; see
+`Signing_Scratch`. Without one, every call renders the set afresh.
 */
 signing_input :: proc(
 	sig: Rrsig,
@@ -386,6 +514,7 @@ signing_input :: proc(
 	class: dns.Class,
 	records: []dns.Record,
 	allocator := context.temp_allocator,
+	scratch: ^Signing_Scratch = nil,
 ) -> (
 	data: []u8,
 	ok: bool,
@@ -393,58 +522,64 @@ signing_input :: proc(
 	if len(records) == 0 {
 		return nil, false
 	}
+	local: Signing_Scratch
+	s := scratch if scratch != nil else &local
+	if s.over_budget {
+		return nil, false
+	}
 
 	name_buf: [dns.MAX_NAME_WIRE]u8
 	owner_len := canonical_name(owner, name_buf[:]) or_return
 	owner_wire := name_buf[:owner_len]
 
-	out := make([dynamic]u8, 0, 512, allocator)
-	append(&out, u8(u16(sig.type_covered) >> 8), u8(u16(sig.type_covered)))
-	append(&out, sig.algorithm, sig.labels)
-	append(&out, u8(sig.original_ttl >> 24), u8(sig.original_ttl >> 16), u8(sig.original_ttl >> 8), u8(sig.original_ttl))
-	append(&out, u8(sig.expiration >> 24), u8(sig.expiration >> 16), u8(sig.expiration >> 8), u8(sig.expiration))
-	append(&out, u8(sig.inception >> 24), u8(sig.inception >> 16), u8(sig.inception >> 8), u8(sig.inception))
-	append(&out, u8(sig.key_tag >> 8), u8(sig.key_tag))
-
 	signer_buf: [dns.MAX_NAME_WIRE]u8
 	signer_len := canonical_name(sig.signer, signer_buf[:]) or_return
-	append(&out, ..signer_buf[:signer_len])
 
-	// Each RDATA is rendered once, then the set is sorted and de-duplicated on
-	// those bytes, which is what "canonical order" means for an RRset.
-	rdatas := make([dynamic][]u8, 0, len(records), allocator)
-	for rec in records {
-		buf := make([dynamic]u8, 0, 64, allocator)
-		if !write_canonical_rdata(&buf, rec) {
-			return nil, false
-		}
-		if len(buf) > 0xffff {
-			return nil, false
-		}
-		append(&rdatas, buf[:])
+	if raw_data(s.records) != raw_data(records) || len(s.records) != len(records) {
+		render_rdatas(s, records, allocator)
 	}
-	slice.sort_by(rdatas[:], proc(a, b: []u8) -> bool {
-		return mem.compare(a, b) < 0
-	})
-
-	previous: []u8
-	written := 0
-	for rdata, i in rdatas {
-		if i > 0 && mem.compare(previous, rdata) == 0 {
-			continue
-		}
-		previous = rdata
-
-		append(&out, ..owner_wire)
-		append(&out, u8(u16(sig.type_covered) >> 8), u8(u16(sig.type_covered)))
-		append(&out, u8(u16(class) >> 8), u8(u16(class)))
-		append(&out, u8(sig.original_ttl >> 24), u8(sig.original_ttl >> 16), u8(sig.original_ttl >> 8), u8(sig.original_ttl))
-		append(&out, u8(len(rdata) >> 8), u8(len(rdata)))
-		append(&out, ..rdata)
-		written += 1
-	}
-	if written == 0 {
+	if len(s.rdatas) == 0 || s.over_budget {
 		return nil, false
+	}
+
+	framing := len(s.rdatas) * 10
+	need := RRSIG_FIXED_PREFIX + signer_len + len(s.rdatas) * owner_len + framing + s.rdata_bytes
+	if cap(s.out) < need {
+		/*
+		Sized for the longest signer and for the records' own owner, which no
+		wildcard a signature names is longer than, so the signer and Labels
+		fields a sender varies from one signature to the next do not make every
+		attempt a fresh buffer. The presentation length plus one is never short
+		of the wire length. Doubled past that, should a caller name some other
+		owner.
+		*/
+		widest := RRSIG_FIXED_PREFIX + dns.MAX_NAME_WIRE + len(s.rdatas) * max(owner_len, len(records[0].name) + 1) + framing + s.rdata_bytes
+		size := max(widest, 2 * cap(s.out))
+		charge_scratch(s, size) or_return
+		s.out = make([dynamic]u8, 0, size, allocator)
+	}
+	out := &s.out
+	clear(out)
+	append(out, u8(u16(sig.type_covered) >> 8), u8(u16(sig.type_covered)))
+	append(out, sig.algorithm, sig.labels)
+	append(out, u8(sig.original_ttl >> 24), u8(sig.original_ttl >> 16), u8(sig.original_ttl >> 8), u8(sig.original_ttl))
+	append(out, u8(sig.expiration >> 24), u8(sig.expiration >> 16), u8(sig.expiration >> 8), u8(sig.expiration))
+	append(out, u8(sig.inception >> 24), u8(sig.inception >> 16), u8(sig.inception >> 8), u8(sig.inception))
+	append(out, u8(sig.key_tag >> 8), u8(sig.key_tag))
+	append(out, ..signer_buf[:signer_len])
+
+	for rdata in s.rdatas {
+		append(out, ..owner_wire)
+		append(out, u8(u16(sig.type_covered) >> 8), u8(u16(sig.type_covered)))
+		append(out, u8(u16(class) >> 8), u8(u16(class)))
+		append(out, u8(sig.original_ttl >> 24), u8(sig.original_ttl >> 16), u8(sig.original_ttl >> 8), u8(sig.original_ttl))
+		append(out, u8(len(rdata) >> 8), u8(len(rdata)))
+		append(out, ..rdata)
 	}
 	return out[:], true
 }
+
+// Type Covered, Algorithm, Labels, Original TTL, Expiration, Inception and Key
+// Tag: the RRSIG RDATA ahead of the signer (RFC 4034 section 3.1).
+@(private)
+RRSIG_FIXED_PREFIX :: 18

@@ -160,6 +160,15 @@ charge_name :: proc(r: ^Reader, n: int) -> Decode_Error {
 }
 
 /*
+Whether a request's running total is past `REQUEST_DECODE_BUDGET`, nil being a
+total nobody counts. The one comparison every reading and every other charge
+against the budget makes, so they all refuse on the same byte.
+*/
+over_request_budget :: proc(spent: ^int) -> bool {
+	return spent != nil && spent^ > REQUEST_DECODE_BUDGET
+}
+
+/*
 Which budget, if either, this reading has run past.
 
 The request's is reported first where both are gone, because it is the one that
@@ -171,7 +180,7 @@ the message - see `Request_Budget`.
 */
 @(private)
 budget_spent :: proc(r: ^Reader) -> Decode_Error {
-	if r.spent != nil && r.spent^ > REQUEST_DECODE_BUDGET {
+	if over_request_budget(r.spent) {
 		return .Request_Budget
 	}
 	return .Name_Budget if r.name_bytes > NAME_BUDGET else .None
@@ -197,7 +206,7 @@ charge_bytes :: proc(r: ^Reader, n: int) -> Decode_Error {
 		return .None
 	}
 	r.spent^ += n
-	return .Request_Budget if r.spent^ > REQUEST_DECODE_BUDGET else .None
+	return .Request_Budget if over_request_budget(r.spent) else .None
 }
 
 @(private)
@@ -352,7 +361,7 @@ decode_sections :: proc(
 	overshoot to the one reading that crossed the budget rather than to all of
 	them.
 	*/
-	if spent != nil && spent^ > REQUEST_DECODE_BUDGET {
+	if over_request_budget(spent) {
 		return {}, .Request_Budget
 	}
 	r := Reader{msg = msg, spent = spent}
