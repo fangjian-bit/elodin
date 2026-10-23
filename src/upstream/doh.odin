@@ -233,13 +233,30 @@ exchange_doh_h1 :: proc(
 			return resp.body, .None
 		}
 
-		if herr == .None && resp.status != 200 {
-			stream_close(&stream)
+		// Whatever the status, the body came from `allocator`, which on the race
+		// path is the heap; the HTTP/2 twin above frees it the same way.
+		if len(resp.body) > 0 {
+			delete(resp.body, allocator)
+		}
+		stream_close(&stream)
+		if herr == .None {
+			/*
+			A 408 on a pooled connection is the server closing one it found
+			idle, written before this request arrived; the client may repeat
+			the request (RFC 9110 15.5.9), and a fresh dial is what it gets.
+			The connection `get_h2_conn` dialled to learn the server speaks
+			HTTP/1.1 is pooled too, so at worst a server answering 408 to
+			everything costs one more dial inside the same deadline.
+			*/
+			if resp.status == 408 && reused {
+				continue
+			}
+			// Any other whole reply that is not a usable 200 - another status, or
+			// a body too short to be a DNS message - is the server's answer, so
+			// it is not retried; and it is the kind the HTTP/2 twin reports, so
+			// health does not depend on what ALPN chose.
 			return nil, .HTTP_Error
 		}
-
-		stream_close(&stream)
-		last := herr if herr != .None else .Bad_Response
 		/*
 		A hang-up is retried whether this query found the connection or dialled
 		it, which is the shape `exchange_pipelined` settled on. Excluding the
@@ -256,8 +273,8 @@ exchange_doh_h1 :: proc(
 		`remaining <= 0` check above, which a socket timeout firing a hair early
 		would slip past, dialling the upstream with a sliver it cannot use.
 		*/
-		if attempt == 1 || last == .Timeout || (!reused && last != .Peer_Closed) {
-			return nil, last
+		if attempt == 1 || herr == .Timeout || (!reused && herr != .Peer_Closed) {
+			return nil, herr
 		}
 	}
 	// Unreachable: the second attempt always returns above.
@@ -353,24 +370,24 @@ fetch_url :: proc(
 			return nil, herr
 		}
 
-		switch resp.status {
-		case 200:
+		if resp.status == 200 {
 			return resp.body, .None
+		}
+		// Every other status is turned away or followed, and its body came from
+		// the caller's allocator, which for a list refresh is the heap.
+		if len(resp.body) > 0 {
+			delete(resp.body, allocator)
+		}
+		switch resp.status {
 		case 301, 302, 303, 307, 308:
 			if resp.location == "" {
 				return nil, .HTTP_Error
-			}
-			if len(resp.body) > 0 {
-				delete(resp.body, allocator)
 			}
 			// RFC 9110 10.2.2: a URI-reference, resolved against the target it
 			// answered (RFC 3986 5.2), then checked as any url at the top.
 			current = netx.resolve_reference(current, resp.location)
 			continue
 		case:
-			if len(resp.body) > 0 {
-				delete(resp.body, allocator)
-			}
 			return nil, .HTTP_Error
 		}
 	}

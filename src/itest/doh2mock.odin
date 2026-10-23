@@ -1,5 +1,6 @@
 package itest
 
+import "core:fmt"
 import "core:net"
 import "core:strconv"
 import "core:strings"
@@ -41,6 +42,10 @@ Doh2_Mock :: struct {
 	parity:     bool,
 	last_reply: []u8,
 	replies:    int,
+
+	// Over HTTP/1.1, answer every query with this status and a short text
+	// body instead, as a resolver behind a maintenance page does. Zero for 200.
+	status:     int,
 }
 
 doh2_mock_make :: proc(port: int, path: string, payload: []u8) -> ^Doh2_Mock {
@@ -313,6 +318,15 @@ doh2_serve_http1 :: proc(conn: ^Doh2_Conn) {
 	sync.mutex_lock(&m.mu)
 	m.h1_hits += 1
 	sync.mutex_unlock(&m.mu)
+
+	if m.status != 0 {
+		page := fmt.tprintf(
+			"HTTP/1.1 %d Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nmaintenance",
+			m.status,
+		)
+		_, _ = tlsx.write(conn.tls, transmute([]u8)page)
+		return
+	}
 
 	reply := doh2_reply_body(m, body[:content_length], context.temp_allocator)
 	b := strings.builder_make(context.temp_allocator)

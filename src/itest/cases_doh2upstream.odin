@@ -1,6 +1,7 @@
 package itest
 
 import "core:fmt"
+import "core:time"
 
 /*
 elodin as a DoH client: ALPN decides between HTTP/2 and HTTP/1.1 against the
@@ -111,6 +112,78 @@ blocking: {{ enabled: false }}
 				stop_server(&srv)
 			} else {
 				skip_case(r, "upstream: doh h2 alpn fallback", "server did not start")
+			}
+		}
+	}
+
+	// --- a race member over HTTP/1.1 answering 503 with a body ---
+	/*
+	The race path takes replies from the heap and frees them only when they
+	win, so a refused reply's body is the exchange's to release (#524). Under
+	`mise run leakcheck` a body left behind is a report; here the case pins that
+	the 503 path is the one taken and that the race rides through it.
+	*/
+	{
+		down_port := next_port(r)
+		up_port := next_port(r)
+		down := doh2_mock_make(down_port, "/dns-query", payload)
+		down.status = 503
+		up := doh2_mock_make(up_port, "/dns-query", payload)
+		if !doh2_mock_start(down, r.cert_file, r.key_file, {"http/1.1"}) {
+			skip_case(r, "upstream: doh h1 503 in a race", "cannot start the mock")
+		} else if !doh2_mock_start(up, r.cert_file, r.key_file) {
+			doh2_mock_stop(down)
+			skip_case(r, "upstream: doh h1 503 in a race", "cannot start the mock")
+		} else {
+			defer doh2_mock_stop(down)
+			defer doh2_mock_stop(up)
+			udp_port := next_port(r)
+			config := fmt.tprintf(
+				`log: {{ level: warn }}
+listeners:
+  udp: {{ enabled: true, address: "127.0.0.1", port: %d }}
+  tcp: {{ enabled: false }}
+upstream:
+  timeout: 5s
+  strategy: race
+  servers:
+    - {{ name: down, type: https, url: "https://127.0.0.1:%d/dns-query", verify: false }}
+    - {{ name: up, type: https, url: "https://127.0.0.1:%d/dns-query", verify: false }}
+cache: {{ enabled: false }}
+blocking: {{ enabled: false }}
+`,
+				udp_port,
+				down_port,
+				up_port,
+			)
+			srv, ok := start_server(r, Server_Options{config = config, udp_port = udp_port})
+			if ok {
+				start_case(r, "upstream: a race rides through an HTTP/1.1 member answering 503 with a body")
+				{
+					for i in 0 ..< 3 {
+						res := query_udp(udp_port, build_query(fix.qname, fix.qtype, id = u16(0x5240 + i)))
+						if check(r, res.ok, "query %d: no response", i) {
+							h := parse_header(r, res.wire)
+							check_eq_int(r, h.ancount, fix.ancount, "answer count")
+						}
+					}
+					// The race answers with the first member, so the 503 member's own
+					// dial may still be under way when the last answer arrives.
+					h1_hits := 0
+					asked_by := time.tick_add(time.tick_now(), 5 * time.Second)
+					for {
+						_, h1_hits = doh2_mock_counts(down)
+						if h1_hits >= 1 || time.tick_diff(time.tick_now(), asked_by) <= 0 {
+							break
+						}
+						time.sleep(10 * time.Millisecond)
+					}
+					check(r, h1_hits >= 1, "the 503 member was never asked, so its body was never read")
+				}
+				end_case(r)
+				stop_server(&srv)
+			} else {
+				skip_case(r, "upstream: doh h1 503 in a race", "server did not start")
 			}
 		}
 	}
