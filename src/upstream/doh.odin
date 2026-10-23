@@ -239,14 +239,21 @@ exchange_doh_h1 :: proc(
 			delete(resp.body, allocator)
 		}
 		stream_close(&stream)
-		// A whole reply that is not a usable 200 - another status, or a body too
-		// short to be a DNS message - is the server's answer, not a stale
-		// connection, so it is not retried; and it is the kind the HTTP/2 twin
-		// reports, so health does not depend on what ALPN chose.
 		if herr == .None {
+			/*
+			A 408 on a pooled connection is the server closing one it found
+			idle, written before this request arrived; the client may repeat
+			the request (RFC 9110 15.5.9), and a fresh dial is what it gets.
+			*/
+			if resp.status == 408 && reused {
+				continue
+			}
+			// Any other whole reply that is not a usable 200 - another status, or
+			// a body too short to be a DNS message - is the server's answer, so
+			// it is not retried; and it is the kind the HTTP/2 twin reports, so
+			// health does not depend on what ALPN chose.
 			return nil, .HTTP_Error
 		}
-		last := herr
 		/*
 		A hang-up is retried whether this query found the connection or dialled
 		it, which is the shape `exchange_pipelined` settled on. Excluding the
@@ -263,8 +270,8 @@ exchange_doh_h1 :: proc(
 		`remaining <= 0` check above, which a socket timeout firing a hair early
 		would slip past, dialling the upstream with a sliver it cannot use.
 		*/
-		if attempt == 1 || last == .Timeout || (!reused && last != .Peer_Closed) {
-			return nil, last
+		if attempt == 1 || herr == .Timeout || (!reused && herr != .Peer_Closed) {
+			return nil, herr
 		}
 	}
 	// Unreachable: the second attempt always returns above.

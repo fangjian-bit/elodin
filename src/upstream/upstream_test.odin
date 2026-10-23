@@ -2642,6 +2642,85 @@ test_a_refused_doh_h1_reply_releases_its_body :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
+@(private = "file")
+http_mock_twice :: proc(ms: ^[2]Http_Mock) {
+	http_mock_once(&ms[0])
+	http_mock_once(&ms[1])
+}
+
+/*
+A 408 on a pooled connection is the server closing one it found idle, and the
+request may be repeated (RFC 9110 15.5.9): it is asked again on a fresh dial,
+which answers. On a connection the query dialled itself, a 408 is the server's
+answer to this request and is reported. The mock serves the pooled connection
+the 408 and the next one a reply.
+*/
+@(test)
+test_a_doh_h1_408_on_a_pooled_connection_is_retried :: proc(t: ^testing.T) {
+	query := []u8{0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1}
+	answer := make([]u8, len(query), context.temp_allocator)
+	copy(answer, query)
+	answer[2], answer[3] = 0x81, 0x80
+	timeout_page := "HTTP/1.1 408 Request Timeout\r\nContent-Length: 4\r\nConnection: close\r\n\r\nidle"
+	ok_reply := fmt.tprintf(
+		"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		len(answer),
+		string(answer),
+	)
+
+	for pooled in ([]bool{true, false}) {
+		listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+		if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
+			return
+		}
+		bound, _ := net.bound_endpoint(listener)
+		// The fresh-dial run takes one connection; the mock gives up on the other.
+		_ = net.set_option(listener, .Receive_Timeout, time.Second)
+		ms := [2]Http_Mock{{listener = listener, reply = timeout_page}, {listener = listener, reply = ok_reply}}
+		server := thread.create_and_start_with_poly_data(&ms, http_mock_twice)
+
+		u, uerr := make_upstream(
+			config.Upstream_Spec {
+				name = "idle-closing",
+				kind = .TCP,
+				address = "127.0.0.1",
+				port = bound.port,
+				hostname = "doh.invalid",
+				path = "/dns-query",
+			},
+			8,
+			30 * time.Second,
+		)
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		if testing.expectf(t, uerr == .None, "cannot make the upstream: %v", uerr) {
+			if pooled {
+				socket, derr := dial_tcp_timeout(bound, time.Second)
+				if testing.expectf(t, derr == .None, "cannot dial the mock: %v", derr) {
+					put_idle(u, Idle_Conn{socket = socket})
+				}
+			}
+			resp, err := exchange_doh_h1(u, query, query, 2 * time.Second, mem.tracking_allocator(&track))
+			if pooled {
+				testing.expectf(t, err == .None, "a 408 on a pooled connection was not retried: %v", err)
+				testing.expect(t, len(resp) == len(answer), "the retry's answer did not come back")
+			} else {
+				testing.expectf(t, err == .HTTP_Error, "a 408 on a fresh dial gave %v", err)
+			}
+			if resp != nil {
+				delete(resp, mem.tracking_allocator(&track))
+			}
+			expect_caller_holds_nothing(t, &track, "408")
+			destroy(u)
+		}
+		mem.tracking_allocator_destroy(&track)
+		thread.join(server)
+		thread.destroy(server)
+		net.close(listener)
+	}
+	free_all(context.temp_allocator)
+}
+
 /*
 A list host's redirect with no Location is refused, and the body it came with
 is released: `fetch_url` takes the body from its caller's allocator, which for
