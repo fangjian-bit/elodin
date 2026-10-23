@@ -630,3 +630,42 @@ test_the_dnskey_render_is_charged_to_the_request :: proc(t: ^testing.T) {
 	testing.expect_value(t, budget.verifications, untouched.verifications)
 	free_all(context.temp_allocator)
 }
+
+/*
+The DS step's render is charged too. It sits between two readings in the walk,
+so a request one byte short of room fails at a reading either way; what tells
+them apart is the bill. The DS set is padded with copies of its own record, and
+what the padding adds to the walk's charges must be more than what reading the
+padded reply adds: the rest is the render.
+*/
+@(test)
+test_the_ds_render_is_charged_to_the_request :: proc(t: ^testing.T) {
+	walk_spent :: proc(pads: []Padding) -> (spent: int, verifications: int) {
+		pads := pads
+		v := make_validator(kt_query, &pads, Options{})
+		defer destroy_validator(v)
+		budget := query_budget(v)
+		budget.spent = &spent
+		zone_trust(v, &budget, "cloudflare.com.", time.unix(FIXTURE_TIME, 0), context.temp_allocator)
+		return spent, budget.verifications
+	}
+	read_spent :: proc(pads: []Padding) -> (spent: int) {
+		pads := pads
+		wire, _ := kt_query(&pads, "cloudflare.com.", .DS, context.temp_allocator, nil)
+		dns.decode_message(wire, context.temp_allocator, &spent)
+		return
+	}
+	padded := []Padding{{name = "cloudflare.com.", type = .DS, records = 255}}
+	plain := []Padding{{name = "cloudflare.com.", type = .DS}}
+
+	walk_plain, untouched := walk_spent(plain)
+	walk_padded, verifications := walk_spent(padded)
+	// The premise: the padding changed nothing about what verified.
+	testing.expect_value(t, verifications, untouched)
+
+	reading := read_spent(padded) - read_spent(plain)
+	rendering := walk_padded - walk_plain - reading
+	// 255 more DS RDATAs of 36 bytes, in the buffer they are rendered into.
+	testing.expectf(t, rendering >= 255 * 36, "the padded DS set's render charged %d bytes", rendering)
+	free_all(context.temp_allocator)
+}
