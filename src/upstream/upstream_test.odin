@@ -2576,58 +2576,104 @@ A DoH reply over HTTP/1.1 that is turned away leaves the caller holding nothing.
 allocator - which on the race path is the heap, freed by the worker only on
 success. So every refusal releases it: a non-200 (a 503 maintenance page, a 429
 with text), and a 200 too short to be a DNS message (#524).
+
+Each is also asked on a pooled connection. A whole reply is the server's answer
+rather than a stale connection, so it is reported as the HTTP/2 path reports it
+and not retried: the mock serves one connection, and a second dial would wait
+out the deadline.
 */
 @(test)
 test_a_refused_doh_h1_reply_releases_its_body :: proc(t: ^testing.T) {
-	Case :: struct {
-		reply: string,
-		want:  Error,
-	}
-	cases := []Case {
-		{"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello", .HTTP_Error},
-		{"HTTP/1.1 429 Too Many Requests\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nslow!\r\n0\r\n\r\n", .HTTP_Error},
-		{"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello", .Bad_Response},
+	replies := []string {
+		"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+		"HTTP/1.1 429 Too Many Requests\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nslow!\r\n0\r\n\r\n",
+		"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
 	}
 	query := []u8{0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1}
-	for c in cases {
-		listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
-		if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
-			return
-		}
-		bound, _ := net.bound_endpoint(listener)
-		m := Http_Mock {
-			listener = listener,
-			reply    = c.reply,
-		}
-		server := thread.create_and_start_with_poly_data(&m, http_mock_once)
+	for reply in replies {
+		for pooled in ([]bool{false, true}) {
+			listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+			if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
+				return
+			}
+			bound, _ := net.bound_endpoint(listener)
+			// A run that never dials still ends: the mock gives up on `accept`.
+			_ = net.set_option(listener, .Receive_Timeout, 3 * time.Second)
+			m := Http_Mock {
+				listener = listener,
+				reply    = reply,
+			}
+			server := thread.create_and_start_with_poly_data(&m, http_mock_once)
 
-		// No `tls_ctx`, as in the retry test above: the body is the question.
-		u, uerr := make_upstream(
-			config.Upstream_Spec {
-				name = "refusing",
-				kind = .TCP,
-				address = "127.0.0.1",
-				port = bound.port,
-				hostname = "doh.invalid",
-				path = "/dns-query",
-			},
-			8,
-			30 * time.Second,
-		)
-		track: mem.Tracking_Allocator
-		mem.tracking_allocator_init(&track, context.allocator)
-		if testing.expectf(t, uerr == .None, "cannot make the upstream: %v", uerr) {
-			resp, err := exchange_doh_h1(u, query, query, 2 * time.Second, mem.tracking_allocator(&track))
-			testing.expectf(t, err == c.want, "%q: got %v, want %v", c.reply[:12], err, c.want)
-			testing.expect(t, resp == nil, "a refused reply came back as an answer")
-			expect_caller_holds_nothing(t, &track, c.reply[:12])
-			destroy(u)
+			// No `tls_ctx`, as in the retry test above: the body is the question.
+			u, uerr := make_upstream(
+				config.Upstream_Spec {
+					name = "refusing",
+					kind = .TCP,
+					address = "127.0.0.1",
+					port = bound.port,
+					hostname = "doh.invalid",
+					path = "/dns-query",
+				},
+				8,
+				30 * time.Second,
+			)
+			track: mem.Tracking_Allocator
+			mem.tracking_allocator_init(&track, context.allocator)
+			if testing.expectf(t, uerr == .None, "cannot make the upstream: %v", uerr) {
+				if pooled {
+					socket, derr := dial_tcp_timeout(bound, time.Second)
+					if testing.expectf(t, derr == .None, "cannot dial the mock: %v", derr) {
+						put_idle(u, Idle_Conn{socket = socket})
+					}
+				}
+				resp, err := exchange_doh_h1(u, query, query, 2 * time.Second, mem.tracking_allocator(&track))
+				testing.expectf(t, err == .HTTP_Error, "%q pooled=%v: got %v", reply[:12], pooled, err)
+				testing.expect(t, resp == nil, "a refused reply came back as an answer")
+				expect_caller_holds_nothing(t, &track, reply[:12])
+				destroy(u)
+			}
+			mem.tracking_allocator_destroy(&track)
+			thread.join(server)
+			thread.destroy(server)
+			net.close(listener)
 		}
-		mem.tracking_allocator_destroy(&track)
+	}
+	free_all(context.temp_allocator)
+}
+
+/*
+A list host's redirect with no Location is refused, and the body it came with
+is released: `fetch_url` takes the body from its caller's allocator, which for
+a list refresh is the heap (#524).
+*/
+@(test)
+test_a_redirect_without_a_location_releases_its_body :: proc(t: ^testing.T) {
+	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
+		return
+	}
+	defer net.close(listener)
+	bound, _ := net.bound_endpoint(listener)
+	_ = net.set_option(listener, .Receive_Timeout, 3 * time.Second)
+	m := Http_Mock {
+		listener = listener,
+		reply    = "HTTP/1.1 301 Moved Permanently\r\nContent-Length: 5\r\nConnection: close\r\n\r\nmoved",
+	}
+	server := thread.create_and_start_with_poly_data(&m, http_mock_once)
+	defer {
 		thread.join(server)
 		thread.destroy(server)
-		net.close(listener)
 	}
+
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	url := fmt.tprintf("http://127.0.0.1:%d/list.txt", bound.port)
+	body, err := fetch_url(url, nil, 2 * time.Second, 5 * time.Second, mem.tracking_allocator(&track))
+	testing.expect_value(t, err, Error.HTTP_Error)
+	testing.expect(t, body == nil, "a redirect with nowhere to go came back as the list")
+	expect_caller_holds_nothing(t, &track, "301 without a Location")
 	free_all(context.temp_allocator)
 }
 

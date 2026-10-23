@@ -238,13 +238,15 @@ exchange_doh_h1 :: proc(
 		if len(resp.body) > 0 {
 			delete(resp.body, allocator)
 		}
-		if herr == .None && resp.status != 200 {
-			stream_close(&stream)
+		stream_close(&stream)
+		// A whole reply that is not a usable 200 - another status, or a body too
+		// short to be a DNS message - is the server's answer, not a stale
+		// connection, so it is not retried; and it is the kind the HTTP/2 twin
+		// reports, so health does not depend on what ALPN chose.
+		if herr == .None {
 			return nil, .HTTP_Error
 		}
-
-		stream_close(&stream)
-		last := herr if herr != .None else .Bad_Response
+		last := herr
 		/*
 		A hang-up is retried whether this query found the connection or dialled
 		it, which is the shape `exchange_pipelined` settled on. Excluding the
@@ -358,24 +360,24 @@ fetch_url :: proc(
 			return nil, herr
 		}
 
-		switch resp.status {
-		case 200:
+		if resp.status == 200 {
 			return resp.body, .None
+		}
+		// Every other status is turned away or followed, and its body came from
+		// the caller's allocator, which for a list refresh is the heap.
+		if len(resp.body) > 0 {
+			delete(resp.body, allocator)
+		}
+		switch resp.status {
 		case 301, 302, 303, 307, 308:
 			if resp.location == "" {
 				return nil, .HTTP_Error
-			}
-			if len(resp.body) > 0 {
-				delete(resp.body, allocator)
 			}
 			// RFC 9110 10.2.2: a URI-reference, resolved against the target it
 			// answered (RFC 3986 5.2), then checked as any url at the top.
 			current = netx.resolve_reference(current, resp.location)
 			continue
 		case:
-			if len(resp.body) > 0 {
-				delete(resp.body, allocator)
-			}
 			return nil, .HTTP_Error
 		}
 	}
