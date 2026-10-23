@@ -244,6 +244,9 @@ exchange_doh_h1 :: proc(
 			A 408 on a pooled connection is the server closing one it found
 			idle, written before this request arrived; the client may repeat
 			the request (RFC 9110 15.5.9), and a fresh dial is what it gets.
+			The connection `get_h2_conn` dialled to learn the server speaks
+			HTTP/1.1 is pooled too, so at worst a server answering 408 to
+			everything costs one more dial inside the same deadline.
 			*/
 			if resp.status == 408 && reused {
 				continue

@@ -1,6 +1,7 @@
 package itest
 
 import "core:fmt"
+import "core:time"
 
 /*
 elodin as a DoH client: ALPN decides between HTTP/2 and HTTP/1.1 against the
@@ -166,7 +167,17 @@ blocking: {{ enabled: false }}
 							check_eq_int(r, h.ancount, fix.ancount, "answer count")
 						}
 					}
-					_, h1_hits := doh2_mock_counts(down)
+					// The race answers with the first member, so the 503 member's own
+					// dial may still be under way when the last answer arrives.
+					h1_hits := 0
+					asked_by := time.tick_add(time.tick_now(), 5 * time.Second)
+					for {
+						_, h1_hits = doh2_mock_counts(down)
+						if h1_hits >= 1 || time.tick_diff(time.tick_now(), asked_by) <= 0 {
+							break
+						}
+						time.sleep(10 * time.Millisecond)
+					}
 					check(r, h1_hits >= 1, "the 503 member was never asked, so its body was never read")
 				}
 				end_case(r)
