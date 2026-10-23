@@ -674,7 +674,7 @@ Either way the answer is `Indeterminate`; the words are what tell them apart.
 */
 @(private)
 exhausted_reason :: proc(budget: ^Budget) -> string {
-	if budget.spent != nil && budget.spent^ > dns.REQUEST_DECODE_BUDGET {
+	if dns.over_request_budget(budget.spent) {
 		return READING_OVER_BUDGET
 	}
 	return "verification budget spent"

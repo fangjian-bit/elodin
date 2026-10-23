@@ -378,11 +378,11 @@ over it, and the buffer each attempt's signing input is built in.
 
 Only the RRSIG's own RDATA, the owner a wildcard signature names and the
 Original TTL differ from one signature over a set to the next; the sorted,
-de-duplicated RDATA is the same every time. Rendering it per attempt cost about
-one and a half times the set's wire size per signature, so a 60 KB set and the
-`MAX_VERIFICATIONS_PER_QUERY` signatures a zone may publish over it cost several
-MB of arena per query (issue #527). With one of these per RRset that is the set
-once and the buffer once.
+de-duplicated RDATA is the same every time. A render per attempt costs about one
+and a half times the set's wire size per signature, so a 60 KB set and the
+`MAX_VERIFICATIONS_PER_QUERY` signatures a zone may publish over it would cost
+several MB of arena per query (issue #527). With one of these per RRset that is
+the set once and the buffer once.
 
 Zero-valued to start with, one per RRset: a scratch handed a different set
 renders that one instead of reusing the first.
@@ -397,12 +397,14 @@ Signing_Scratch :: struct {
 	*/
 	spent:       ^int,
 	over_budget: bool,
-	// The set `rdatas` was rendered from, and whether it was: a set that would
-	// not render is remembered too, so it is not attempted again per signature.
+	// The set `rdatas` was rendered from, or nil before the first: a set that
+	// would not render is remembered too, so it is not attempted again per
+	// signature.
 	records:     []dns.Record,
-	rendered:    bool,
 	// Sorted and de-duplicated, slices into one buffer; nil if it would not render.
 	rdatas:      [][]u8,
+	// Their total length.
+	rdata_bytes: int,
 	out:         [dynamic]u8,
 }
 
@@ -415,7 +417,7 @@ charge_scratch :: proc(scratch: ^Signing_Scratch, n: int) -> bool {
 		return true
 	}
 	scratch.spent^ += n
-	if scratch.spent^ > dns.REQUEST_DECODE_BUDGET {
+	if dns.over_request_budget(scratch.spent) {
 		scratch.over_budget = true
 		return false
 	}
@@ -430,8 +432,14 @@ RRset (RFC 4034 section 6.3).
 @(private)
 render_rdatas :: proc(scratch: ^Signing_Scratch, records: []dns.Record, allocator: mem.Allocator) -> bool {
 	scratch.records = records
-	scratch.rendered = true
 	scratch.rdatas = nil
+	scratch.rdata_bytes = 0
+	// A request with nothing left to spend renders nothing, as
+	// `dns.decode_message` reads nothing, so the overshoot stays one set.
+	if dns.over_request_budget(scratch.spent) {
+		scratch.over_budget = true
+		return false
+	}
 	// Both taken before the buffer, so the buffer is the last thing in the
 	// arena and grows in place.
 	ends := make([]int, len(records), allocator)
@@ -446,8 +454,13 @@ render_rdatas :: proc(scratch: ^Signing_Scratch, records: []dns.Record, allocato
 		}
 		ends[i] = len(store)
 	}
-	// Charged whether or not it rendered: the arena has paid either way.
-	if !charge_scratch(scratch, cap(store) + len(records) * (size_of(int) + size_of([]u8))) || !rendered {
+	/*
+	Charged whether or not it rendered: the arena has paid either way. Twice the
+	buffer's capacity, because growth that cannot happen in place - past the end
+	of an arena block - leaves every smaller copy behind, and those sum to less
+	than the last.
+	*/
+	if !charge_scratch(scratch, 2 * cap(store) + len(records) * (size_of(int) + size_of([]u8))) || !rendered {
 		return false
 	}
 	start := 0
@@ -465,6 +478,7 @@ render_rdatas :: proc(scratch: ^Signing_Scratch, records: []dns.Record, allocato
 		}
 		rdatas[n] = rdata
 		n += 1
+		scratch.rdata_bytes += len(rdata)
 	}
 	scratch.rdatas = rdatas[:n]
 	return true
@@ -508,17 +522,15 @@ signing_input :: proc(
 	signer_buf: [dns.MAX_NAME_WIRE]u8
 	signer_len := canonical_name(sig.signer, signer_buf[:]) or_return
 
-	if !s.rendered || raw_data(s.records) != raw_data(records) || len(s.records) != len(records) {
+	if raw_data(s.records) != raw_data(records) || len(s.records) != len(records) {
 		render_rdatas(s, records, allocator)
 	}
 	if len(s.rdatas) == 0 || s.over_budget {
 		return nil, false
 	}
 
-	need := RRSIG_FIXED_PREFIX + signer_len
-	for rdata in s.rdatas {
-		need += owner_len + 10 + len(rdata)
-	}
+	framing := len(s.rdatas) * 10
+	need := RRSIG_FIXED_PREFIX + signer_len + len(s.rdatas) * owner_len + framing + s.rdata_bytes
 	if cap(s.out) < need {
 		/*
 		Sized for the longest signer and for the records' own owner, which no
@@ -528,10 +540,7 @@ signing_input :: proc(
 		of the wire length. Doubled past that, should a caller name some other
 		owner.
 		*/
-		widest := RRSIG_FIXED_PREFIX + dns.MAX_NAME_WIRE
-		for rdata in s.rdatas {
-			widest += max(owner_len, len(records[0].name) + 1) + 10 + len(rdata)
-		}
+		widest := RRSIG_FIXED_PREFIX + dns.MAX_NAME_WIRE + len(s.rdatas) * max(owner_len, len(records[0].name) + 1) + framing + s.rdata_bytes
 		size := max(need, widest, 2 * cap(s.out))
 		charge_scratch(s, size) or_return
 		s.out = make([dynamic]u8, 0, size, allocator)

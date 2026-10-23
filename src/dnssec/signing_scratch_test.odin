@@ -10,10 +10,10 @@ import "elodin:dns"
 /*
 A signature over an RRset is checked against the set's canonical form, and every
 signature a response carries over one set is checked against the same one. Issue
-#527: rendering it again per attempt cost about one and a half times the set per
+#527: a render per attempt costs about one and a half times the set per
 signature, so one 60 KB set and the `MAX_VERIFICATIONS_PER_QUERY` forgeries a
-zone may publish over it under a real key tag took 5.8 MB of arena per query,
-charged to no budget.
+zone may publish over it under a real key tag would take 5.8 MB of arena per
+query.
 */
 
 @(private = "file")
@@ -111,7 +111,7 @@ test_signature_attempts_render_the_rrset_once :: proc(t: ^testing.T) {
 		testing.expect_value(t, budget.verifications, signatures)
 	}
 	// The set once and the buffer once, about 64 KB each, whatever the number
-	// of signatures. Rendered per attempt it was about 91 KB more apiece.
+	// of signatures. A render per attempt would be about 91 KB more apiece.
 	testing.expect(t, used[0] < 3 * 64 * 1024)
 	testing.expectf(
 		t,
@@ -142,15 +142,22 @@ test_signing_input_is_charged_to_the_request :: proc(t: ^testing.T) {
 	testing.expect(t, spent > dns.REQUEST_DECODE_BUDGET)
 	testing.expect_value(t, exhausted_reason(&budget), READING_OVER_BUDGET)
 
-	// With room it is charged, once.
-	spent = 0
-	budget = Budget {
-		spent = &spent,
+	// With room it is charged, and once: one signature over the set and
+	// sixty-four cost the same.
+	charged: [2]int
+	for signatures, i in ([2]int{1, MAX_VERIFICATIONS_PER_QUERY}) {
+		spent = 0
+		budget = Budget {
+			spent = &spent,
+		}
+		_, _, _, ok, exhausted = verified_rrset(&budget, section[:230 + signatures], SS_OWNER, .TXT, .IN, "example.com.", keys, SS_NOW, context.temp_allocator)
+		testing.expect(t, !ok && !exhausted)
+		testing.expect_value(t, budget.verifications, signatures)
+		testing.expect_value(t, exhausted_reason(&budget), "verification budget spent")
+		charged[i] = spent
 	}
-	_, _, _, ok, exhausted = verified_rrset(&budget, section, SS_OWNER, .TXT, .IN, "example.com.", keys, SS_NOW, context.temp_allocator)
-	testing.expect(t, !ok && !exhausted)
-	testing.expectf(t, spent > 2 * 60_000 && spent < 3 * 64 * 1024, "the render charged %d bytes", spent)
-	testing.expect_value(t, exhausted_reason(&budget), "verification budget spent")
+	testing.expectf(t, charged[0] > 2 * 60_000, "the render charged %d bytes", charged[0])
+	testing.expect_value(t, charged[1], charged[0])
 	free_all(context.temp_allocator)
 }
 
@@ -229,6 +236,28 @@ test_a_set_that_will_not_render_is_tried_once :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
+// A request already past its budget renders nothing, as it reads nothing.
+@(test)
+test_a_spent_request_renders_nothing :: proc(t: ^testing.T) {
+	free_all(context.temp_allocator)
+	records := ss_big_txt()
+	sig := Rrsig {
+		type_covered = .TXT,
+		labels       = 3,
+		signer       = "example.com.",
+	}
+	spent := dns.REQUEST_DECODE_BUDGET + 1
+	scratch := Signing_Scratch {
+		spent = &spent,
+	}
+	mark := arena_used()
+	_, ok := signing_input(sig, SS_OWNER, .IN, records, context.temp_allocator, &scratch)
+	testing.expect(t, !ok)
+	testing.expect(t, scratch.over_budget)
+	testing.expect_value(t, arena_used() - mark, 0)
+	free_all(context.temp_allocator)
+}
+
 @(private = "file")
 ss_no_query :: proc(_: rawptr, _: string, _: dns.Type, _: mem.Allocator, _: ^time.Tick) -> ([]u8, bool) {
 	return nil, false
@@ -291,5 +320,39 @@ test_answer_signatures_do_not_rerender_the_set :: proc(t: ^testing.T) {
 	_, refused, reason, _ := ss_answer(MAX_VERIFICATIONS_PER_QUERY, &spent)
 	testing.expect_value(t, refused, Status.Indeterminate)
 	testing.expect_value(t, reason, READING_OVER_BUDGET)
+	free_all(context.temp_allocator)
+}
+
+/*
+The charge is at least what the arena gave up, even when the RDATA buffer
+outgrows the arena block it started in and is copied rather than grown in
+place: the copies it leaves behind are the request's too.
+*/
+@(test)
+test_the_render_charge_covers_what_the_arena_took :: proc(t: ^testing.T) {
+	records := ss_big_txt()
+	sig := Rrsig {
+		type_covered = .TXT,
+		labels       = 3,
+		signer       = "example.com.",
+	}
+	// Starting at each offset into a fresh block, so that one of them puts the
+	// buffer's growth across the block's end.
+	for offset := 0; offset < 256 * 1024; offset += 16 * 1024 {
+		free_all(context.temp_allocator)
+		records = ss_big_txt()
+		if offset > 0 {
+			_ = make([]u8, offset, context.temp_allocator)
+		}
+		spent := 0
+		scratch := Signing_Scratch {
+			spent = &spent,
+		}
+		mark := arena_used()
+		_, ok := signing_input(sig, SS_OWNER, .IN, records, context.temp_allocator, &scratch)
+		taken := arena_used() - mark
+		testing.expect(t, ok)
+		testing.expectf(t, spent >= taken, "at offset %d the render took %d bytes of arena and charged %d", offset, taken, spent)
+	}
 	free_all(context.temp_allocator)
 }
