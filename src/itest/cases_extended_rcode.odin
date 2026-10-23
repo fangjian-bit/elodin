@@ -175,7 +175,6 @@ run_extended_rcode_cases :: proc(r: ^Runner) {
 		if !broken_ok || !good_ok {
 			skip_case(r, "extended rcode: failover", "cannot start the mock upstreams")
 		} else {
-
 			udp_port := next_port(r)
 			servers := fmt.tprintf("    - \"127.0.0.1:%d\"\n    - \"127.0.0.1:%d\"\n", broken_port, good_port)
 			srv, ok := start_server(

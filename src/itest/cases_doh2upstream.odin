@@ -131,14 +131,14 @@ blocking: {{ enabled: false }}
 		down := doh2_mock_make(down_port, "/dns-query", payload)
 		down.status = 503
 		up := doh2_mock_make(up_port, "/dns-query", payload)
-		if !doh2_mock_start(down, r.cert_file, r.key_file, {"http/1.1"}) {
-			skip_case(r, "upstream: doh h1 503 in a race", "cannot start the mock")
-		} else if !doh2_mock_start(up, r.cert_file, r.key_file) {
-			doh2_mock_stop(down)
+		// Both are stopped, started or not: the first may have started when the
+		// second did not.
+		down_ok, up_ok := doh2_mock_start(down, r.cert_file, r.key_file, {"http/1.1"}), doh2_mock_start(up, r.cert_file, r.key_file)
+		defer doh2_mock_stop(down)
+		defer doh2_mock_stop(up)
+		if !down_ok || !up_ok {
 			skip_case(r, "upstream: doh h1 503 in a race", "cannot start the mock")
 		} else {
-			defer doh2_mock_stop(down)
-			defer doh2_mock_stop(up)
 			udp_port := next_port(r)
 			config := fmt.tprintf(
 				`log: {{ level: warn }}
@@ -251,8 +251,17 @@ blocking: {{ enabled: false }}
 	{
 		port := next_port(r)
 		held, herr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = port})
-		if herr != nil {
-			skip_case(r, "harness: a mock that cannot bind", "cannot hold the port")
+		// The plain mock below needs the UDP port free, so it reaches the TCP
+		// listen; another run holding it is a skip, as the TCP port is.
+		probe, perr := net.make_bound_udp_socket(net.IP4_Loopback, port)
+		if probe != 0 {
+			net.close(probe)
+		}
+		if herr != nil || perr != nil {
+			if herr == nil {
+				net.close(held)
+			}
+			skip_case(r, "harness: a mock that cannot bind its port can still be stopped", "cannot hold the port")
 		} else {
 			start_case(r, "harness: a mock that cannot bind its port can still be stopped")
 			mock := doh2_mock_make(port, "/dns-query", payload)
@@ -265,11 +274,6 @@ blocking: {{ enabled: false }}
 			mock_stop(dot)
 			// The UDP port is free, so the plain mock binds it and then fails on
 			// TCP, closing the UDP socket it already had.
-			probe, perr := net.make_bound_udp_socket(net.IP4_Loopback, port)
-			if probe != 0 {
-				net.close(probe)
-			}
-			check(r, perr == nil, "the UDP port is taken, so the start never reaches the TCP listen")
 			plain := mock_make("held", port)
 			check(r, !mock_start(plain), "the mock started on a port already held")
 			check(r, plain.udp_socket == 0, "the failed start kept a UDP socket it had closed")

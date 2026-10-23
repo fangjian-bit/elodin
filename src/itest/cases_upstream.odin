@@ -95,7 +95,7 @@ run_strategy_cases :: proc(r: ^Runner) {
 		mock_reply_all(mocks[i], make_a_response(QNAME, addrs[i], 60))
 		if !mock_start(mocks[i]) {
 			skip_case(r, "strategies", "cannot start the mock upstreams")
-			for k in 0 ..< i {
+			for k in 0 ..= i {
 				mock_stop(mocks[k])
 			}
 			return
@@ -208,7 +208,6 @@ blocking: {{ enabled: false }}
 		if !slow_ok || !fast_ok {
 			skip_case(r, "strategy: race", "cannot start the racing mocks")
 		} else {
-
 			udp_port := next_port(r)
 			srv, ok := start_server(
 				r,
@@ -270,7 +269,6 @@ blocking: {{ enabled: false }}
 		if !dead_ok || !live_ok {
 			skip_case(r, "strategy: failover past a dead upstream", "cannot start the mocks")
 		} else {
-
 			udp_port := next_port(r)
 			srv, ok := start_server(
 				r,
