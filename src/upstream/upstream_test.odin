@@ -969,10 +969,31 @@ test_chunk_size_too_large_is_refused :: proc(t: ^testing.T) {
 		}
 		append(&r.buf, ..transmute([]u8)body)
 
-		_, err := read_chunked(&r, context.temp_allocator)
+		_, err := read_chunked(&r, context.temp_allocator, MAX_HTTP_BODY)
 		testing.expectf(t, err != .None, "%q was accepted as a chunk size", body)
 		testing.expectf(t, r.pos >= 0, "%q left the reader at position %d", body, r.pos)
 	}
+	free_all(context.temp_allocator)
+}
+
+// `max_body` is the most the caller's allocator is asked to hold, from the first
+// reservation on: a small limit is not met with a full-size starting buffer.
+@(test)
+test_read_chunked_never_reserves_past_its_limit :: proc(t: ^testing.T) {
+	body := "4\r\nabcd\r\n0\r\n\r\n"
+	r := Buf_Reader {
+		buf = make([dynamic]u8, 0, 128, context.temp_allocator),
+	}
+	append(&r.buf, ..transmute([]u8)body)
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+
+	got, err := read_chunked(&r, mem.tracking_allocator(&track), 100)
+	testing.expect_value(t, err, Error.None)
+	testing.expect_value(t, string(got), "abcd")
+	testing.expectf(t, track.peak_memory_allocated <= 100, "peaked at %d bytes for a limit of 100", track.peak_memory_allocated)
+	delete(got, mem.tracking_allocator(&track))
 	free_all(context.temp_allocator)
 }
 
@@ -2642,6 +2663,126 @@ test_a_refused_doh_h1_reply_releases_its_body :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
+/*
+A DoH reply over HTTP/1.1 is a DNS message, so it is at most `dns.MAX_MESSAGE`
+bytes (RFC 8484 6), not the 64 MB a blocklist may be (#525).
+Every framing stops there: a Content-Length past it before a byte of the body
+is read, chunks and a close-delimited body as they reach it. Neither the
+caller's allocator nor the reader's buffer holds more than one message's worth
+on the way, and a message of exactly the limit still goes through.
+
+The body echoes the query's header and question, so a reply that got past the
+bound would be taken as the answer. Each is also asked on a pooled connection: a
+reply too long is the server's answer, not a stale connection, so it is not
+asked again on a fresh one - the mock serves one connection, and a second dial
+would wait out the deadline.
+*/
+@(test)
+test_doh_h1_reply_is_bounded_by_a_dns_message :: proc(t: ^testing.T) {
+	query := []u8{0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1}
+	Framing :: enum {
+		Content_Length,
+		Chunked,
+		Unframed,
+	}
+	for framing in Framing {
+		for size in ([]int{dns.MAX_MESSAGE, dns.MAX_MESSAGE + 1, 98304}) {
+			for pooled in ([]bool{false, true}) {
+				message := make([]u8, size, context.temp_allocator)
+				copy(message, query)
+				message[2] |= 0x80
+				b := strings.builder_make(context.temp_allocator)
+				strings.write_string(&b, "HTTP/1.1 200 OK\r\n")
+				switch framing {
+				case .Content_Length:
+					fmt.sbprintf(&b, "Content-Length: %d\r\n\r\n", size)
+					strings.write_bytes(&b, message)
+				case .Chunked:
+					strings.write_string(&b, "Transfer-Encoding: chunked\r\n\r\n")
+					for rest := message; len(rest) > 0; {
+						n := min(len(rest), 16384)
+						fmt.sbprintf(&b, "%x\r\n", n)
+						strings.write_bytes(&b, rest[:n])
+						strings.write_string(&b, "\r\n")
+						rest = rest[n:]
+					}
+					strings.write_string(&b, "0\r\n\r\n")
+				case .Unframed:
+					strings.write_string(&b, "Connection: close\r\n\r\n")
+					strings.write_bytes(&b, message)
+				}
+
+				listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+				if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
+					return
+				}
+				bound, _ := net.bound_endpoint(listener)
+				_ = net.set_option(listener, .Receive_Timeout, 3 * time.Second)
+				// Held open until the client is done, so a refusal is the client's and
+				// not a reset from a mock that closed with the reply still in flight.
+				// Only the unframed body needs the close to end it.
+				m := Http_Mock {
+					listener = listener,
+					reply    = strings.to_string(b),
+					hold     = framing != .Unframed,
+				}
+				server := thread.create_and_start_with_poly_data(&m, http_mock_once)
+
+				u, uerr := make_upstream(
+					config.Upstream_Spec {
+						name = "oversized",
+						kind = .TCP,
+						address = "127.0.0.1",
+						port = bound.port,
+						hostname = "doh.invalid",
+						path = "/dns-query",
+					},
+					8,
+					30 * time.Second,
+				)
+				if testing.expectf(t, uerr == .None, "cannot make the upstream: %v", uerr) {
+					caller, reader: mem.Tracking_Allocator
+					mem.tracking_allocator_init(&caller, context.allocator)
+					mem.tracking_allocator_init(&reader, context.allocator)
+					if pooled {
+						socket, derr := dial_tcp_timeout(bound, time.Second)
+						if testing.expectf(t, derr == .None, "cannot dial the mock: %v", derr) {
+							put_idle(u, Idle_Conn{socket = socket})
+						}
+					}
+					resp: []u8
+					err: Error
+					{
+						context.allocator = mem.tracking_allocator(&reader)
+						resp, err = exchange_doh_h1(u, query, query, 5 * time.Second, mem.tracking_allocator(&caller))
+					}
+					if size <= dns.MAX_MESSAGE {
+						testing.expectf(t, err == .None, "%v %d pooled=%v: a whole DNS message was refused: %v", framing, size, pooled, err)
+						testing.expectf(t, len(resp) == size, "%v %d pooled=%v: came back as %d bytes", framing, size, pooled, len(resp))
+					} else {
+						testing.expectf(t, err == .Too_Large, "%v %d pooled=%v: accepted as a DNS message: err=%v len=%d", framing, size, pooled, err, len(resp))
+					}
+					if resp != nil {
+						delete(resp, mem.tracking_allocator(&caller))
+					}
+					testing.expectf(t, caller.peak_memory_allocated <= dns.MAX_MESSAGE + 1,
+						"%v %d pooled=%v: peak %d bytes in the caller's allocator", framing, size, pooled, caller.peak_memory_allocated)
+					testing.expectf(t, reader.peak_memory_allocated < 2 * dns.MAX_MESSAGE,
+						"%v %d pooled=%v: the reader's buffer peaked at %d bytes", framing, size, pooled, reader.peak_memory_allocated)
+					expect_caller_holds_nothing(t, &caller, "oversized")
+					mem.tracking_allocator_destroy(&caller)
+					mem.tracking_allocator_destroy(&reader)
+					destroy(u)
+				}
+				thread.join(server)
+				thread.destroy(server)
+				net.close(listener)
+			}
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
 @(private = "file")
 http_mock_twice :: proc(ms: ^[2]Http_Mock) {
 	http_mock_once(&ms[0])
@@ -2653,7 +2794,8 @@ A 408 on a pooled connection is the server closing one it found idle, and the
 request may be repeated (RFC 9110 15.5.9): it is asked again on a fresh dial,
 which answers. On a connection the query dialled itself, a 408 is the server's
 answer to this request and is reported. The mock serves the pooled connection
-the 408 and the next one a reply.
+the 408 and the next one a reply. A body past a DNS message changes neither:
+a non-200 is the server's answer whatever it carries, and nobody reads it.
 */
 @(test)
 test_a_doh_h1_408_on_a_pooled_connection_is_retried :: proc(t: ^testing.T) {
@@ -2661,62 +2803,69 @@ test_a_doh_h1_408_on_a_pooled_connection_is_retried :: proc(t: ^testing.T) {
 	answer := make([]u8, len(query), context.temp_allocator)
 	copy(answer, query)
 	answer[2], answer[3] = 0x81, 0x80
-	timeout_page := "HTTP/1.1 408 Request Timeout\r\nContent-Length: 4\r\nConnection: close\r\n\r\nidle"
+	padding := strings.repeat("x", 98304, context.temp_allocator)
+	timeout_pages := []string {
+		"HTTP/1.1 408 Request Timeout\r\nContent-Length: 4\r\nConnection: close\r\n\r\nidle",
+		fmt.tprintf("HTTP/1.1 408 Request Timeout\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(padding), padding),
+		fmt.tprintf("HTTP/1.1 408 Request Timeout\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n%x\r\n%s\r\n0\r\n\r\n", len(padding), padding),
+	}
 	ok_reply := fmt.tprintf(
 		"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 		len(answer),
 		string(answer),
 	)
 
-	for pooled in ([]bool{true, false}) {
-		listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
-		if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
-			return
-		}
-		bound, _ := net.bound_endpoint(listener)
-		// The fresh-dial run takes one connection; the mock gives up on the other.
-		_ = net.set_option(listener, .Receive_Timeout, time.Second)
-		ms := [2]Http_Mock{{listener = listener, reply = timeout_page}, {listener = listener, reply = ok_reply}}
-		server := thread.create_and_start_with_poly_data(&ms, http_mock_twice)
+	for timeout_page, page in timeout_pages {
+		for pooled in ([]bool{true, false}) {
+			listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+			if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
+				return
+			}
+			bound, _ := net.bound_endpoint(listener)
+			// The fresh-dial run takes one connection; the mock gives up on the other.
+			_ = net.set_option(listener, .Receive_Timeout, time.Second)
+			ms := [2]Http_Mock{{listener = listener, reply = timeout_page}, {listener = listener, reply = ok_reply}}
+			server := thread.create_and_start_with_poly_data(&ms, http_mock_twice)
 
-		u, uerr := make_upstream(
-			config.Upstream_Spec {
-				name = "idle-closing",
-				kind = .TCP,
-				address = "127.0.0.1",
-				port = bound.port,
-				hostname = "doh.invalid",
-				path = "/dns-query",
-			},
-			8,
-			30 * time.Second,
-		)
-		track: mem.Tracking_Allocator
-		mem.tracking_allocator_init(&track, context.allocator)
-		if testing.expectf(t, uerr == .None, "cannot make the upstream: %v", uerr) {
-			if pooled {
-				socket, derr := dial_tcp_timeout(bound, time.Second)
-				if testing.expectf(t, derr == .None, "cannot dial the mock: %v", derr) {
-					put_idle(u, Idle_Conn{socket = socket})
+			u, uerr := make_upstream(
+				config.Upstream_Spec {
+					name = "idle-closing",
+					kind = .TCP,
+					address = "127.0.0.1",
+					port = bound.port,
+					hostname = "doh.invalid",
+					path = "/dns-query",
+				},
+				8,
+				30 * time.Second,
+			)
+			track: mem.Tracking_Allocator
+			mem.tracking_allocator_init(&track, context.allocator)
+			if testing.expectf(t, uerr == .None, "cannot make the upstream: %v", uerr) {
+				if pooled {
+					socket, derr := dial_tcp_timeout(bound, time.Second)
+					if testing.expectf(t, derr == .None, "cannot dial the mock: %v", derr) {
+						put_idle(u, Idle_Conn{socket = socket})
+					}
 				}
+				resp, err := exchange_doh_h1(u, query, query, 2 * time.Second, mem.tracking_allocator(&track))
+				if pooled {
+					testing.expectf(t, err == .None, "page %d: a 408 on a pooled connection was not retried: %v", page, err)
+					testing.expect(t, len(resp) == len(answer), "the retry's answer did not come back")
+				} else {
+					testing.expectf(t, err == .HTTP_Error, "page %d: a 408 on a fresh dial gave %v", page, err)
+				}
+				if resp != nil {
+					delete(resp, mem.tracking_allocator(&track))
+				}
+				expect_caller_holds_nothing(t, &track, "408")
+				destroy(u)
 			}
-			resp, err := exchange_doh_h1(u, query, query, 2 * time.Second, mem.tracking_allocator(&track))
-			if pooled {
-				testing.expectf(t, err == .None, "a 408 on a pooled connection was not retried: %v", err)
-				testing.expect(t, len(resp) == len(answer), "the retry's answer did not come back")
-			} else {
-				testing.expectf(t, err == .HTTP_Error, "a 408 on a fresh dial gave %v", err)
-			}
-			if resp != nil {
-				delete(resp, mem.tracking_allocator(&track))
-			}
-			expect_caller_holds_nothing(t, &track, "408")
-			destroy(u)
+			mem.tracking_allocator_destroy(&track)
+			thread.join(server)
+			thread.destroy(server)
+			net.close(listener)
 		}
-		mem.tracking_allocator_destroy(&track)
-		thread.join(server)
-		thread.destroy(server)
-		net.close(listener)
 	}
 	free_all(context.temp_allocator)
 }
@@ -3395,6 +3544,8 @@ test_http_bodyless_statuses_end_at_the_fields :: proc(t: ^testing.T) {
 		{"HTTP/1.1 304 Not Modified\r\nETag: \"x\"\r\n\r\n", false, 304, "", true},
 		// A 304 may carry the Content-Length of the representation it stands for.
 		{"HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\n", false, 304, "", true},
+		// Whatever its size: no body follows it to hold to `max_body`.
+		{"HTTP/1.1 304 Not Modified\r\nContent-Length: 100000000\r\n\r\n", false, 304, "", true},
 		// A 204 carries no framing fields (RFC 9110 8.6, 6.1). One that does may
 		// have sent the body it framed, so the connection goes no further.
 		{"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n", false, 204, "", false},
@@ -3416,6 +3567,7 @@ test_http_bodyless_statuses_end_at_the_fields :: proc(t: ^testing.T) {
 		// peer's choosing - and the real one left for the next query to find.
 		{"HTTP/1.1 103 Early Hints\r\nContent-Length: 42\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nfake" + OK, true, 0, "", false},
 		{"HTTP/1.1 100 Continue\r\nTransfer-Encoding: chunked\r\n\r\n" + OK, true, 0, "", false},
+		{"HTTP/1.1 103 Early Hints\r\nContent-Length: 100000000\r\n\r\n" + OK, true, 0, "", false},
 		{"HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1x 200 OK\r\n\r\n", true, 0, "", false},
 	}
 	for c in CASES {

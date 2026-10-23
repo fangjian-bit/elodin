@@ -88,6 +88,8 @@ Client_Stream :: struct {
 	// Whether this stream's answer has refunded its control frame; see
 	// client_finish_headers. Not `status != 0`: a malformed :status reads as 0.
 	refunded:    bool,
+	// This end reset the stream for sending too much; see Client_Error.Too_Large.
+	oversized:   bool,
 }
 
 Client_Request :: struct {
@@ -116,6 +118,11 @@ Client_Error :: enum u8 {
 	// again (RFC 9113 8.7).
 	Refused,
 	Timeout,
+	// This end reset the stream: the response ran past CLIENT_MAX_BODY, or
+	// spent half the receive window. What the peer sent, not a reset it chose,
+	// so the caller can report it as the HTTP/1.1 client does. The response
+	// carries the status, and no body.
+	Too_Large,
 }
 
 // Advertised receive window: generous, so we are never the reason a DoH
@@ -126,9 +133,10 @@ Client_Error :: enum u8 {
 // stream is also reset once half the window has gone (Client_Stream.received),
 // rather than left to stall with none.
 CLIENT_RECV_WINDOW :: 1 << 20
-// Bound on one response body. The h2 package does not depend on the dns
-// package, so DNS's own message size limit is restated here.
-CLIENT_MAX_BODY :: 64 * 1024
+// Bound on one response body: a DNS message, which RFC 8484 6 holds to 65535
+// bytes. The h2 package does not depend on the dns package, so the limit is
+// restated here, and `upstream` asserts the two agree.
+CLIENT_MAX_BODY :: 65535
 
 client_make :: proc(io: IO, allocator := context.allocator) -> ^Client {
 	c := new(Client, allocator)
@@ -708,7 +716,13 @@ client_handle_data :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> bool {
 		if len(s.body) + len(data) > CLIENT_MAX_BODY || s.received > CLIENT_RECV_WINDOW / 2 {
 			oversized = true
 			s.reset = true
+			s.oversized = true
 		} else {
+			// Doubled, but never past CLIENT_MAX_BODY: left to `append`, a
+			// 65535-byte body in 16 KiB frames is held in a 116 KiB buffer.
+			if need := len(s.body) + len(data); need > cap(s.body) {
+				reserve(&s.body, min(max(2 * cap(s.body), need), CLIENT_MAX_BODY))
+			}
 			append(&s.body, ..data)
 		}
 	}
@@ -946,8 +960,14 @@ client_request :: proc(
 		dead := c.closed
 		reset := s.reset
 		refused := s.refused
+		oversized := s.oversized
+		status := s.status
 		sync.mutex_unlock(&c.mu)
 		switch {
+		// A response that overran while the body was still going up is the
+		// same `Too_Large` as one that overran after it; see below.
+		case oversized:
+			return Client_Response{status = status}, .Too_Large
 		case dead:
 			return {}, .Closed
 		case refused:
@@ -974,8 +994,11 @@ client_request :: proc(
 	// A reset after a complete response is the peer ending the upload early
 	// (RFC 9113 8.1), and the client MUST NOT discard that response.
 	case s.reset && !s.done:
-		refused := s.refused
+		refused, oversized, status := s.refused, s.oversized, s.status
 		sync.mutex_unlock(&c.mu)
+		if oversized {
+			return Client_Response{status = status}, .Too_Large
+		}
 		return {}, .Refused if refused else .Reset
 	case c.closed && !s.done:
 		sync.mutex_unlock(&c.mu)

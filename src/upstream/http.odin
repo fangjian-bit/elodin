@@ -298,7 +298,8 @@ reader_exact :: proc(r: ^Buf_Reader, n: int) -> (data: []u8, err: Error) {
 Read until the peer closes, for responses with no length information.
 
 Bounded by `limit`, like every other framing path: the header scan stops at 64
-KB, and both the chunked and the Content-Length readers check MAX_HTTP_BODY.
+KB, and both the chunked and the Content-Length readers check the exchange's
+`max_body`.
 This one has nothing to check against, so without `limit` a peer that never
 sent a length - by omitting both headers, or by sending a Content-Length that is
 not a length - would decide on its own how much of our memory to take.
@@ -346,6 +347,8 @@ Http_Request :: struct {
 	extra:        []string,
 }
 
+// What `http_exchange` takes for a body unless told otherwise: a blocklist. A
+// DoH reply is a DNS message and passes `dns.MAX_MESSAGE` instead (#525).
 MAX_HTTP_BODY :: 64 * 1024 * 1024
 
 /*
@@ -375,6 +378,11 @@ outgrew would stay.
 response, and `idle` any one read or write under it; see `stream_write` and
 `reader_fill`. Without one, only the timeouts already on
 the stream apply, and those are per read.
+
+`max_body` is the most the body may be, in every framing, and so the most
+`allocator` is asked to hold for it; the reader's buffer holds the fields as
+well. A longer body is `Too_Large`, and a declared length past it is refused
+before any of the body is read.
 */
 http_exchange :: proc(
 	stream: ^Stream,
@@ -382,6 +390,7 @@ http_exchange :: proc(
 	allocator := context.allocator,
 	deadline := time.Tick{},
 	idle := time.Duration(0),
+	max_body := MAX_HTTP_BODY,
 ) -> (
 	resp: Http_Response,
 	err: Error,
@@ -492,16 +501,16 @@ http_exchange :: proc(
 				if content_length >= 0 {
 					return resp, .HTTP_Error
 				}
-				v, cl_ok := h2.parse_content_length(value, MAX_HTTP_BODY)
+				v, cl_ok := h2.parse_content_length(value, max_body)
 				// A value that is not a length is refused here rather than left to
 				// fall past the `== 0` and `> 0` cases below onto the read-to-end
 				// path, which is not what the peer asked for.
 				if !cl_ok {
 					return resp, .HTTP_Error
 				}
-				if v > MAX_HTTP_BODY {
-					return resp, .Too_Large
-				}
+				// Past `max_body` it reads as `max_body + 1`, and is refused below
+				// once the status says a body follows: a 304's is its
+				// representation's length, and a 1xx's is refused for framing.
 				content_length = v
 			case dns.name_equal_fold(name, "transfer-encoding"):
 				/*
@@ -572,18 +581,20 @@ http_exchange :: proc(
 			resp.keep_alive = false
 		}
 	case chunked:
-		resp.body = read_chunked(&r, allocator) or_return
+		resp.body = read_chunked(&r, allocator, max_body) or_return
 	case content_length == 0:
 		resp.body = nil
+	case content_length > max_body:
+		// Before a byte of the body is read.
+		return resp, .Too_Large
 	case content_length > 0:
-		// Already bounded where the header was read.
 		data := reader_exact(&r, content_length) or_return
 		out := make([]u8, len(data), allocator)
 		copy(out, data)
 		resp.body = out
 	case:
 		// No framing information: the body ends when the connection does.
-		data := reader_to_end(&r, MAX_HTTP_BODY) or_return
+		data := reader_to_end(&r, max_body) or_return
 		out := make([]u8, len(data), allocator)
 		copy(out, data)
 		resp.body = out
@@ -645,8 +656,9 @@ split_header :: proc(line: string) -> (name, value: string, ok: bool) {
 }
 
 @(private)
-read_chunked :: proc(r: ^Buf_Reader, allocator: mem.Allocator) -> (body: []u8, err: Error) {
-	out := make([dynamic]u8, 0, 8192, allocator)
+read_chunked :: proc(r: ^Buf_Reader, allocator: mem.Allocator, limit: int) -> (body: []u8, err: Error) {
+	// Never more than `limit` from the start, as never more than it on the way.
+	out := make([dynamic]u8, 0, min(8192, limit), allocator)
 	// A body assembled only in part is of no use to anyone, and every `or_return`
 	// below is a way to end up holding one.
 	defer if err != .None {
@@ -708,10 +720,15 @@ read_chunked :: proc(r: ^Buf_Reader, allocator: mem.Allocator) -> (body: []u8, e
 		// Bounded before it is narrowed. A size past the body limit is refused
 		// whatever it is, so the `int` below is always a number this build can
 		// hold and the sum below it cannot overflow.
-		if size > u64(MAX_HTTP_BODY) || len(out) + int(size) > MAX_HTTP_BODY {
+		if size > u64(limit) || len(out) + int(size) > limit {
 			return nil, .Too_Large
 		}
 		data := reader_exact(r, int(size)) or_return
+		// Doubled, but never past `limit`: `append` grows by more than twice,
+		// which would hold a body just under the limit in more than it allows.
+		if need := len(out) + len(data); need > cap(out) {
+			reserve(&out, min(max(2 * cap(out), need), limit))
+		}
 		append(&out, ..data)
 		// The data ends in CRLF and nothing else (RFC 9112 7.1). Thrown away,
 		// the line let `helloEXTRA` read as `hello` on a connection kept for

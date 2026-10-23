@@ -327,6 +327,144 @@ test_wait_for_frame_type :: proc(socket: net.TCP_Socket, want: Frame_Type) -> (h
 	}
 }
 
+// Answers with `CLIENT_MAX_BODY - 1` bytes more than the request carried, so a
+// one-byte request is answered at the bound and a two-byte one just past it.
+@(private = "file")
+sized_handler :: proc(conn: ^Conn, req: ^Request) {
+	defer request_destroy(conn, req)
+	body := make([]u8, CLIENT_MAX_BODY - 1 + len(req.body), context.temp_allocator)
+	respond(conn, req.stream_id, Response{status = 200, content_type = "application/dns-message", body = body})
+}
+
+/*
+A response is a DNS message, at most CLIENT_MAX_BODY bytes (RFC 8484 6). One of
+exactly that is kept; one byte more is this end's reset, reported as
+`Too_Large` and not as the peer's `Reset`, so the caller can tell the two apart
+as the HTTP/1.1 client does (#525).
+*/
+@(test)
+test_client_response_past_max_body_is_too_large :: proc(t: ^testing.T) {
+	for extra in 0 ..< 2 {
+		listener, bound, lok := test_listen(t)
+		if !lok {
+			return
+		}
+		srv := Test_Server{listener = listener, handler = sized_handler}
+		server_thread := thread.create_and_start_with_poly_data(&srv, test_server_once)
+		// The client's own memory, the stream's body among it, is tracked; the
+		// response handed back is not.
+		heap := context.allocator
+		held: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&held, heap)
+		defer mem.tracking_allocator_destroy(&held)
+		c: ^Client
+		ct: ^thread.Thread
+		tc: ^Test_Conn
+		cok: bool
+		{
+			context.allocator = mem.tracking_allocator(&held)
+			c, ct, tc, cok = test_dial_client(t, bound)
+		}
+		if cok {
+			request := []u8{1, 2}
+			resp, err := client_request(
+				c,
+				Client_Request{method = "POST", scheme = "https", authority = "mock.invalid", path = "/dns-query", body = request[:1 + extra]},
+				2 * time.Second,
+				heap,
+			)
+			if extra == 0 {
+				testing.expectf(t, err == .None, "a %d-byte response was refused: %v", CLIENT_MAX_BODY, err)
+				testing.expect_value(t, len(resp.body), CLIENT_MAX_BODY)
+				// The stream's body grows by doubling but never past the bound,
+				// where `append` alone takes it to 116 KiB.
+				testing.expectf(t, held.peak_memory_allocated < CLIENT_MAX_BODY + 8192, "the client peaked at %d bytes", held.peak_memory_allocated)
+			} else {
+				testing.expectf(t, err == .Too_Large, "a %d-byte response came back as %v", CLIENT_MAX_BODY + 1, err)
+				// With its status, so the caller can tell an oversized answer from
+				// an error page it would not have read anyway.
+				testing.expect_value(t, resp.status, 200)
+			}
+			delete(resp.body)
+			test_close_client(ct, tc)
+			client_unref(c)
+		}
+		thread.join(server_thread)
+		thread.destroy(server_thread)
+		net.close(listener)
+	}
+	free_all(context.temp_allocator)
+}
+
+/*
+A response can run past CLIENT_MAX_BODY while the request is still going up,
+held back by flow control (RFC 9113 8.1 lets a server answer early). That is
+the same `Too_Large` as a response that overran after the upload, not a reset
+the peer chose (#525).
+*/
+@(test)
+test_client_oversized_response_during_upload_is_too_large :: proc(t: ^testing.T) {
+	listener, bound, lok := test_listen(t)
+	if !lok {
+		return
+	}
+	run_script :: proc(listener: net.TCP_Socket) {
+		client, _, err := net.accept_tcp(listener)
+		if err != nil {
+			return
+		}
+		defer net.close(client)
+		preface: [len(PREFACE)]u8
+		if !test_recv_full(client, preface[:]) {
+			return
+		}
+		if _, ok := test_wait_for_frame_type(client, .Headers); !ok {
+			return
+		}
+		// :status 500 (static table index 14), then more DATA than a DNS message
+		// and no END_STREAM. The upload stays stuck behind the initial window.
+		out := make([dynamic]u8, 0, 5 * (FRAME_HEADER_SIZE + 16384) + 32, context.temp_allocator)
+		write_frame_header(&out, 0, .Settings, 0, 0)
+		write_frame_header(&out, 1, .Headers, FLAG_END_HEADERS, 1)
+		append(&out, 0x8e)
+		for _ in 0 ..< 5 {
+			write_frame_header(&out, 16384, .Data, 0, 1)
+			resize(&out, len(out) + 16384)
+		}
+		if !test_send(client, out[:]) {
+			return
+		}
+		_, _ = test_wait_for_frame_type(client, .Rst_Stream)
+	}
+	server_thread := thread.create_and_start_with_poly_data(listener, run_script)
+	defer {
+		thread.join(server_thread)
+		thread.destroy(server_thread)
+		net.close(listener)
+	}
+
+	c, ct, tc, cok := test_dial_client(t, bound)
+	if !cok {
+		return
+	}
+	defer {
+		test_close_client(ct, tc)
+		client_unref(c)
+	}
+
+	// Past the peer's initial window, so the upload waits for credit that never comes.
+	body := make([]u8, 2 * 65535, context.temp_allocator)
+	resp, err := client_request(
+		c,
+		Client_Request{method = "POST", scheme = "https", authority = "mock.invalid", path = "/dns-query", body = body},
+		2 * time.Second,
+	)
+	testing.expect_value(t, err, Client_Error.Too_Large)
+	testing.expect_value(t, resp.status, 500)
+	testing.expect_value(t, len(resp.body), 0)
+	free_all(context.temp_allocator)
+}
+
 @(test)
 test_client_request_reset_by_peer :: proc(t: ^testing.T) {
 	// REFUSED_STREAM says the request was never processed, so it has its own

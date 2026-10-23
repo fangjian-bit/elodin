@@ -10,6 +10,9 @@ import "elodin:h2"
 import "elodin:netx"
 import "elodin:tlsx"
 
+// RFC 8484 6: a DoH reply is at most 65535 bytes, on HTTP/2 as on HTTP/1.1.
+#assert(h2.CLIENT_MAX_BODY == dns.MAX_MESSAGE)
+
 /*
 DNS over HTTPS (RFC 8484).
 
@@ -143,6 +146,11 @@ exchange_doh_h2 :: proc(
 			return nil, .Peer_Closed
 		case .Reset:
 			return nil, .HTTP_Error
+		case .Too_Large:
+			// Reported as HTTP/1.1 reports it, so health and the failure kind do
+			// not depend on what ALPN chose: a non-200 is the server's answer
+			// whatever the size of the body nobody reads.
+			return nil, .Too_Large if resp.status == 200 else .HTTP_Error
 		case .Timeout:
 			return nil, .Timeout
 		}
@@ -215,6 +223,10 @@ exchange_doh_h1 :: proc(
 			},
 			allocator,
 			deadline = deadline,
+			// RFC 8484 6: application/dns-message is at most 65535 bytes, the
+			// bound the HTTP/2 path holds it to, not the 64 MB a blocklist may
+			// be, which every query in flight could hold twice over (#525).
+			max_body = dns.MAX_MESSAGE,
 		)
 
 		if herr == .None && resp.status == 200 && len(resp.body) >= dns.HEADER_SIZE {
@@ -239,7 +251,10 @@ exchange_doh_h1 :: proc(
 			delete(resp.body, allocator)
 		}
 		stream_close(&stream)
-		if herr == .None {
+		// A non-200 is the server's answer whatever the size of its body, which
+		// nobody reads: a 408 is still retried, and an error page is still an
+		// `HTTP_Error`, as on HTTP/2.
+		if herr == .None || (herr == .Too_Large && resp.status != 200) {
 			/*
 			A 408 on a pooled connection is the server closing one it found
 			idle, written before this request arrived; the client may repeat
@@ -272,8 +287,11 @@ exchange_doh_h1 :: proc(
 		write to it - so it is not retried. Said here rather than left to the
 		`remaining <= 0` check above, which a socket timeout firing a hair early
 		would slip past, dialling the upstream with a sliver it cannot use.
+
+		Nor is a reply past the size of a DNS message: that is what the server
+		sent, not a stale connection.
 		*/
-		if attempt == 1 || herr == .Timeout || (!reused && herr != .Peer_Closed) {
+		if attempt == 1 || herr == .Timeout || herr == .Too_Large || (!reused && herr != .Peer_Closed) {
 			return nil, herr
 		}
 	}

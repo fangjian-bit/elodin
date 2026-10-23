@@ -38,6 +38,10 @@ header list that breaks RFC 9113 sections 8.2 or 8.3 is a stream error of type
 PROTOCOL_ERROR; a conformant `CONNECT` gets a 404. HTTP/1.1 refuses the same
 shapes.
 
+A request body is at most 65535 bytes, the most RFC 8484 section 6 allows a DNS
+message. Past it, HTTP/2 resets the stream with ENHANCE_YOUR_CALM and HTTP/1.1
+closes the connection unanswered.
+
 ## Apple devices (iOS, iPadOS, macOS)
 
 iOS 14 / macOS 11 and later take encrypted DNS from a configuration profile, and
