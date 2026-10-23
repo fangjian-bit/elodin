@@ -2,6 +2,7 @@ package itest
 
 import "core:fmt"
 import "core:net"
+import "core:os"
 import "core:time"
 
 /*
@@ -258,16 +259,48 @@ blocking: {{ enabled: false }}
 			check(r, !doh2_mock_start(mock, r.cert_file, r.key_file), "the doh mock started on a port already held")
 			check(r, mock.tls_ctx == nil, "the failed start kept a TLS context it had freed")
 			doh2_mock_stop(mock)
+			dot := mock_make("held", port)
+			check(r, !mock_start(dot, r.cert_file, r.key_file), "the dot mock started on a port already held")
+			check(r, dot.tls_ctx == nil, "the failed start kept a TLS context a caller that skips the stop leaks")
+			mock_stop(dot)
 			// The UDP port is free, so the plain mock binds it and then fails on
 			// TCP, closing the UDP socket it already had.
+			probe, perr := net.make_bound_udp_socket(net.IP4_Loopback, port)
+			if probe != 0 {
+				net.close(probe)
+			}
+			check(r, perr == nil, "the UDP port is taken, so the start never reaches the TCP listen")
 			plain := mock_make("held", port)
 			check(r, !mock_start(plain), "the mock started on a port already held")
 			check(r, plain.udp_socket == 0, "the failed start kept a UDP socket it had closed")
 			mock_stop(plain)
+			// With the UDP port held instead, the bind fails first, and the
+			// socket it could not bind is closed rather than left open.
+			held_udp, uerr := net.make_bound_udp_socket(net.IP4_Loopback, port)
+			if check(r, uerr == nil, "cannot hold the UDP port") {
+				before := open_fds()
+				udp_only := mock_make("held", port)
+				check(r, !mock_start(udp_only), "the mock started on a UDP port already held")
+				mock_stop(udp_only)
+				check(r, open_fds() == before, "the failed UDP bind left its socket open")
+			}
+			if held_udp != 0 {
+				net.close(held_udp)
+			}
 			end_case(r)
 			net.close(held)
 		}
 	}
 
 	delete(payload)
+}
+
+// How many descriptors this process has open, or -1 when /proc cannot say.
+@(private = "file")
+open_fds :: proc() -> int {
+	entries, err := os.read_directory_by_path("/proc/self/fd", -1, context.temp_allocator)
+	if err != nil {
+		return -1
+	}
+	return len(entries)
 }

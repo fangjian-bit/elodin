@@ -343,34 +343,37 @@ mock_start :: proc(m: ^Mock, cert_file := "", key_file := "") -> bool {
 		if err != .None {
 			return false
 		}
-		m.tls_ctx = ctx
 
 		sock, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = m.port})
 		if lerr != nil {
+			tlsx.context_destroy(ctx)
 			return false
 		}
+		m.tls_ctx = ctx
 		m.tcp_socket = sock
 		_ = net.set_option(sock, .Receive_Timeout, POLL_INTERVAL)
 		append(&m.threads, thread.create_and_start_with_poly_data(m, mock_tls_loop))
 		return true
 	}
 
+	// `make_bound_udp_socket` hands back the socket it could not bind, still open.
 	udp, uerr := net.make_bound_udp_socket(net.IP4_Loopback, m.port)
 	if uerr != nil {
+		if udp != 0 {
+			net.close(udp)
+		}
 		return false
 	}
-	m.udp_socket = udp
-	_ = net.set_option(udp, .Receive_Timeout, POLL_INTERVAL)
-
 	tcp, terr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = m.port})
 	if terr != nil {
-		// Cleared as well as closed: `mock_stop` closes `m.udp_socket`, and by
-		// then the number may be another socket's.
 		net.close(udp)
-		m.udp_socket = 0
 		return false
 	}
+	// Set only once both are open: `mock_stop` closes what is here, and a
+	// number closed by a failed start may by then be another socket's.
+	m.udp_socket = udp
 	m.tcp_socket = tcp
+	_ = net.set_option(udp, .Receive_Timeout, POLL_INTERVAL)
 	_ = net.set_option(tcp, .Receive_Timeout, POLL_INTERVAL)
 
 	append(&m.threads, thread.create_and_start_with_poly_data(m, mock_udp_loop))
