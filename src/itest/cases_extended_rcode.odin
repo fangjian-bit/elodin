@@ -167,12 +167,14 @@ run_extended_rcode_cases :: proc(r: ^Runner) {
 		good := mock_make("good", good_port)
 		mock_reply(good, DANE_NAME, u16(dns.Type.TLSA), tlsa_answer())
 
-		if !mock_start(broken) || !mock_start(good) {
+		// Both are stopped, started or not: the first may have started when the
+		// second did not.
+		broken_ok, good_ok := mock_start(broken), mock_start(good)
+		defer mock_stop(broken)
+		defer mock_stop(good)
+		if !broken_ok || !good_ok {
 			skip_case(r, "extended rcode: failover", "cannot start the mock upstreams")
 		} else {
-			defer mock_stop(broken)
-			defer mock_stop(good)
-
 			udp_port := next_port(r)
 			servers := fmt.tprintf("    - \"127.0.0.1:%d\"\n    - \"127.0.0.1:%d\"\n", broken_port, good_port)
 			srv, ok := start_server(

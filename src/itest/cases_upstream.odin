@@ -95,7 +95,7 @@ run_strategy_cases :: proc(r: ^Runner) {
 		mock_reply_all(mocks[i], make_a_response(QNAME, addrs[i], 60))
 		if !mock_start(mocks[i]) {
 			skip_case(r, "strategies", "cannot start the mock upstreams")
-			for k in 0 ..< i {
+			for k in 0 ..= i {
 				mock_stop(mocks[k])
 			}
 			return
@@ -200,12 +200,14 @@ blocking: {{ enabled: false }}
 		fast := mock_make("fast", fast_port)
 		mock_reply_all(fast, make_a_response(QNAME, {198, 51, 100, 8}, 60))
 
-		if !mock_start(slow) || !mock_start(fast) {
+		// Both are stopped, started or not: the first may have started when the
+		// second did not.
+		slow_ok, fast_ok := mock_start(slow), mock_start(fast)
+		defer mock_stop(slow)
+		defer mock_stop(fast)
+		if !slow_ok || !fast_ok {
 			skip_case(r, "strategy: race", "cannot start the racing mocks")
 		} else {
-			defer mock_stop(slow)
-			defer mock_stop(fast)
-
 			udp_port := next_port(r)
 			srv, ok := start_server(
 				r,
@@ -259,12 +261,14 @@ blocking: {{ enabled: false }}
 		live := mock_make("live", live_port)
 		mock_reply_all(live, make_a_response(QNAME, {198, 51, 100, 7}, 60))
 
-		if !mock_start(dead) || !mock_start(live) {
+		// Both are stopped, started or not: the first may have started when the
+		// second did not.
+		dead_ok, live_ok := mock_start(dead), mock_start(live)
+		defer mock_stop(dead)
+		defer mock_stop(live)
+		if !dead_ok || !live_ok {
 			skip_case(r, "strategy: failover past a dead upstream", "cannot start the mocks")
 		} else {
-			defer mock_stop(dead)
-			defer mock_stop(live)
-
 			udp_port := next_port(r)
 			srv, ok := start_server(
 				r,

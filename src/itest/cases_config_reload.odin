@@ -80,12 +80,15 @@ run_config_reload_cases :: proc(r: ^Runner) {
 	mock_synth_all(a, {192, 0, 2, 1}, ttl = 300)
 	mock_synth(b, "inside.reload.test.", u16(dns.Type.A), {10, 0, 0, 2}, ttl = 300)
 	mock_synth_all(b, {192, 0, 2, 2}, ttl = 300)
-	if !mock_start(a) || !mock_start(b) {
+	// Both are stopped, started or not: the first may have started when the
+	// second did not.
+	a_ok, b_ok := mock_start(a), mock_start(b)
+	defer mock_stop(a)
+	defer mock_stop(b)
+	if !a_ok || !b_ok {
 		skip_case(r, "config reload", "cannot start the mocks")
 		return
 	}
-	defer mock_stop(a)
-	defer mock_stop(b)
 
 	udp_port := next_port(r)
 	srv, ok := start_server(r, Server_Options{config = config_reload_text(udp_port, a_port, ""), udp_port = udp_port})

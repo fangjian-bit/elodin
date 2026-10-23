@@ -1,6 +1,8 @@
 package itest
 
 import "core:fmt"
+import "core:net"
+import "core:os"
 import "core:time"
 
 /*
@@ -129,14 +131,14 @@ blocking: {{ enabled: false }}
 		down := doh2_mock_make(down_port, "/dns-query", payload)
 		down.status = 503
 		up := doh2_mock_make(up_port, "/dns-query", payload)
-		if !doh2_mock_start(down, r.cert_file, r.key_file, {"http/1.1"}) {
-			skip_case(r, "upstream: doh h1 503 in a race", "cannot start the mock")
-		} else if !doh2_mock_start(up, r.cert_file, r.key_file) {
-			doh2_mock_stop(down)
+		// Both are stopped, started or not: the first may have started when the
+		// second did not.
+		down_ok, up_ok := doh2_mock_start(down, r.cert_file, r.key_file, {"http/1.1"}), doh2_mock_start(up, r.cert_file, r.key_file)
+		defer doh2_mock_stop(down)
+		defer doh2_mock_stop(up)
+		if !down_ok || !up_ok {
 			skip_case(r, "upstream: doh h1 503 in a race", "cannot start the mock")
 		} else {
-			defer doh2_mock_stop(down)
-			defer doh2_mock_stop(up)
 			udp_port := next_port(r)
 			config := fmt.tprintf(
 				`log: {{ level: warn }}
@@ -238,5 +240,67 @@ blocking: {{ enabled: false }}
 		}
 	}
 
+	// --- a mock that cannot bind its port can still be stopped ---
+	/*
+	Another run on the box holding the port is how a parity scenario's mock
+	fails to start, and the scenario stops every mock it made, started or not.
+	So a failed start keeps no handle it has already freed or closed: the stop
+	would free the TLS context a second time, or close a number that may by
+	then be another socket.
+	*/
+	{
+		port := next_port(r)
+		held, herr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = port})
+		// Both held from the start, so another run taking either is a skip
+		// here rather than a failure partway through the case.
+		held_udp, uerr := net.make_bound_udp_socket(net.IP4_Loopback, port)
+		if herr != nil || uerr != nil {
+			if held_udp != 0 {
+				net.close(held_udp)
+			}
+			if herr == nil {
+				net.close(held)
+			}
+			skip_case(r, "harness: a mock that cannot bind its port can still be stopped", "cannot hold the port")
+		} else {
+			start_case(r, "harness: a mock that cannot bind its port can still be stopped")
+			mock := doh2_mock_make(port, "/dns-query", payload)
+			check(r, !doh2_mock_start(mock, r.cert_file, r.key_file), "the doh mock started on a port already held")
+			check(r, mock.tls_ctx == nil, "the failed start kept a TLS context it had freed")
+			doh2_mock_stop(mock)
+			dot := mock_make("held", port)
+			check(r, !mock_start(dot, r.cert_file, r.key_file), "the dot mock started on a port already held")
+			check(r, dot.tls_ctx == nil, "the failed start kept a TLS context a caller that skips the stop leaks")
+			mock_stop(dot)
+			// With the UDP port held, the bind fails first, and the socket it could
+			// not bind is closed rather than left open.
+			before := open_fds()
+			check(r, before >= 0, "cannot count the open descriptors")
+			udp_only := mock_make("held", port)
+			check(r, !mock_start(udp_only), "the mock started on a UDP port already held")
+			mock_stop(udp_only)
+			check(r, open_fds() == before, "the failed UDP bind left its socket open")
+			// With the UDP port free, the plain mock binds it and then fails on TCP,
+			// closing the UDP socket it already had.
+			net.close(held_udp)
+			plain := mock_make("held", port)
+			check(r, !mock_start(plain), "the mock started on a port already held")
+			check(r, plain.udp_socket == 0, "the failed start kept a UDP socket it had closed")
+			mock_stop(plain)
+			end_case(r)
+			net.close(held)
+		}
+	}
+
 	delete(payload)
+}
+
+// How many descriptors this process has open, or -1 when /proc cannot say.
+@(private = "file")
+open_fds :: proc() -> int {
+	entries, err := os.read_directory_by_path("/proc/self/fd", -1, context.temp_allocator)
+	if err != nil {
+		return -1
+	}
+	return len(entries)
 }

@@ -711,12 +711,12 @@ Asked before a case that needs one, so a container without IPv6 skips it rather
 than failing it: that is a property of the machine, not of the server.
 */
 ipv6_loopback_available :: proc() -> bool {
+	// The socket comes back open even when the bind fails.
 	socket, err := net.make_bound_udp_socket(net.IP6_Loopback, 0)
-	if err != nil {
-		return false
+	if socket != 0 {
+		net.close(socket)
 	}
-	net.close(socket)
-	return true
+	return err == nil
 }
 
 /*

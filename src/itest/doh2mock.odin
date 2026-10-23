@@ -67,13 +67,15 @@ doh2_mock_start :: proc(m: ^Doh2_Mock, cert_file, key_file: string, alpn: []stri
 	if terr != .None {
 		return false
 	}
-	m.tls_ctx = ctx
 
+	// Nothing goes on `m` until the start has succeeded: a caller that stops
+	// every mock it made, started or not, frees `m.tls_ctx` in `doh2_mock_stop`.
 	sock, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = m.port})
 	if lerr != nil {
 		tlsx.context_destroy(ctx)
 		return false
 	}
+	m.tls_ctx = ctx
 	m.listener = sock
 	_ = net.set_option(sock, .Receive_Timeout, POLL_INTERVAL)
 	append(&m.threads, thread.create_and_start_with_poly_data(m, doh2_mock_loop))
