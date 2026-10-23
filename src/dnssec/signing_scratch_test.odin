@@ -247,8 +247,11 @@ test_a_spent_request_renders_nothing :: proc(t: ^testing.T) {
 		signer       = "example.com.",
 	}
 	spent := dns.REQUEST_DECODE_BUDGET + 1
-	scratch := Signing_Scratch {
+	budget := Budget {
 		spent = &spent,
+	}
+	scratch := Signing_Scratch {
+		budget = &budget,
 	}
 	mark := arena_used()
 	_, ok := signing_input(sig, SS_OWNER, .IN, records, context.temp_allocator, &scratch)
@@ -336,23 +339,67 @@ test_the_render_charge_covers_what_the_arena_took :: proc(t: ^testing.T) {
 		labels       = 3,
 		signer       = "example.com.",
 	}
-	// Starting at each offset into a fresh block, so that one of them puts the
-	// buffer's growth across the block's end.
-	for offset := 0; offset < 256 * 1024; offset += 16 * 1024 {
+	// Starting at each offset across the last 256 KiB of the block `free_all`
+	// keeps, whatever its size, so that some of them put the buffer's growth
+	// across the block's end.
+	least, most := max(int), 0
+	for k in 0 ..< 16 {
 		free_all(context.temp_allocator)
 		records = ss_big_txt()
+		block := (cast(^runtime.Arena)context.temp_allocator.data).curr_block
+		offset := max(0, int(block.capacity - block.used) - 256 * 1024) + k * 16 * 1024
 		if offset > 0 {
 			_ = make([]u8, offset, context.temp_allocator)
 		}
 		spent := 0
-		scratch := Signing_Scratch {
+		budget := Budget {
 			spent = &spent,
+		}
+		scratch := Signing_Scratch {
+			budget = &budget,
 		}
 		mark := arena_used()
 		_, ok := signing_input(sig, SS_OWNER, .IN, records, context.temp_allocator, &scratch)
 		taken := arena_used() - mark
 		testing.expect(t, ok)
 		testing.expectf(t, spent >= taken, "at offset %d the render took %d bytes of arena and charged %d", offset, taken, spent)
+		least, most = min(least, taken), max(most, taken)
 	}
+	// The premise: some offset left a copy behind rather than growing in place.
+	testing.expectf(t, most > least, "no offset grew the buffer across a block's end (took %d bytes at each)", most)
+	free_all(context.temp_allocator)
+}
+
+/*
+The reason names the allowance that stopped the loop, not whichever happens to
+be gone afterwards: a loop that runs out of verifications before it renders
+anything says so, on a request some reading has already taken past its budget.
+*/
+@(test)
+test_the_reason_is_what_stopped_the_loop :: proc(t: ^testing.T) {
+	free_all(context.temp_allocator)
+	section := ss_section(MAX_VERIFICATIONS_PER_QUERY)
+	spent := dns.REQUEST_DECODE_BUDGET + 1
+	budget := Budget {
+		spent         = &spent,
+		verifications = MAX_VERIFICATIONS_PER_QUERY,
+	}
+	_, _, _, ok, exhausted := verified_rrset(&budget, section, SS_OWNER, .TXT, .IN, "example.com.", ss_key(), SS_NOW, context.temp_allocator)
+	testing.expect(t, !ok && exhausted)
+	testing.expect_value(t, exhausted_reason(&budget), VERIFICATIONS_SPENT)
+
+	// And the last loop to stop is the one reported: a render refused, then a
+	// later loop out of verifications.
+	spent = dns.REQUEST_DECODE_BUDGET - 1024
+	budget = Budget {
+		spent = &spent,
+	}
+	_, _, _, ok, exhausted = verified_rrset(&budget, section, SS_OWNER, .TXT, .IN, "example.com.", ss_key(), SS_NOW, context.temp_allocator)
+	testing.expect(t, !ok && exhausted)
+	testing.expect_value(t, exhausted_reason(&budget), READING_OVER_BUDGET)
+	budget.verifications = MAX_VERIFICATIONS_PER_QUERY
+	_, _, _, ok, exhausted = verified_rrset(&budget, section, SS_OWNER, .TXT, .IN, "example.com.", ss_key(), SS_NOW, context.temp_allocator)
+	testing.expect(t, !ok && exhausted)
+	testing.expect_value(t, exhausted_reason(&budget), VERIFICATIONS_SPENT)
 	free_all(context.temp_allocator)
 }

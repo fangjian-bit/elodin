@@ -389,13 +389,13 @@ renders that one instead of reusing the first.
 */
 Signing_Scratch :: struct {
 	/*
-	What the request has taken out of its arena so far, against
-	`dns.REQUEST_DECODE_BUDGET`, or nil where nobody is counting. Borrowed from
-	the validator's `Budget`, so what a validation renders is charged against
-	what its readings already took; past it `signing_input` refuses, and
-	`over_budget` says so.
+	The question's allowances, or nil where nobody is counting. What the scratch
+	takes is charged to its `spent`, against `dns.REQUEST_DECODE_BUDGET`, so a
+	validation's renders count with what its readings already took. Past it
+	`signing_input` refuses, `over_budget` says so, and the budget's `ran_out`
+	names the reason for whichever loop stops on it.
 	*/
-	spent:       ^int,
+	budget:      ^Budget,
 	over_budget: bool,
 	// The set `rdatas` was rendered from, or nil before the first: a set that
 	// would not render is remembered too, so it is not attempted again per
@@ -413,14 +413,22 @@ Charge `n` bytes of arena to the request, and refuse once it is past its budget.
 */
 @(private)
 charge_scratch :: proc(scratch: ^Signing_Scratch, n: int) -> bool {
-	if scratch.spent == nil {
+	if scratch.budget == nil || scratch.budget.spent == nil {
 		return true
 	}
-	scratch.spent^ += n
-	if dns.over_request_budget(scratch.spent) {
-		scratch.over_budget = true
+	scratch.budget.spent^ += n
+	return !scratch_over_budget(scratch)
+}
+
+// Whether the request is past its budget, and if so the scratch refuses from
+// here on, and says why in the budget.
+@(private)
+scratch_over_budget :: proc(scratch: ^Signing_Scratch) -> bool {
+	if scratch.budget == nil || !dns.over_request_budget(scratch.budget.spent) {
 		return false
 	}
+	scratch.over_budget = true
+	scratch.budget.ran_out = READING_OVER_BUDGET
 	return true
 }
 
@@ -436,8 +444,7 @@ render_rdatas :: proc(scratch: ^Signing_Scratch, records: []dns.Record, allocato
 	scratch.rdata_bytes = 0
 	// A request with nothing left to spend renders nothing, as
 	// `dns.decode_message` reads nothing, so the overshoot stays one set.
-	if dns.over_request_budget(scratch.spent) {
-		scratch.over_budget = true
+	if scratch_over_budget(scratch) {
 		return false
 	}
 	// Both taken before the buffer, so the buffer is the last thing in the
@@ -541,7 +548,7 @@ signing_input :: proc(
 		owner.
 		*/
 		widest := RRSIG_FIXED_PREFIX + dns.MAX_NAME_WIRE + len(s.rdatas) * max(owner_len, len(records[0].name) + 1) + framing + s.rdata_bytes
-		size := max(need, widest, 2 * cap(s.out))
+		size := max(widest, 2 * cap(s.out))
 		charge_scratch(s, size) or_return
 		s.out = make([dynamic]u8, 0, size, allocator)
 	}

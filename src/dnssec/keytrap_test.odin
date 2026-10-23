@@ -669,3 +669,24 @@ test_the_ds_render_is_charged_to_the_request :: proc(t: ^testing.T) {
 	testing.expectf(t, rendering >= 255 * 36, "the padded DS set's render charged %d bytes", rendering)
 	free_all(context.temp_allocator)
 }
+
+/*
+Running out of verifications says so in the same words whichever loop ran out.
+The DS step and the answer report "verification budget spent"; a DNSKEY set
+padded past the allowance is the same allowance and the same report, not
+"chain of trust unavailable", which is what a client is told about an upstream
+that did not answer.
+*/
+@(test)
+test_an_exhausted_key_check_says_which_allowance :: proc(t: ^testing.T) {
+	pads := []Padding{{name = "cloudflare.com.", type = .DNSKEY, sigs = 200}}
+	v := make_validator(kt_query, &pads, Options{})
+	defer destroy_validator(v)
+
+	budget := query_budget(v)
+	status, _, _ := zone_trust(v, &budget, "cloudflare.com.", time.unix(FIXTURE_TIME, 0), context.temp_allocator)
+	testing.expect_value(t, status, Status.Indeterminate)
+	testing.expect_value(t, budget.verifications, MAX_VERIFICATIONS_PER_QUERY)
+	testing.expect_value(t, budget.walk_stopped, "verification budget spent")
+	free_all(context.temp_allocator)
+}
