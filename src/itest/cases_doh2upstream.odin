@@ -1,6 +1,7 @@
 package itest
 
 import "core:fmt"
+import "core:net"
 import "core:time"
 
 /*
@@ -235,6 +236,36 @@ blocking: {{ enabled: false }}
 			} else {
 				skip_case(r, "upstream: doh h1 oversized reply", "server did not start")
 			}
+		}
+	}
+
+	// --- a mock that cannot bind its port can still be stopped ---
+	/*
+	Another run on the box holding the port is how a parity scenario's mock
+	fails to start, and the scenario stops every mock it made, started or not.
+	So a failed start keeps no handle it has already freed or closed: the stop
+	would free the TLS context a second time, or close a number that may by
+	then be another socket.
+	*/
+	{
+		port := next_port(r)
+		held, herr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = port})
+		if herr != nil {
+			skip_case(r, "harness: a mock that cannot bind", "cannot hold the port")
+		} else {
+			start_case(r, "harness: a mock that cannot bind its port can still be stopped")
+			mock := doh2_mock_make(port, "/dns-query", payload)
+			check(r, !doh2_mock_start(mock, r.cert_file, r.key_file), "the doh mock started on a port already held")
+			check(r, mock.tls_ctx == nil, "the failed start kept a TLS context it had freed")
+			doh2_mock_stop(mock)
+			// The UDP port is free, so the plain mock binds it and then fails on
+			// TCP, closing the UDP socket it already had.
+			plain := mock_make("held", port)
+			check(r, !mock_start(plain), "the mock started on a port already held")
+			check(r, plain.udp_socket == 0, "the failed start kept a UDP socket it had closed")
+			mock_stop(plain)
+			end_case(r)
+			net.close(held)
 		}
 	}
 

@@ -71,7 +71,10 @@ doh2_mock_start :: proc(m: ^Doh2_Mock, cert_file, key_file: string, alpn: []stri
 
 	sock, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = m.port})
 	if lerr != nil {
+		// Cleared as well as freed: a caller that stops every mock it made,
+		// started or not, frees `m.tls_ctx` again in `doh2_mock_stop`.
 		tlsx.context_destroy(ctx)
+		m.tls_ctx = nil
 		return false
 	}
 	m.listener = sock

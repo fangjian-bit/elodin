@@ -364,7 +364,10 @@ mock_start :: proc(m: ^Mock, cert_file := "", key_file := "") -> bool {
 
 	tcp, terr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = m.port})
 	if terr != nil {
+		// Cleared as well as closed: `mock_stop` closes `m.udp_socket`, and by
+		// then the number may be another socket's.
 		net.close(udp)
+		m.udp_socket = 0
 		return false
 	}
 	m.tcp_socket = tcp
