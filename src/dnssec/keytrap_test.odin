@@ -1,5 +1,6 @@
 package dnssec
 
+import "base:runtime"
 import "core:mem"
 import "core:testing"
 import "core:time"
@@ -554,5 +555,78 @@ test_an_exhausted_key_check_is_not_a_downgrade :: proc(t: ^testing.T) {
 		budget.verifications,
 		MAX_VERIFICATIONS_PER_QUERY,
 	)
+	free_all(context.temp_allocator)
+}
+
+// Arena a padded walk to cloudflare.com. takes, from an empty arena.
+@(private = "file")
+kt_walk_arena :: proc(pads: []Padding) -> int {
+	free_all(context.temp_allocator)
+	pads := pads
+	v := make_validator(kt_query, &pads, Options{})
+	defer destroy_validator(v)
+	budget := query_budget(v)
+	arena := cast(^runtime.Arena)context.temp_allocator.data
+	before := arena.total_used
+	zone_trust(v, &budget, "cloudflare.com.", time.unix(FIXTURE_TIME, 0), context.temp_allocator)
+	return int(arena.total_used - before)
+}
+
+/*
+Both chain-walk loops render the set they check once, however many signatures
+over it a response carries (issue #527). The sets are padded with copies of
+their own records, which the canonical form drops again, so the genuine
+signature still verifies and what each forgery in front of it would cost to
+render is the set's full length.
+
+What an extra forgery may cost is reading it: its record, its parsed RRSIG and
+its key, about 1 KB. A render apiece is 8 KB of DNSKEY set and 25 KB of DS set
+on top.
+*/
+@(test)
+test_chain_walk_signatures_do_not_rerender_the_set :: proc(t: ^testing.T) {
+	PER_FORGERY :: 2048
+	for type in ([2]dns.Type{.DS, .DNSKEY}) {
+		// Each record is copied `records` times; the fixture's DNSKEY set holds
+		// two keys, and a set past `MAX_KEYS_PER_ZONE` is not tried at all.
+		records := 255 if type == .DS else MAX_KEYS_PER_ZONE / 2 - 1
+		few := kt_walk_arena([]Padding{{name = "cloudflare.com.", type = type, records = records, sigs = 1}})
+		many := kt_walk_arena([]Padding{{name = "cloudflare.com.", type = type, records = records, sigs = 41}})
+		testing.expectf(t, many - few < 40 * PER_FORGERY, "40 more %v forgeries cost %d more bytes of arena", type, many - few)
+	}
+	free_all(context.temp_allocator)
+}
+
+/*
+And the render is charged to the request, so the last thing a walk does - the
+DNSKEY set it ends on - is refused when the request has no room left for it,
+rather than paid for.
+
+Room is measured first: the whole walk's charges with nothing in the way. One
+byte less, and the last charge goes over. That is the render only if the render
+is charged, and the verification count tells which: the render comes after the
+DNSKEY signature's verification is spent, the reading before it.
+*/
+@(test)
+test_the_dnskey_render_is_charged_to_the_request :: proc(t: ^testing.T) {
+	walk :: proc(spent: ^int) -> (Status, Budget) {
+		v := make_validator(kt_query, nil, Options{})
+		defer destroy_validator(v)
+		budget := query_budget(v)
+		budget.spent = spent
+		status, _, _ := zone_trust(v, &budget, "cloudflare.com.", time.unix(FIXTURE_TIME, 0), context.temp_allocator)
+		return status, budget
+	}
+	spent := 0
+	status, untouched := walk(&spent)
+	testing.expect_value(t, status, Status.Secure)
+	room := spent
+
+	spent = dns.REQUEST_DECODE_BUDGET - room + 1
+	budget: Budget
+	status, budget = walk(&spent)
+	testing.expect_value(t, status, Status.Indeterminate)
+	testing.expect_value(t, budget.walk_stopped, READING_OVER_BUDGET)
+	testing.expect_value(t, budget.verifications, untouched.verifications)
 	free_all(context.temp_allocator)
 }
