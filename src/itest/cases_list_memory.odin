@@ -1,11 +1,13 @@
 package itest
 
 import "core:fmt"
+import "core:net"
 import "core:os"
 import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import "elodin:dns"
 
 /*
 A blocklist rebuild hands the replaced rule sets' memory back (#513).
@@ -100,6 +102,56 @@ unit_environment :: proc(r: ^Runner) -> (env: [dynamic]string, ok: bool) {
 	return env, true
 }
 
+/*
+Whether the binary is built with AddressSanitizer, skipping case `name` if so.
+A sanitizer's runtime answers malloc itself and ignores glibc's settings, and
+its quarantine grows every process alike.
+*/
+@(private = "file")
+built_with_asan :: proc(r: ^Runner, name: string) -> bool {
+	// Heap: the temp allocator is not reset until the next case ends, and a
+	// skip from here ends none.
+	exe, xerr := os.read_entire_file(r.binary, context.allocator)
+	if xerr != nil {
+		fail(r, "%s: cannot read %s: %v", name, r.binary, xerr)
+		return true
+	}
+	asan := strings.contains(string(exe), "__asan_init")
+	delete(exe)
+	if asan {
+		skip_case(r, name, "the binary is built with AddressSanitizer, whose allocator is not glibc's")
+	}
+	return asan
+}
+
+/*
+The environments the memory cases start a server with: `control` is this
+process's own without any MALLOC_ setting or GLIBC_TUNABLES of the suite's own
+or an LD_PRELOAD (which can replace the allocator), so it is glibc's defaults;
+`shipped` is that with the unit's assignments first. getenv takes the first of a
+key set twice, and under systemd the unit's value is the one the process sees.
+`control` keeps its capacity when every variable is dropped: a nil environment
+is the suite's own, MALLOC_ settings included.
+*/
+@(private = "file")
+glibc_environments :: proc(r: ^Runner, name: string, unit_env: []string) -> (control, shipped: []string, ok: bool) {
+	inherited, eerr := os.environ(context.temp_allocator)
+	if eerr != nil {
+		fail(r, "%s: cannot read the environment: %v", name, eerr)
+		return
+	}
+	kept := make([dynamic]string, 0, len(inherited), context.temp_allocator)
+	for kv in inherited {
+		if !strings.has_prefix(kv, "MALLOC_") && !strings.has_prefix(kv, "GLIBC_TUNABLES=") && !strings.has_prefix(kv, "LD_PRELOAD=") {
+			append(&kept, kv)
+		}
+	}
+	with_unit := make([dynamic]string, context.temp_allocator)
+	append(&with_unit, ..unit_env)
+	append(&with_unit, ..kept[:])
+	return kept[:], with_unit[:], true
+}
+
 @(private = "file")
 list_memory_config :: proc(udp_port: int, list_path: string, timeout_s: int) -> string {
 	return fmt.tprintf(
@@ -170,19 +222,7 @@ run_list_memory_cases :: proc(r: ^Runner) {
 		return
 	}
 
-	// A sanitizer's runtime answers malloc itself and ignores glibc's settings,
-	// and its quarantine grows both processes alike.
-	// Heap, as the list below: the temp allocator is not reset until the next
-	// case ends, and a skip from here ends none.
-	exe, xerr := os.read_entire_file(r.binary, context.allocator)
-	if xerr != nil {
-		fail(r, "%s: cannot read %s: %v", NAME, r.binary, xerr)
-		return
-	}
-	asan := strings.contains(string(exe), "__asan_init")
-	delete(exe)
-	if asan {
-		skip_case(r, NAME, "the binary is built with AddressSanitizer, whose allocator is not glibc's")
+	if built_with_asan(r, NAME) {
 		return
 	}
 
@@ -202,27 +242,10 @@ run_list_memory_cases :: proc(r: ^Runner) {
 	}
 	defer os.remove(list_path)
 
-	// Without any MALLOC_ setting or GLIBC_TUNABLES of the suite's own (either
-	// sets the threshold) or an LD_PRELOAD (which can replace the allocator), so
-	// the control is glibc's defaults and the unit's arm is only what the unit
-	// sets. Its capacity keeps `control[:]` non-nil when every variable is
-	// dropped: a nil environment is the suite's own, MALLOC_ settings included.
-	inherited, eerr := os.environ(context.temp_allocator)
-	if eerr != nil {
-		fail(r, "%s: cannot read the environment: %v", NAME, eerr)
+	control, shipped, env_ok := glibc_environments(r, NAME, unit_env[:])
+	if !env_ok {
 		return
 	}
-	control := make([dynamic]string, 0, len(inherited), context.temp_allocator)
-	for kv in inherited {
-		if !strings.has_prefix(kv, "MALLOC_") && !strings.has_prefix(kv, "GLIBC_TUNABLES=") && !strings.has_prefix(kv, "LD_PRELOAD=") {
-			append(&control, kv)
-		}
-	}
-	// The unit's first: getenv takes the first of a key set twice, and under
-	// systemd the unit's value is the one the process sees.
-	shipped := make([dynamic]string, context.temp_allocator)
-	append(&shipped, ..unit_env[:])
-	append(&shipped, ..control[:])
 
 	start_case(r, NAME)
 	c0, c1, cok := rss_across_rebuilds(r, control[:], list_path)
@@ -254,4 +277,171 @@ run_list_memory_cases :: proc(r: ^Runner) {
 		}
 	}
 	end_case(r)
+}
+
+/*
+A connection's memory is given back when it closes (#526).
+
+Every TCP connection answers on a thread of its own, and that thread's scratch
+arena is mapped by elodin and unmapped when the thread exits; left to libc it is
+a 256 KiB `calloc` that glibc memsets in full and keeps after the thread, some
+275 KB per connection that answered a query. The unit's `glibc.malloc.hugetlb=0`
+keeps the heaps glibc makes for those threads off huge pages, each of which
+would otherwise cost 2 MB once touched (only where the kernel has them on).
+
+The case holds CONN_BURST connections open with one query answered on each,
+then closes them and waits for their threads to exit, reading the server's
+VmRSS at each step. Both figures are held to a few times what was measured
+here (~25 KB a held connection, ~20 KB of each left behind: the stacks glibc
+caches for reuse) and well under the 275 KB of each the calloc costs.
+*/
+@(private = "file")
+CONN_BURST :: 200
+@(private = "file")
+HELD_KIB_PER_CONN :: 64
+@(private = "file")
+KEPT_KIB_PER_CONN :: 32
+@(private = "file")
+KEPT_HUGE_KIB :: 2048
+
+@(private = "file")
+proc_status_int :: proc(pid: int, field: string) -> (n: int, ok: bool) {
+	value := proc_status_field(fmt.tprintf("/proc/%d/status", pid), field) or_return
+	return strconv.parse_int(strings.trim_space(strings.trim_suffix(value, "kB")))
+}
+
+@(private = "file")
+anon_huge_kib :: proc(pid: int) -> (kib: int, ok: bool) {
+	data, err := os.read_entire_file(fmt.tprintf("/proc/%d/smaps", pid), context.temp_allocator)
+	if err != nil {
+		return 0, false
+	}
+	text := string(data)
+	for line in strings.split_lines_iterator(&text) {
+		if strings.has_prefix(line, "AnonHugePages:") {
+			kib += strconv.parse_int(strings.trim_space(strings.trim_suffix(line[len("AnonHugePages:"):], "kB"))) or_else 0
+		}
+	}
+	return kib, true
+}
+
+run_connection_memory_cases :: proc(r: ^Runner) {
+	NAME :: "conns: a burst of TCP connections under the shipped unit's environment gives their memory back on close"
+
+	unit_env, unit_ok := unit_environment(r)
+	if !unit_ok || built_with_asan(r, NAME) {
+		return
+	}
+	_, shipped, env_ok := glibc_environments(r, NAME, unit_env[:])
+	if !env_ok {
+		return
+	}
+
+	start_case(r, NAME)
+	defer end_case(r)
+	udp_port := next_port(r)
+	tcp_port := next_port(r)
+	config := fmt.tprintf(
+		`log: {{ level: info }}
+listeners:
+  udp: {{ enabled: true, address: "127.0.0.1", port: %d }}
+  tcp: {{ enabled: true, address: "127.0.0.1", port: %d }}
+server:
+  max_connections: %d
+  max_connections_per_prefix: %d
+  rate_limit: {{ enabled: false }}
+upstream:
+  servers: ["127.0.0.1:1"]
+cache: {{ enabled: false }}
+blocking: {{ enabled: false }}
+`,
+		udp_port,
+		tcp_port,
+		CONN_BURST * 2,
+		CONN_BURST * 2,
+	)
+	srv, started := start_server_raw(r, config, udp_port, env = shipped)
+	if !started {
+		return
+	}
+	defer stop_server(&srv)
+	if !check(r, wait_ready(&srv, 10 * time.Second) && wait_tcp(tcp_port, 10 * time.Second), "the server never became ready; log:\n%s", read_log(&srv)) {
+		return
+	}
+	pid := srv.process.pid
+	base, bok := proc_status_int(pid, "VmRSS")
+	threads0, tok := proc_status_int(pid, "Threads")
+	if !check(r, bok && tok, "cannot read the server's status") {
+		return
+	}
+
+	// Answered locally, so every connection's thread runs a query through its
+	// scratch arena without an upstream.
+	query := build_query("version.bind.", u16(dns.Type.TXT), class = u16(dns.Class.CH))
+	sockets := make([dynamic]net.TCP_Socket, 0, CONN_BURST, context.temp_allocator)
+	defer for s in sockets {
+		net.close(s)
+	}
+	for _ in 0 ..< CONN_BURST {
+		socket, err := net.dial_tcp_from_endpoint(net.Endpoint{address = net.IP4_Loopback, port = tcp_port})
+		if !check(r, err == nil, "dial %d: %v", len(sockets), err) {
+			return
+		}
+		_ = net.set_option(socket, .Receive_Timeout, CLIENT_TIMEOUT)
+		_ = net.set_option(socket, .Send_Timeout, CLIENT_TIMEOUT)
+		append(&sockets, socket)
+		conn := Test_Conn {
+			socket = socket,
+		}
+		if !check(r, stream_query(&conn, query, context.temp_allocator).ok, "connection %d was not answered; log:\n%s", len(sockets), read_log(&srv)) {
+			return
+		}
+	}
+	held, hok := proc_status_int(pid, "VmRSS")
+	threads1, _ := proc_status_int(pid, "Threads")
+	// The premise: each connection held a thread of its own. One short, as the
+	// thread of `wait_tcp`'s probe may still have been in the first reading.
+	if !check(r, hok && threads1 >= threads0 + CONN_BURST - 1, "threads went %d -> %d holding %d connections", threads0, threads1, CONN_BURST) {
+		return
+	}
+
+	for s in sockets {
+		net.close(s)
+	}
+	clear(&sockets)
+	// Until the threads have exited, which is when their arenas are unmapped.
+	// The deadline only bounds a failing run.
+	threads2 := threads1
+	for deadline := time.tick_now(); threads2 > threads0 && time.tick_since(deadline) < 10 * time.Second; {
+		time.sleep(20 * time.Millisecond)
+		threads2, _ = proc_status_int(pid, "Threads")
+	}
+	if !check(r, threads2 <= threads0, "threads still at %d (from %d) after the connections closed", threads2, threads0) {
+		return
+	}
+	after, aok := proc_status_int(pid, "VmRSS")
+	huge, _ := anon_huge_kib(pid)
+	if !check(r, aok, "cannot read the server's VmRSS") {
+		return
+	}
+	check(
+		r,
+		held - base <= CONN_BURST * HELD_KIB_PER_CONN,
+		"holding %d answered connections took RSS %d -> %d KiB, past %d KiB each",
+		CONN_BURST,
+		base,
+		held,
+		HELD_KIB_PER_CONN,
+	)
+	check(
+		r,
+		after - base <= CONN_BURST * KEPT_KIB_PER_CONN,
+		"after %d connections closed RSS is %d KiB from %d (%d KiB while held), past %d KiB each",
+		CONN_BURST,
+		after,
+		base,
+		held,
+		KEPT_KIB_PER_CONN,
+	)
+	check(r, huge <= KEPT_HUGE_KIB, "%d KiB of huge pages after the burst with the unit's environment %v", huge, unit_env[:])
 }

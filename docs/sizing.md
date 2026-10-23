@@ -61,11 +61,12 @@ the first and last rows' hit rates within it of each other.
 - **Raise `workers` for misses, not `running_workers`.** Measured at eight times
   the cores, the running limit buys contention, not throughput. Lowering it below the cores
   leaves a core idle.
-- **Memory scales with the workers the load reaches.** Each worker keeps its
-  scratch arena (about 0.26 MB) from its first query on, since Odin's temp
-  allocator `free_all` keeps the first block. The pool wakes the worker that
-  went idle last, so a resolver answering a few queries a second touches a few
-  arenas; a burst that reaches all 128 leaves all 128 resident.
+- **Memory scales with the workers the load reaches.** Each worker keeps the
+  pages of its 256 KiB scratch arena that its queries have touched, from its
+  first query on, since Odin's temp allocator `free_all` keeps the first block.
+  The pool wakes the worker that went idle last, so a resolver answering a few
+  queries a second touches a few arenas; a burst that reaches all 128 leaves all
+  128 resident.
 
 Past `max_pending` queries are dropped, not queued: the client times out and
 retries. A DoH client over HTTP/2 is answered `503` instead.
@@ -81,6 +82,22 @@ retries. A DoH client over HTTP/2 is answered `503` instead.
   (half of it). TCP, DoT and HTTP/1.1 answer one query at a time per connection;
   **HTTP/2 multiplexes**. Connections are reused, so the cap bounds concurrent
   clients, not queries per second.
+
+A connection's memory is its thread's: about 25 KB for TCP and 95 KB for DoT
+held open after a query, most of the DoT figure OpenSSL's session. The thread's
+scratch arena is mapped when the connection opens and unmapped when it closes.
+`--check` and startup warn when `max_connections` at 128 KB each is more than a
+quarter of the memory elodin may use:
+
+```
+server.max_connections is 4096: with every connection open that is about 512.0 MiB, more than a quarter of the 1.0 GiB this process may use
+```
+
+Lower `max_connections`, or give elodin more memory (`MemoryMax=`). The unit also
+sets `GLIBC_TUNABLES=glibc.malloc.hugetlb=0`: without it the kernel backs the
+heaps glibc gives concurrent threads with transparent huge pages, 2 MB resident
+each once touched, and a burst of connections leaves tens of MB behind. Started
+any other way, set it in elodin's environment.
 
 HTTP/2 costs more CPU per query than HTTP/1.1 on cache hits, and wins when queries
 are slow: a browser's concurrent requests overlap instead of queueing.

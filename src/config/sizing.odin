@@ -17,8 +17,9 @@ a few hundred misses a second. Width costs the hit path nothing, because only
 `running_workers` of the pool run at once (see `pool.make_pool`), and costs
 memory only as far as the load reaches: a worker holds a scratch arena from its
 first query onward - 256 KiB here, since the build defines
-`DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE` - and Odin's `arena_free_all` keeps and
-zeroes the first block rather than returning it, but the pool wakes the worker
+`DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE`, resident as far as its queries touched it
+(`pool.spawn` maps it) - and Odin's `arena_free_all` keeps the first block
+rather than returning it, but the pool wakes the worker
 that went idle last, so a household resolver answering a few queries a second
 touches the arenas of a few workers and no more.
 
@@ -59,11 +60,52 @@ RUNNING_WORKERS_PER_CPU :: 2
 /*
 Memory charged to each thread when checking the derivation against RAM.
 
-Measured resident cost is ~0.26 MB per worker (`mise run bench`), nearly
-all of it the scratch arena; this rounds up to cover the stack pages a query
-touches and the allocator's own per-thread retention.
+Measured resident cost is ~0.26-0.35 MB per worker under `mise run bench`'s
+load, most of it the part of the scratch arena those queries touched; this
+rounds up to cover the stack pages a query touches and the allocator's own
+per-thread retention.
 */
 WORKER_MEMORY_BYTES :: 512 * 1024
+
+/*
+Memory charged to each connection `server.max_connections` lets the server hold.
+
+Every TCP, DoT and DoH/1.1 connection has a thread of its own. With 200 held
+open after one query each, a TCP connection measured ~25 KB resident and a DoT
+one ~95 KB, nearly all of that OpenSSL's session; this rounds up for DoH/1.1
+and the stack a query touches (#526). The scratch a query uses past that is held
+until its connection closes and unmapped when it does (see `pool.spawn`).
+*/
+CONNECTION_MEMORY_BYTES :: 128 * 1024
+
+/*
+The share of memory past which a full connection table is worth a warning.
+
+The table is configured rather than derived, so nothing here lowers it; a
+quarter of memory held by connections alone is worth an operator hearing about.
+The default 512 reaches it on a machine of less than 256 MB.
+*/
+CONNECTION_MEMORY_SHARE :: 4
+
+/*
+What a full connection table may hold, said when it is past
+`CONNECTION_MEMORY_SHARE` of the memory this process may use. Silent where the
+memory could not be measured.
+*/
+connection_memory_warning :: proc(max_connections: int, m: Machine, allocator := context.temp_allocator) -> (text: string, say: bool) {
+	need := i64(max_connections) * CONNECTION_MEMORY_BYTES
+	if m.memory <= 0 || need * CONNECTION_MEMORY_SHARE <= m.memory {
+		return "", false
+	}
+	return fmt.aprintf(
+			"server.max_connections is %d: with every connection open that is about %#.1M, more than a quarter of the %#.1M this process may use",
+			max_connections,
+			need,
+			m.memory,
+			allocator = allocator,
+		),
+		true
+}
 
 /*
 The share of memory the thread floor is allowed to take.

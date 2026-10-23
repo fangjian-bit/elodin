@@ -457,3 +457,25 @@ test_the_zone_cache_bound_is_configurable :: proc(t: ^testing.T) {
 	testing.expect(t, nerr != nil, "a negative zone-cache bound should be refused")
 	free_all(context.temp_allocator)
 }
+
+/*
+A full connection table is said when it would take more than a quarter of the
+memory (#526): the default 512 at the boundary of 256 MB, a raised table on a
+machine that cannot hold it, and nothing where the memory is not known.
+*/
+@(test)
+test_connection_memory_warning_at_a_quarter_of_memory :: proc(t: ^testing.T) {
+	_, say := connection_memory_warning(512, Machine{memory = 256 * MIB})
+	testing.expect(t, !say, "512 connections at a quarter of 256 MB")
+	text: string
+	text, say = connection_memory_warning(512, Machine{memory = 256 * MIB - 1})
+	testing.expect(t, say, "512 connections past a quarter of 256 MB")
+	testing.expect_value(t, text, "server.max_connections is 512: with every connection open that is about 64.0 MiB, more than a quarter of the 256.0 MiB this process may use")
+	text, say = connection_memory_warning(4096, Machine{memory = 1 * GIB})
+	testing.expect(t, say, "4096 connections on 1 GiB")
+	testing.expect_value(t, text, "server.max_connections is 4096: with every connection open that is about 512.0 MiB, more than a quarter of the 1.0 GiB this process may use")
+	_, say = connection_memory_warning(512, Machine{memory = 1 * GIB})
+	testing.expect(t, !say, "the default on 1 GiB")
+	_, say = connection_memory_warning(1 << 20, Machine{})
+	testing.expect(t, !say, "memory not measured")
+}
