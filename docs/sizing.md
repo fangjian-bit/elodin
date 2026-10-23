@@ -85,7 +85,9 @@ retries. A DoH client over HTTP/2 is answered `503` instead.
 
 A connection's memory is its thread's: about 25 KB for TCP and 95 KB for DoT
 held open after a query, most of the DoT figure OpenSSL's session. The thread's
-scratch arena is mapped when the connection opens and unmapped when it closes.
+scratch arena is mapped when the connection opens and unmapped when it closes;
+of a DoT connection, about 90 KB stays in glibc's heaps after the close, reused
+by the next burst rather than added to.
 `--check` and startup warn when `max_connections` at 128 KB each is more than a
 quarter of the memory elodin may use:
 
