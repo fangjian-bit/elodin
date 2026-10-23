@@ -478,6 +478,7 @@ test_connection_memory_warning_at_a_quarter_of_memory :: proc(t: ^testing.T) {
 	testing.expect(t, !say, "the default on 1 GiB")
 	_, say = connection_memory_warning(1 << 20, Machine{})
 	testing.expect(t, !say, "memory not measured")
-	_, say = connection_memory_warning(1 << 62, Machine{memory = 1 * GIB})
+	text, say = connection_memory_warning(1 << 62, Machine{memory = 1 * GIB})
 	testing.expect(t, say, "a table whose cost does not fit in an i64")
+	testing.expect_value(t, text, "server.max_connections is 4611686018427387904: with every connection open that is about 8.0 EiB, more than a quarter of the 1.0 GiB this process may use")
 }

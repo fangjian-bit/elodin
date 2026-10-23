@@ -3,6 +3,7 @@ package pool
 
 import "base:runtime"
 import "core:sys/linux"
+import "core:sys/posix"
 import "core:testing"
 import "core:thread"
 
@@ -30,6 +31,10 @@ test's thread may have mapped again by then.
 */
 @(test)
 test_a_spawned_threads_scratch_is_unmapped_when_it_exits :: proc(t: ^testing.T) {
+	// As `main.disable_huge_pages` does for the server: with transparent huge
+	// pages on, the kernel merges neighbouring blocks of parallel tests' threads
+	// into one mapping and may back a 2 MB span of it, this block's included.
+	_ = linux.prctl(41, 1, 0, 0, 0) // PR_SET_THP_DISABLE
 	for with_context in ([]bool{false, true}) {
 		probe: Scratch_Probe
 		th := spawn(&probe, use_scratch, context) if with_context else spawn(&probe, use_scratch)
@@ -49,7 +54,7 @@ test_a_spawned_threads_scratch_is_unmapped_when_it_exits :: proc(t: ^testing.T) 
 				return
 			}
 			// A calloc'd block is resident throughout; this one, where touched.
-			testing.expectf(t, probe.resident[i] <= 2, "block %d: %d pages resident of %d (context %v)", i, probe.resident[i], len(b) / PAGE, with_context)
+			testing.expectf(t, probe.resident[i] <= 2, "block %d: %d pages resident of %d (context %v)", i, probe.resident[i], len(b) / int(page_size()), with_context)
 		}
 		testing.expectf(t, probe.allocs == 2 && probe.frees == 2, "%d blocks mapped, %d given back (context %v)", probe.allocs, probe.frees, with_context)
 	}
@@ -100,15 +105,20 @@ counting_proc :: proc(
 	return b, err
 }
 
+// The kernel's page, which mincore(2) wants its start aligned to: 16 KiB or
+// 64 KiB on some arm64 kernels.
 @(private = "file")
-PAGE :: 4096
+page_size :: proc() -> uintptr {
+	return uintptr(posix.sysconf(._PAGESIZE))
+}
 
 // Pages of `b` resident, by mincore(2) over the pages it spans.
 @(private = "file")
 residency :: proc(b: []u8) -> (pages: int, err: linux.Errno) {
-	start := uintptr(raw_data(b)) &~ (PAGE - 1)
-	end := (uintptr(raw_data(b)) + uintptr(len(b)) + PAGE - 1) &~ (PAGE - 1)
-	vec := make([]b8, (end - start) / PAGE)
+	page := page_size()
+	start := uintptr(raw_data(b)) &~ (page - 1)
+	end := (uintptr(raw_data(b)) + uintptr(len(b)) + page - 1) &~ (page - 1)
+	vec := make([]b8, (end - start) / page)
 	defer delete(vec)
 	err = linux.mincore(rawptr(start), uint(end - start), vec)
 	for r in vec {

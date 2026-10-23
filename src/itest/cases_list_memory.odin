@@ -174,9 +174,10 @@ blocking:
 	)
 }
 
+// One numeric field of /proc/<pid>/status, such as `VmRSS` in KiB or `Threads`.
 @(private = "file")
-rss_kib :: proc(pid: int) -> (kib: int, ok: bool) {
-	value := proc_status_field(fmt.tprintf("/proc/%d/status", pid), "VmRSS") or_return
+proc_status_int :: proc(pid: int, field: string) -> (n: int, ok: bool) {
+	value := proc_status_field(fmt.tprintf("/proc/%d/status", pid), field) or_return
 	return strconv.parse_int(strings.trim_space(strings.trim_suffix(value, "kB")))
 }
 
@@ -197,7 +198,7 @@ rss_across_rebuilds :: proc(r: ^Runner, env: []string, list_path: string) -> (st
 	if !check(r, wait_ready(&srv, 60 * time.Second), "the server never became ready; log:\n%s", read_log(&srv)) {
 		return
 	}
-	start, ok = rss_kib(srv.process.pid)
+	start, ok = proc_status_int(srv.process.pid, "VmRSS")
 	if !check(r, ok, "cannot read the server's VmRSS") {
 		return
 	}
@@ -208,7 +209,7 @@ rss_across_rebuilds :: proc(r: ^Runner, env: []string, list_path: string) -> (st
 			return start, 0, false
 		}
 	}
-	end, ok = rss_kib(srv.process.pid)
+	end, ok = proc_status_int(srv.process.pid, "VmRSS")
 	check(r, ok, "cannot read the server's VmRSS")
 	return
 }
@@ -305,25 +306,11 @@ KEPT_KIB_PER_CONN :: 32
 @(private = "file")
 KEPT_HUGE_KIB :: 2048
 
-@(private = "file")
-proc_status_int :: proc(pid: int, field: string) -> (n: int, ok: bool) {
-	value := proc_status_field(fmt.tprintf("/proc/%d/status", pid), field) or_return
-	return strconv.parse_int(strings.trim_space(strings.trim_suffix(value, "kB")))
-}
-
+// The process's huge pages in KiB, summed over its mappings by the kernel.
 @(private = "file")
 anon_huge_kib :: proc(pid: int) -> (kib: int, ok: bool) {
-	data, err := os.read_entire_file(fmt.tprintf("/proc/%d/smaps", pid), context.temp_allocator)
-	if err != nil {
-		return 0, false
-	}
-	text := string(data)
-	for line in strings.split_lines_iterator(&text) {
-		if strings.has_prefix(line, "AnonHugePages:") {
-			kib += strconv.parse_int(strings.trim_space(strings.trim_suffix(line[len("AnonHugePages:"):], "kB"))) or_else 0
-		}
-	}
-	return kib, true
+	value := proc_status_field(fmt.tprintf("/proc/%d/smaps_rollup", pid), "AnonHugePages") or_return
+	return strconv.parse_int(strings.trim_space(strings.trim_suffix(value, "kB")))
 }
 
 run_connection_memory_cases :: proc(r: ^Runner) {
@@ -370,6 +357,12 @@ blocking: {{ enabled: false }}
 		return
 	}
 	pid := srv.process.pid
+	// The premise of the huge-page bound, which a host with THP `never` passes
+	// whatever the server does: the server turned them off for itself.
+	thp, thp_ok := proc_status_int(pid, "THP_enabled")
+	if !check(r, thp_ok && thp == 0, "the server's THP_enabled is %d (read %v), not 0", thp, thp_ok) {
+		return
+	}
 	base, bok := proc_status_int(pid, "VmRSS")
 	threads0, tok := proc_status_int(pid, "Threads")
 	if !check(r, bok && tok, "cannot read the server's status") {
@@ -411,9 +404,9 @@ blocking: {{ enabled: false }}
 	}
 	clear(&sockets)
 	// Until the threads have exited, which is when their arenas are unmapped.
-	// The deadline only bounds a failing run.
+	// The bound only ends a failing run.
 	threads2 := threads1
-	for deadline := time.tick_now(); threads2 > threads0 && time.tick_since(deadline) < 10 * time.Second; {
+	for start := time.tick_now(); threads2 > threads0 && time.tick_since(start) < 10 * time.Second; {
 		time.sleep(20 * time.Millisecond)
 		threads2, _ = proc_status_int(pid, "Threads")
 	}

@@ -1,7 +1,6 @@
 package pool
 
 import "base:runtime"
-import "core:mem/virtual"
 import "core:sys/posix"
 import "core:thread"
 
@@ -103,26 +102,20 @@ mapped_allocator_proc :: proc(
 			return nil, .Invalid_Argument
 		}
 		offset := uint(max(alignment, size_of(Mapping)))
-		// Not `reserve_and_commit`, which keeps the reservation when the commit
+		length := offset + uint(size)
+		// Readable and writable from the start: one call, nothing to undo when it
 		// fails.
-		mapping, err := virtual.reserve(offset + uint(size))
-		if err != nil {
-			return nil, err
-		}
-		if raw_data(mapping) == nil {
+		base := posix.mmap(nil, length, {.READ, .WRITE}, {.PRIVATE, .ANONYMOUS})
+		if base == posix.MAP_FAILED || base == nil {
 			return nil, .Out_Of_Memory
 		}
-		if err = virtual.commit(raw_data(mapping), uint(len(mapping))); err != nil {
-			virtual.release(raw_data(mapping), uint(len(mapping)))
-			return nil, err
-		}
-		ptr := raw_data(mapping[offset:])
-		(^Mapping)(ptr[-size_of(Mapping):])^ = {raw_data(mapping), uint(len(mapping))}
+		ptr := ([^]u8)(base)[offset:]
+		(^Mapping)(ptr[-size_of(Mapping):])^ = {base, length}
 		return ptr[:size], nil
 	case .Free:
 		if old_memory != nil {
 			m := (^Mapping)(([^]u8)(old_memory)[-size_of(Mapping):])^
-			virtual.release(m.base, m.length)
+			posix.munmap(m.base, m.length)
 		}
 		return nil, nil
 	case .Query_Features:

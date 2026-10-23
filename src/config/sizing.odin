@@ -98,7 +98,12 @@ connection_memory_warning :: proc(max_connections: int, m: Machine, allocator :=
 	if m.memory <= 0 || i64(max_connections) <= m.memory / (CONNECTION_MEMORY_BYTES * CONNECTION_MEMORY_SHARE) {
 		return "", false
 	}
-	need := i64(max_connections) * CONNECTION_MEMORY_BYTES
+	// Held at the largest i64 where the product would wrap; that is still more
+	// than a quarter of any memory.
+	need := max(i64)
+	if i64(max_connections) <= max(i64) / CONNECTION_MEMORY_BYTES {
+		need = i64(max_connections) * CONNECTION_MEMORY_BYTES
+	}
 	return fmt.aprintf(
 			"server.max_connections is %d: with every connection open that is about %#.1M, more than a quarter of the %#.1M this process may use",
 			max_connections,
