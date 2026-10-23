@@ -717,6 +717,11 @@ client_handle_data :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> bool {
 			s.reset = true
 			s.oversized = true
 		} else {
+			// Doubled, but never past CLIENT_MAX_BODY: left to `append`, a
+			// 65535-byte body in 16 KiB frames is held in a 116 KiB buffer.
+			if need := len(s.body) + len(data); need > cap(s.body) {
+				reserve(&s.body, min(max(2 * cap(s.body), need), CLIENT_MAX_BODY))
+			}
 			append(&s.body, ..data)
 		}
 	}
@@ -954,8 +959,13 @@ client_request :: proc(
 		dead := c.closed
 		reset := s.reset
 		refused := s.refused
+		oversized := s.oversized
 		sync.mutex_unlock(&c.mu)
 		switch {
+		// A response that overran while the body was still going up is the
+		// same `Too_Large` as one that overran after it; see below.
+		case oversized:
+			return {}, .Too_Large
 		case dead:
 			return {}, .Closed
 		case refused:

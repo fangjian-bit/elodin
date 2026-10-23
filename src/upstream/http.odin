@@ -720,8 +720,8 @@ read_chunked :: proc(r: ^Buf_Reader, allocator: mem.Allocator, limit: int) -> (b
 			return nil, .Too_Large
 		}
 		data := reader_exact(r, int(size)) or_return
-		// Doubled, but never past `limit`: `append` grows by more than twice, so
-		// a body just under the limit was held in more than the limit allows.
+		// Doubled, but never past `limit`: `append` grows by more than twice,
+		// which would hold a body just under the limit in more than it allows.
 		if need := len(out) + len(data); need > cap(out) {
 			reserve(&out, min(max(2 * cap(out), need), limit))
 		}

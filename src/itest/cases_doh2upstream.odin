@@ -190,9 +190,9 @@ blocking: {{ enabled: false }}
 
 	// --- an HTTP/1.1 reply longer than a DNS message ---
 	/*
-	RFC 8484 6 holds application/dns-message to 65535 bytes. Bounded only by the
-	64 MB a blocklist may be, a 96 KB reply that echoed the query's header and
-	question was taken as the answer and cost twice its length per query (#525).
+	RFC 8484 6 holds application/dns-message to 65535 bytes, so a 96 KB reply is
+	refused even though it echoes the query's header and question, rather than
+	taken as the answer at twice its length per query (#525).
 	*/
 	{
 		upstream_port := next_port(r)

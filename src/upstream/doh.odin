@@ -223,8 +223,8 @@ exchange_doh_h1 :: proc(
 			allocator,
 			deadline = deadline,
 			// RFC 8484 6: application/dns-message is at most 65535 bytes, the
-			// bound the HTTP/2 path holds it to. The list fetcher's 64 MB let one
-			// reply cost twice that per query in flight (#525).
+			// bound the HTTP/2 path holds it to, not the 64 MB a blocklist may
+			// be, which every query in flight could hold twice over (#525).
 			max_body = dns.MAX_MESSAGE,
 		)
 
@@ -280,10 +280,12 @@ exchange_doh_h1 :: proc(
 		*/
 		/*
 		A timeout is the deadline spent - `http_exchange` holds every read and
-		write to it - so it is not retried. Nor is a reply past the size of a
-		DNS message: that is what the server sent, not a stale connection. Said here rather than left to the
+		write to it - so it is not retried. Said here rather than left to the
 		`remaining <= 0` check above, which a socket timeout firing a hair early
 		would slip past, dialling the upstream with a sliver it cannot use.
+
+		Nor is a reply past the size of a DNS message: that is what the server
+		sent, not a stale connection.
 		*/
 		if attempt == 1 || herr == .Timeout || herr == .Too_Large || (!reused && herr != .Peer_Closed) {
 			return nil, herr
