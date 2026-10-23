@@ -251,13 +251,13 @@ blocking: {{ enabled: false }}
 	{
 		port := next_port(r)
 		held, herr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = port})
-		// The plain mock below needs the UDP port free, so it reaches the TCP
-		// listen; another run holding it is a skip, as the TCP port is.
-		probe, perr := net.make_bound_udp_socket(net.IP4_Loopback, port)
-		if probe != 0 {
-			net.close(probe)
-		}
-		if herr != nil || perr != nil {
+		// Both held from the start, so another run taking either is a skip
+		// here rather than a failure partway through the case.
+		held_udp, uerr := net.make_bound_udp_socket(net.IP4_Loopback, port)
+		if herr != nil || uerr != nil {
+			if held_udp != 0 {
+				net.close(held_udp)
+			}
 			if herr == nil {
 				net.close(held)
 			}
@@ -272,25 +272,21 @@ blocking: {{ enabled: false }}
 			check(r, !mock_start(dot, r.cert_file, r.key_file), "the dot mock started on a port already held")
 			check(r, dot.tls_ctx == nil, "the failed start kept a TLS context a caller that skips the stop leaks")
 			mock_stop(dot)
-			// The UDP port is free, so the plain mock binds it and then fails on
-			// TCP, closing the UDP socket it already had.
+			// With the UDP port held, the bind fails first, and the socket it could
+			// not bind is closed rather than left open.
+			before := open_fds()
+			check(r, before >= 0, "cannot count the open descriptors")
+			udp_only := mock_make("held", port)
+			check(r, !mock_start(udp_only), "the mock started on a UDP port already held")
+			mock_stop(udp_only)
+			check(r, open_fds() == before, "the failed UDP bind left its socket open")
+			// With the UDP port free, the plain mock binds it and then fails on TCP,
+			// closing the UDP socket it already had.
+			net.close(held_udp)
 			plain := mock_make("held", port)
 			check(r, !mock_start(plain), "the mock started on a port already held")
 			check(r, plain.udp_socket == 0, "the failed start kept a UDP socket it had closed")
 			mock_stop(plain)
-			// With the UDP port held instead, the bind fails first, and the
-			// socket it could not bind is closed rather than left open.
-			held_udp, uerr := net.make_bound_udp_socket(net.IP4_Loopback, port)
-			if check(r, uerr == nil, "cannot hold the UDP port") {
-				before := open_fds()
-				udp_only := mock_make("held", port)
-				check(r, !mock_start(udp_only), "the mock started on a UDP port already held")
-				mock_stop(udp_only)
-				check(r, open_fds() == before, "the failed UDP bind left its socket open")
-			}
-			if held_udp != 0 {
-				net.close(held_udp)
-			}
 			end_case(r)
 			net.close(held)
 		}
