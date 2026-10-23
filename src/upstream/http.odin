@@ -379,9 +379,10 @@ response, and `idle` any one read or write under it; see `stream_write` and
 `reader_fill`. Without one, only the timeouts already on
 the stream apply, and those are per read.
 
-`max_body` is the most the body may be, in every framing, and so the most either
-the reader's buffer or `allocator` is asked to hold for it; a longer one is
-`Too_Large`. A declared length past it is refused before any of the body is read.
+`max_body` is the most the body may be, in every framing, and so the most
+`allocator` is asked to hold for it; the reader's buffer holds the fields as
+well. A longer body is `Too_Large`, and a declared length past it is refused
+before any of the body is read.
 */
 http_exchange :: proc(
 	stream: ^Stream,
@@ -507,9 +508,9 @@ http_exchange :: proc(
 				if !cl_ok {
 					return resp, .HTTP_Error
 				}
-				if v > max_body {
-					return resp, .Too_Large
-				}
+				// Past `max_body` it reads as `max_body + 1`, and is refused below
+				// once the status says a body follows: a 304's is its
+				// representation's length, and a 1xx's is refused for framing.
 				content_length = v
 			case dns.name_equal_fold(name, "transfer-encoding"):
 				/*
@@ -583,8 +584,10 @@ http_exchange :: proc(
 		resp.body = read_chunked(&r, allocator, max_body) or_return
 	case content_length == 0:
 		resp.body = nil
+	case content_length > max_body:
+		// Before a byte of the body is read.
+		return resp, .Too_Large
 	case content_length > 0:
-		// Already bounded where the header was read.
 		data := reader_exact(&r, content_length) or_return
 		out := make([]u8, len(data), allocator)
 		copy(out, data)

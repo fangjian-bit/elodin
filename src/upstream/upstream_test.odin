@@ -3515,6 +3515,8 @@ test_http_bodyless_statuses_end_at_the_fields :: proc(t: ^testing.T) {
 		{"HTTP/1.1 304 Not Modified\r\nETag: \"x\"\r\n\r\n", false, 304, "", true},
 		// A 304 may carry the Content-Length of the representation it stands for.
 		{"HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\n", false, 304, "", true},
+		// Whatever its size: no body follows it to hold to `max_body`.
+		{"HTTP/1.1 304 Not Modified\r\nContent-Length: 100000000\r\n\r\n", false, 304, "", true},
 		// A 204 carries no framing fields (RFC 9110 8.6, 6.1). One that does may
 		// have sent the body it framed, so the connection goes no further.
 		{"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n", false, 204, "", false},
@@ -3536,6 +3538,7 @@ test_http_bodyless_statuses_end_at_the_fields :: proc(t: ^testing.T) {
 		// peer's choosing - and the real one left for the next query to find.
 		{"HTTP/1.1 103 Early Hints\r\nContent-Length: 42\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nfake" + OK, true, 0, "", false},
 		{"HTTP/1.1 100 Continue\r\nTransfer-Encoding: chunked\r\n\r\n" + OK, true, 0, "", false},
+		{"HTTP/1.1 103 Early Hints\r\nContent-Length: 100000000\r\n\r\n" + OK, true, 0, "", false},
 		{"HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1x 200 OK\r\n\r\n", true, 0, "", false},
 	}
 	for c in CASES {
