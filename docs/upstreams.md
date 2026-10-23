@@ -110,6 +110,7 @@ level=warn msg="upstream quad9-dot: TLS handshake with \"dns.quad9.net\" failed:
 | `Peer_Closed` | the peer hung up before a byte of the reply arrived, and hung up again on the retry |
 | `IO_Error` | the transport failed on an established session, including a reply cut off partway |
 | `Bad_Response` | a reply arrived and was thrown away: it did not echo the question, or on `udp://`/`tcp://` lacked the DNS cookie the query carried |
+| `Too_Large` | an `https` reply longer than a DNS message (65535 bytes, RFC 8484 section 6), over HTTP/2 or HTTP/1.1. A declared `Content-Length` past it is refused before the body is read; it is not retried on a fresh connection |
 | `TLS_Failed`, `Verify_Failed` | the handshake; the log line carries OpenSSL's reason |
 
 `Bad_Response` on a `udp://` or `tcp://` upstream means answers are arriving and

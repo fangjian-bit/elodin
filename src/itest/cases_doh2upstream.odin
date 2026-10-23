@@ -188,5 +188,55 @@ blocking: {{ enabled: false }}
 		}
 	}
 
+	// --- an HTTP/1.1 reply longer than a DNS message ---
+	/*
+	RFC 8484 6 holds application/dns-message to 65535 bytes. Bounded only by the
+	64 MB a blocklist may be, a 96 KB reply that echoed the query's header and
+	question was taken as the answer and cost twice its length per query (#525).
+	*/
+	{
+		upstream_port := next_port(r)
+		mock := doh2_mock_make(upstream_port, "/dns-query", payload)
+		mock.pad = 98304
+		if !doh2_mock_start(mock, r.cert_file, r.key_file, {"http/1.1"}) {
+			skip_case(r, "upstream: doh h1 oversized reply", "cannot start the mock")
+		} else {
+			defer doh2_mock_stop(mock)
+			udp_port := next_port(r)
+			config := fmt.tprintf(
+				`log: {{ level: warn }}
+listeners:
+  udp: {{ enabled: true, address: "127.0.0.1", port: %d }}
+  tcp: {{ enabled: false }}
+upstream:
+  timeout: 5s
+  servers:
+    - {{ name: big, type: https, url: "https://127.0.0.1:%d/dns-query", verify: false }}
+cache: {{ enabled: false }}
+blocking: {{ enabled: false }}
+`,
+				udp_port,
+				upstream_port,
+			)
+			srv, ok := start_server(r, Server_Options{config = config, udp_port = udp_port})
+			if ok {
+				start_case(r, "upstream: a DoH reply over HTTP/1.1 longer than a DNS message is refused")
+				{
+					res := query_udp(udp_port, build_query(fix.qname, fix.qtype, id = 0x5250))
+					if check(r, res.ok, "no response") {
+						h := parse_header(r, res.wire)
+						check_eq_int(r, h.rcode, 2, "rcode (SERVFAIL)")
+					}
+					_, h1_hits := doh2_mock_counts(mock)
+					check(r, h1_hits >= 1, "the oversized member was never asked over HTTP/1.1")
+				}
+				end_case(r)
+				stop_server(&srv)
+			} else {
+				skip_case(r, "upstream: doh h1 oversized reply", "server did not start")
+			}
+		}
+	}
+
 	delete(payload)
 }

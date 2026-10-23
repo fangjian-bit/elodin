@@ -10,6 +10,10 @@ The HTTP/1.1 response reader, which every blocklist host and every DoH upstream
 without h2 writes into: the status line, the header loop, and the chunked,
 Content-Length and read-to-close bodies. The input is the whole response as the
 server sent it, followed by its close.
+
+Read twice: with the list fetcher's body limit, which no input reaches, and with
+one at half the input, so each framing's refusal at `max_body` - the limit a
+DoH reply is held to (#525) - is reached as well as its success.
 */
 @(export, link_name = "LLVMFuzzerTestOneInput")
 fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
@@ -17,9 +21,17 @@ fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
 	context = harness.setup(&f)
 	defer harness.teardown(&f)
 
-	socket, peer, ok := harness.feed(data[:size])
+	for max_body in ([]int{upstream.MAX_HTTP_BODY, int(size) / 2}) {
+		exchange(data[:size], max_body)
+	}
+	return 0
+}
+
+@(private = "file")
+exchange :: proc(data: []u8, max_body: int) {
+	socket, peer, ok := harness.feed(data)
 	if !ok {
-		return 0
+		return
 	}
 	defer harness.unfeed(socket, peer)
 
@@ -55,9 +67,9 @@ fuzz_one :: proc "c" (data: [^]u8, size: uint) -> i32 {
 			&stream,
 			upstream.Http_Request{method = "GET", path = "/", host = "fuzz"},
 			context.temp_allocator,
+			max_body = max_body,
 		)
 	}
-	return 0
 }
 
 // libFuzzer's start-up hook: see `harness.check_max_len`.

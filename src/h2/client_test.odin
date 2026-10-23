@@ -327,6 +327,55 @@ test_wait_for_frame_type :: proc(socket: net.TCP_Socket, want: Frame_Type) -> (h
 	}
 }
 
+// Answers with `CLIENT_MAX_BODY - 1` bytes more than the request carried, so a
+// one-byte request is answered at the bound and a two-byte one just past it.
+@(private = "file")
+sized_handler :: proc(conn: ^Conn, req: ^Request) {
+	defer request_destroy(conn, req)
+	body := make([]u8, CLIENT_MAX_BODY - 1 + len(req.body), context.temp_allocator)
+	respond(conn, req.stream_id, Response{status = 200, content_type = "application/dns-message", body = body})
+}
+
+/*
+A response is a DNS message, at most CLIENT_MAX_BODY bytes (RFC 8484 6). One of
+exactly that is kept; one byte more is this end's reset, reported as
+`Too_Large` and not as the peer's `Reset`, so the caller can tell the two apart
+as the HTTP/1.1 client does (#525).
+*/
+@(test)
+test_client_response_past_max_body_is_too_large :: proc(t: ^testing.T) {
+	for extra in 0 ..< 2 {
+		listener, bound, lok := test_listen(t)
+		if !lok {
+			return
+		}
+		srv := Test_Server{listener = listener, handler = sized_handler}
+		server_thread := thread.create_and_start_with_poly_data(&srv, test_server_once)
+		c, ct, tc, cok := test_dial_client(t, bound)
+		if cok {
+			request := []u8{1, 2}
+			resp, err := client_request(
+				c,
+				Client_Request{method = "POST", scheme = "https", authority = "mock.invalid", path = "/dns-query", body = request[:1 + extra]},
+				2 * time.Second,
+			)
+			if extra == 0 {
+				testing.expectf(t, err == .None, "a %d-byte response was refused: %v", CLIENT_MAX_BODY, err)
+				testing.expect_value(t, len(resp.body), CLIENT_MAX_BODY)
+			} else {
+				testing.expectf(t, err == .Too_Large, "a %d-byte response came back as %v", CLIENT_MAX_BODY + 1, err)
+			}
+			delete(resp.body)
+			test_close_client(ct, tc)
+			client_unref(c)
+		}
+		thread.join(server_thread)
+		thread.destroy(server_thread)
+		net.close(listener)
+	}
+	free_all(context.temp_allocator)
+}
+
 @(test)
 test_client_request_reset_by_peer :: proc(t: ^testing.T) {
 	// REFUSED_STREAM says the request was never processed, so it has its own

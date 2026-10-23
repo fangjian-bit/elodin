@@ -1509,7 +1509,9 @@ request_destroy :: proc(c: ^Conn, req: ^Request) {
 	free(req, req.allocator)
 }
 
-MAX_BODY :: 64 * 1024
+// A DNS message, which RFC 8484 6 holds to 65535 bytes; restated as
+// CLIENT_MAX_BODY is, and `server` asserts it agrees with `dns.MAX_MESSAGE`.
+MAX_BODY :: 65535
 /*
 Request bytes - decoded header fields and body - one connection may hold across
 all its streams at once.

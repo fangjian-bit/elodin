@@ -88,6 +88,8 @@ Client_Stream :: struct {
 	// Whether this stream's answer has refunded its control frame; see
 	// client_finish_headers. Not `status != 0`: a malformed :status reads as 0.
 	refunded:    bool,
+	// This end reset the stream for sending too much; see Client_Error.Too_Large.
+	oversized:   bool,
 }
 
 Client_Request :: struct {
@@ -116,6 +118,10 @@ Client_Error :: enum u8 {
 	// again (RFC 9113 8.7).
 	Refused,
 	Timeout,
+	// This end reset the stream: the response ran past CLIENT_MAX_BODY, or
+	// spent half the receive window. What the peer sent, not a reset it chose,
+	// so the caller can report it as the HTTP/1.1 client does.
+	Too_Large,
 }
 
 // Advertised receive window: generous, so we are never the reason a DoH
@@ -126,9 +132,10 @@ Client_Error :: enum u8 {
 // stream is also reset once half the window has gone (Client_Stream.received),
 // rather than left to stall with none.
 CLIENT_RECV_WINDOW :: 1 << 20
-// Bound on one response body. The h2 package does not depend on the dns
-// package, so DNS's own message size limit is restated here.
-CLIENT_MAX_BODY :: 64 * 1024
+// Bound on one response body: a DNS message, which RFC 8484 6 holds to 65535
+// bytes. The h2 package does not depend on the dns package, so the limit is
+// restated here, and `upstream` asserts the two agree.
+CLIENT_MAX_BODY :: 65535
 
 client_make :: proc(io: IO, allocator := context.allocator) -> ^Client {
 	c := new(Client, allocator)
@@ -708,6 +715,7 @@ client_handle_data :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> bool {
 		if len(s.body) + len(data) > CLIENT_MAX_BODY || s.received > CLIENT_RECV_WINDOW / 2 {
 			oversized = true
 			s.reset = true
+			s.oversized = true
 		} else {
 			append(&s.body, ..data)
 		}
@@ -974,8 +982,11 @@ client_request :: proc(
 	// A reset after a complete response is the peer ending the upload early
 	// (RFC 9113 8.1), and the client MUST NOT discard that response.
 	case s.reset && !s.done:
-		refused := s.refused
+		refused, oversized := s.refused, s.oversized
 		sync.mutex_unlock(&c.mu)
+		if oversized {
+			return {}, .Too_Large
+		}
 		return {}, .Refused if refused else .Reset
 	case c.closed && !s.done:
 		sync.mutex_unlock(&c.mu)

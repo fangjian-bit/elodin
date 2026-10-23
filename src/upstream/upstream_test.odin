@@ -969,7 +969,7 @@ test_chunk_size_too_large_is_refused :: proc(t: ^testing.T) {
 		}
 		append(&r.buf, ..transmute([]u8)body)
 
-		_, err := read_chunked(&r, context.temp_allocator)
+		_, err := read_chunked(&r, context.temp_allocator, MAX_HTTP_BODY)
 		testing.expectf(t, err != .None, "%q was accepted as a chunk size", body)
 		testing.expectf(t, r.pos >= 0, "%q left the reader at position %d", body, r.pos)
 	}
@@ -2637,6 +2637,126 @@ test_a_refused_doh_h1_reply_releases_its_body :: proc(t: ^testing.T) {
 			thread.join(server)
 			thread.destroy(server)
 			net.close(listener)
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+/*
+A DoH reply over HTTP/1.1 is a DNS message, so it is at most `dns.MAX_MESSAGE`
+bytes (RFC 8484 6), not the 64 MB a blocklist may be (#525).
+Every framing stops there: a Content-Length past it before a byte of the body
+is read, chunks and a close-delimited body as they reach it. Neither the
+caller's allocator nor the reader's buffer holds more than one message's worth
+on the way, and a message of exactly the limit still goes through.
+
+The body echoes the query's header and question, so a reply that got past the
+bound would be taken as the answer. Each is also asked on a pooled connection: a
+reply too long is the server's answer, not a stale connection, so it is not
+asked again on a fresh one - the mock serves one connection, and a second dial
+would wait out the deadline.
+*/
+@(test)
+test_doh_h1_reply_is_bounded_by_a_dns_message :: proc(t: ^testing.T) {
+	query := []u8{0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1}
+	Framing :: enum {
+		Content_Length,
+		Chunked,
+		Unframed,
+	}
+	for framing in Framing {
+		for size in ([]int{dns.MAX_MESSAGE, dns.MAX_MESSAGE + 1, 98304}) {
+			for pooled in ([]bool{false, true}) {
+				message := make([]u8, size, context.temp_allocator)
+				copy(message, query)
+				message[2] |= 0x80
+				b := strings.builder_make(context.temp_allocator)
+				strings.write_string(&b, "HTTP/1.1 200 OK\r\n")
+				switch framing {
+				case .Content_Length:
+					fmt.sbprintf(&b, "Content-Length: %d\r\n\r\n", size)
+					strings.write_bytes(&b, message)
+				case .Chunked:
+					strings.write_string(&b, "Transfer-Encoding: chunked\r\n\r\n")
+					for rest := message; len(rest) > 0; {
+						n := min(len(rest), 16384)
+						fmt.sbprintf(&b, "%x\r\n", n)
+						strings.write_bytes(&b, rest[:n])
+						strings.write_string(&b, "\r\n")
+						rest = rest[n:]
+					}
+					strings.write_string(&b, "0\r\n\r\n")
+				case .Unframed:
+					strings.write_string(&b, "Connection: close\r\n\r\n")
+					strings.write_bytes(&b, message)
+				}
+
+				listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+				if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
+					return
+				}
+				bound, _ := net.bound_endpoint(listener)
+				_ = net.set_option(listener, .Receive_Timeout, 3 * time.Second)
+				// Held open until the client is done, so a refusal is the client's and
+				// not a reset from a mock that closed with the reply still in flight.
+				// Only the unframed body needs the close to end it.
+				m := Http_Mock {
+					listener = listener,
+					reply    = strings.to_string(b),
+					hold     = framing != .Unframed,
+				}
+				server := thread.create_and_start_with_poly_data(&m, http_mock_once)
+
+				u, uerr := make_upstream(
+					config.Upstream_Spec {
+						name = "oversized",
+						kind = .TCP,
+						address = "127.0.0.1",
+						port = bound.port,
+						hostname = "doh.invalid",
+						path = "/dns-query",
+					},
+					8,
+					30 * time.Second,
+				)
+				if testing.expectf(t, uerr == .None, "cannot make the upstream: %v", uerr) {
+					caller, reader: mem.Tracking_Allocator
+					mem.tracking_allocator_init(&caller, context.allocator)
+					mem.tracking_allocator_init(&reader, context.allocator)
+					if pooled {
+						socket, derr := dial_tcp_timeout(bound, time.Second)
+						if testing.expectf(t, derr == .None, "cannot dial the mock: %v", derr) {
+							put_idle(u, Idle_Conn{socket = socket})
+						}
+					}
+					resp: []u8
+					err: Error
+					{
+						context.allocator = mem.tracking_allocator(&reader)
+						resp, err = exchange_doh_h1(u, query, query, 5 * time.Second, mem.tracking_allocator(&caller))
+					}
+					if size <= dns.MAX_MESSAGE {
+						testing.expectf(t, err == .None, "%v %d pooled=%v: a whole DNS message was refused: %v", framing, size, pooled, err)
+						testing.expectf(t, len(resp) == size, "%v %d pooled=%v: came back as %d bytes", framing, size, pooled, len(resp))
+					} else {
+						testing.expectf(t, err == .Too_Large, "%v %d pooled=%v: accepted as a DNS message: err=%v len=%d", framing, size, pooled, err, len(resp))
+					}
+					if resp != nil {
+						delete(resp, mem.tracking_allocator(&caller))
+					}
+					testing.expectf(t, caller.peak_memory_allocated <= dns.MAX_MESSAGE + 1,
+						"%v %d pooled=%v: peak %d bytes in the caller's allocator", framing, size, pooled, caller.peak_memory_allocated)
+					testing.expectf(t, reader.peak_memory_allocated < 2 * dns.MAX_MESSAGE,
+						"%v %d pooled=%v: the reader's buffer peaked at %d bytes", framing, size, pooled, reader.peak_memory_allocated)
+					expect_caller_holds_nothing(t, &caller, "oversized")
+					mem.tracking_allocator_destroy(&caller)
+					mem.tracking_allocator_destroy(&reader)
+					destroy(u)
+				}
+				thread.join(server)
+				thread.destroy(server)
+				net.close(listener)
+			}
 		}
 	}
 	free_all(context.temp_allocator)

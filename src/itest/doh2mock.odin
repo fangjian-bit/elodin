@@ -46,6 +46,9 @@ Doh2_Mock :: struct {
 	// Over HTTP/1.1, answer every query with this status and a short text
 	// body instead, as a resolver behind a maintenance page does. Zero for 200.
 	status:     int,
+	// Over HTTP/1.1, stretch each 200's body to this many bytes with zeros after
+	// the real reply, so it still answers the query's header and question.
+	pad:        int,
 }
 
 doh2_mock_make :: proc(port: int, path: string, payload: []u8) -> ^Doh2_Mock {
@@ -329,6 +332,11 @@ doh2_serve_http1 :: proc(conn: ^Doh2_Conn) {
 	}
 
 	reply := doh2_reply_body(m, body[:content_length], context.temp_allocator)
+	if m.pad > len(reply) {
+		padded := make([]u8, m.pad, context.temp_allocator)
+		copy(padded, reply)
+		reply = padded
+	}
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: ")
 	strings.write_int(&b, len(reply))
