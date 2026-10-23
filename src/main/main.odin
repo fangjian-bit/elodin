@@ -427,6 +427,8 @@ main :: proc() {
 	// completely routine, so the signal is ignored and the write reports EPIPE
 	// through the normal error path instead.
 	posix.sigignore(.SIGPIPE)
+	// Before the first thread or large allocation, so no mapping predates it.
+	pool.disable_huge_pages()
 	install_stop_handlers()
 	install_reload_handler()
 
@@ -594,6 +596,9 @@ main :: proc() {
 		if text, say := mixed_validation_warning(&cfg); say {
 			fmt.printfln("  warning: %s", text)
 		}
+		if text, say := connection_memory_warning(&cfg); say {
+			fmt.printfln("  warning: %s", text)
+		}
 		return
 	}
 
@@ -658,6 +663,9 @@ log_config_warnings :: proc(cfg: ^config.Config) {
 	if text, say := mixed_validation_warning(cfg); say {
 		logx.warnf("%s", text)
 	}
+	if text, say := connection_memory_warning(cfg); say {
+		logx.warnf("%s", text)
+	}
 
 	switch {
 	case !cfg.special_use.enabled:
@@ -715,6 +723,21 @@ mixed_validation_warning :: proc(cfg: ^config.Config) -> (text: string, say: boo
 	}
 	return "dnssec.enabled is off and an upstream group has more than one server: if its members do not all validate, a SERVFAIL from one that does is asked of one that does not - see elodin_upstream_swept_rcode_total",
 		true
+}
+
+// Only with a stream listener, as the connection table is theirs. The machine is
+// measured here if no derivation needed it, and not stored: `sizing` reports a
+// machine only where a number came from it.
+@(private)
+connection_memory_warning :: proc(cfg: ^config.Config) -> (text: string, say: bool) {
+	if !config.stream_listeners_enabled(cfg.listeners) {
+		return "", false
+	}
+	m := cfg.server.sizing.machine
+	if m.memory == 0 {
+		m = config.probe_machine()
+	}
+	return config.connection_memory_warning(cfg.server.max_connections, m)
 }
 
 run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {

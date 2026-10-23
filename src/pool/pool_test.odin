@@ -1,5 +1,6 @@
 package pool
 
+import "base:runtime"
 import "core:sync"
 import "core:sys/posix"
 import "core:testing"
@@ -328,4 +329,28 @@ read_mask :: proc(p: ^Mask_Probe) {
 	for sig, i in ([]posix.Signal{.SIGTERM, .SIGINT, .SIGHUP}) {
 		p.blocked[i] = posix.sigismember(&cur, sig) == 1
 	}
+}
+
+/*
+`mapped_allocator` hands out zeroed memory aligned as asked, and refuses an
+alignment past a page rather than return a pointer that is not aligned to it.
+*/
+@(test)
+test_mapped_allocator_aligns_and_zeroes :: proc(t: ^testing.T) {
+	for align in ([]int{16, 64, MAPPING_ALIGN_MAX}) {
+		b, err := runtime.mem_alloc(10_000, align, mapped_allocator)
+		if !testing.expectf(t, err == nil && len(b) == 10_000, "align %d: %v", align, err) {
+			return
+		}
+		testing.expectf(t, uintptr(raw_data(b)) % uintptr(align) == 0, "align %d: %p", align, raw_data(b))
+		zero := true
+		for c in b {
+			zero &&= c == 0
+		}
+		testing.expectf(t, zero, "align %d: not zeroed", align)
+		b[len(b) - 1] = 1
+		testing.expect_value(t, runtime.mem_free(raw_data(b), mapped_allocator), nil)
+	}
+	_, err := runtime.mem_alloc(64, 2 * MAPPING_ALIGN_MAX, mapped_allocator)
+	testing.expect_value(t, err, runtime.Allocator_Error.Invalid_Argument)
 }

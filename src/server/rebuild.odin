@@ -50,7 +50,7 @@ rebuild_start :: proc(r: ^Rebuild, s: ^Server, network: bool) -> (started: bool)
 	}
 	r.cfg = rebuild_snapshot(live_config(s), virtual.arena_allocator(&r.arena))
 	// The caller's allocators, as the sets and `lists_loaded` built there are
-	// freed by the caller's thread; `thread` gives it a temp allocator of its own.
+	// freed by the caller's thread; `pool.spawn` gives it a temp allocator of its own.
 	r.thread = pool.spawn(r, rebuild_thread, context)
 	if r.thread == nil {
 		virtual.arena_destroy(&r.arena)
@@ -63,10 +63,6 @@ rebuild_start :: proc(r: ^Rebuild, s: ^Server, network: bool) -> (started: bool)
 @(private = "file")
 rebuild_thread :: proc(r: ^Rebuild) {
 	r.current = rebuild_rules(r.s, &r.cfg, r.network)
-	// Handed a context, `thread` leaves its temp allocator to the thread.
-	if context.temp_allocator.procedure == runtime.default_temp_allocator_proc {
-		runtime.default_temp_allocator_destroy(auto_cast context.temp_allocator.data)
-	}
 }
 
 // Started and not yet collected.
