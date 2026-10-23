@@ -428,7 +428,7 @@ main :: proc() {
 	// through the normal error path instead.
 	posix.sigignore(.SIGPIPE)
 	// Before the first thread or large allocation, so no mapping predates it.
-	disable_huge_pages()
+	pool.disable_huge_pages()
 	install_stop_handlers()
 	install_reload_handler()
 

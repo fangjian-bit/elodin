@@ -70,7 +70,8 @@ up to a page.
 
 The kernel merges neighbouring blocks into one mapping - 29 of them, 7.5 MB,
 with 200 connections held - so where transparent huge pages are on, a touch in
-a 2 MB span would fault in all of it; `main` turns them off for the process.
+a 2 MB span would fault in all of it; `disable_huge_pages` turns them off for
+the process.
 */
 @(private)
 mapped_allocator := runtime.Allocator{mapped_allocator_proc, nil}

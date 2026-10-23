@@ -18,8 +18,8 @@ a few hundred misses a second. Width costs the hit path nothing, because only
 memory only as far as the load reaches: a worker holds a scratch arena from its
 first query onward - 256 KiB here, since the build defines
 `DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE`, resident as far as its queries touched it
-(`pool.spawn` maps it) - and Odin's `arena_free_all` keeps the first block
-rather than returning it, but the pool wakes the worker
+(`pool.spawn` maps it) - and Odin's `arena_free_all` keeps the first block,
+zeroing what was used of it, rather than returning it, but the pool wakes the worker
 that went idle last, so a household resolver answering a few queries a second
 touches the arenas of a few workers and no more.
 

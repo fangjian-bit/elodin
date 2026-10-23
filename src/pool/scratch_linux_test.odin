@@ -31,10 +31,10 @@ test's thread may have mapped again by then.
 */
 @(test)
 test_a_spawned_threads_scratch_is_unmapped_when_it_exits :: proc(t: ^testing.T) {
-	// As `main.disable_huge_pages` does for the server: with transparent huge
-	// pages on, the kernel merges neighbouring blocks of parallel tests' threads
-	// into one mapping and may back a 2 MB span of it, this block's included.
-	_ = linux.prctl(41, 1, 0, 0, 0) // PR_SET_THP_DISABLE
+	// As the server does: with transparent huge pages on, the kernel merges
+	// neighbouring blocks of parallel tests' threads into one mapping and may
+	// back a 2 MB span of it, this block's included.
+	disable_huge_pages()
 	for with_context in ([]bool{false, true}) {
 		probe: Scratch_Probe
 		th := spawn(&probe, use_scratch, context) if with_context else spawn(&probe, use_scratch)
