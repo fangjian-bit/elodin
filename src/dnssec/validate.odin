@@ -3364,6 +3364,13 @@ verified_rrset :: proc(
 		*/
 		result, encloser := check_signature(sig, owner, class, records, keys, unix, allocator, &scratch)
 		if scratch.over_budget {
+			// Said out loud for the same reason as running out of
+			// verifications above: the set is dropped.
+			logx.debugf(
+				"dnssec: %s %s went past the request budget before a signature held; the set is dropped",
+				dns.type_name(type),
+				dns.name_trim_root(owner),
+			)
 			return nil, "", {}, false, true
 		}
 		if result == .Ok && encloser != "" {
@@ -3815,7 +3822,7 @@ zone_step :: proc(
 			// parent naming this cut; see `verified_rrset` for the rest of it.
 			result, encloser := check_signature(sig, child, class, ds_records, parent_keys, unix, allocator, &scratch)
 			if scratch.over_budget {
-					exhausted = true
+				exhausted = true
 				break
 			}
 			if result == .Ok && encloser == "" {
@@ -4281,7 +4288,7 @@ fetch_keys :: proc(
 				}
 				result, _ := check_signature(sig, zone, class, records, attested[:], unix, allocator, &scratch)
 				if scratch.over_budget {
-							exhausted = true
+					exhausted = true
 					break ds_loop
 				}
 				switch result {

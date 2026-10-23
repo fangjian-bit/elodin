@@ -442,33 +442,39 @@ render_rdatas :: proc(scratch: ^Signing_Scratch, records: []dns.Record, allocato
 	scratch.records = records
 	scratch.rdatas = nil
 	scratch.rdata_bytes = 0
-	// A request with nothing left to spend renders nothing, as
-	// `dns.decode_message` reads nothing, so the overshoot stays one set.
-	if scratch_over_budget(scratch) {
+	/*
+	Charged as it grows, and at twice the buffer's capacity: growth that cannot
+	happen in place - past the end of an arena block - leaves every smaller copy
+	behind, and those sum to less than the last. A set's canonical form can be
+	many times its wire size, since names in RDATA arrive compressed and are
+	rendered in full, so a request that runs out stops the render at the step
+	that crossed rather than paying for the set and refusing after.
+
+	The index arrays are charged before they are taken, and with the buffer's
+	first capacity, so a request with nothing left renders nothing, as
+	`dns.decode_message` reads nothing. Both are taken before the buffer, so the
+	buffer is the last thing in the arena and grows in place.
+	*/
+	STORE_START :: 512
+	if !charge_scratch(scratch, len(records) * (size_of(int) + size_of([]u8)) + 2 * STORE_START) {
 		return false
 	}
-	// Both taken before the buffer, so the buffer is the last thing in the
-	// arena and grows in place.
 	ends := make([]int, len(records), allocator)
 	rdatas := make([][]u8, len(records), allocator)
-	store := make([dynamic]u8, 0, 512, allocator)
-	rendered := true
+	store := make([dynamic]u8, 0, STORE_START, allocator)
+	charged := 2 * STORE_START
 	for rec, i in records {
 		start := len(store)
-		if !write_canonical_rdata(&store, rec) || len(store) - start > 0xffff {
-			rendered = false
-			break
+		rendered := write_canonical_rdata(&store, rec) && len(store) - start <= 0xffff
+		// Before the verdict: the arena has paid for this record either way.
+		if 2 * cap(store) > charged {
+			charge_scratch(scratch, 2 * cap(store) - charged) or_return
+			charged = 2 * cap(store)
+		}
+		if !rendered {
+			return false
 		}
 		ends[i] = len(store)
-	}
-	/*
-	Charged whether or not it rendered: the arena has paid either way. Twice the
-	buffer's capacity, because growth that cannot happen in place - past the end
-	of an arena block - leaves every smaller copy behind, and those sum to less
-	than the last.
-	*/
-	if !charge_scratch(scratch, 2 * cap(store) + len(records) * (size_of(int) + size_of([]u8))) || !rendered {
-		return false
 	}
 	start := 0
 	for end, i in ends {

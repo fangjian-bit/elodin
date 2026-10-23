@@ -333,7 +333,6 @@ place: the copies it leaves behind are the request's too.
 */
 @(test)
 test_the_render_charge_covers_what_the_arena_took :: proc(t: ^testing.T) {
-	records := ss_big_txt()
 	sig := Rrsig {
 		type_covered = .TXT,
 		labels       = 3,
@@ -345,7 +344,7 @@ test_the_render_charge_covers_what_the_arena_took :: proc(t: ^testing.T) {
 	least, most := max(int), 0
 	for k in 0 ..< 16 {
 		free_all(context.temp_allocator)
-		records = ss_big_txt()
+		records := ss_big_txt()
 		block := (cast(^runtime.Arena)context.temp_allocator.data).curr_block
 		offset := max(0, int(block.capacity - block.used) - 256 * 1024) + k * 16 * 1024
 		if offset > 0 {
@@ -401,5 +400,40 @@ test_the_reason_is_what_stopped_the_loop :: proc(t: ^testing.T) {
 	_, _, _, ok, exhausted = verified_rrset(&budget, section, SS_OWNER, .TXT, .IN, "example.com.", ss_key(), SS_NOW, context.temp_allocator)
 	testing.expect(t, !ok && exhausted)
 	testing.expect_value(t, exhausted_reason(&budget), VERIFICATIONS_SPENT)
+	free_all(context.temp_allocator)
+}
+
+/*
+The render stops when the request runs out, rather than rendering the whole set
+and finding out after. A set's canonical form can be many times its wire size -
+names in RDATA arrive compressed and are rendered in full - so what a refused
+render takes is one step of the buffer's growth, not the set.
+*/
+@(test)
+test_a_render_stops_when_the_request_runs_out :: proc(t: ^testing.T) {
+	free_all(context.temp_allocator)
+	records := ss_big_txt()
+	sig := Rrsig {
+		type_covered = .TXT,
+		labels       = 3,
+		signer       = "example.com.",
+	}
+	// Room to start - the index arrays and the first steps of the buffer - and
+	// not for the set, whose RDATA alone is 58 KB.
+	ROOM :: 32 * 1024
+	spent := dns.REQUEST_DECODE_BUDGET - ROOM
+	budget := Budget {
+		spent = &spent,
+	}
+	scratch := Signing_Scratch {
+		budget = &budget,
+	}
+	mark := arena_used()
+	_, ok := signing_input(sig, SS_OWNER, .IN, records, context.temp_allocator, &scratch)
+	taken := arena_used() - mark
+	testing.expect(t, !ok)
+	testing.expect_value(t, budget.ran_out, READING_OVER_BUDGET)
+	// The room plus at most the step of growth that crossed it.
+	testing.expectf(t, taken < ROOM * 3 / 2, "a render refused %d bytes short of the budget took %d bytes of arena", ROOM, taken)
 	free_all(context.temp_allocator)
 }
