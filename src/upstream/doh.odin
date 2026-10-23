@@ -148,8 +148,9 @@ exchange_doh_h2 :: proc(
 			return nil, .HTTP_Error
 		case .Too_Large:
 			// Reported as HTTP/1.1 reports it, so health and the failure kind do
-			// not depend on what ALPN chose.
-			return nil, .Too_Large
+			// not depend on what ALPN chose: a non-200 is the server's answer
+			// whatever the size of the body nobody reads.
+			return nil, .Too_Large if resp.status == 200 else .HTTP_Error
 		case .Timeout:
 			return nil, .Timeout
 		}
@@ -250,7 +251,10 @@ exchange_doh_h1 :: proc(
 			delete(resp.body, allocator)
 		}
 		stream_close(&stream)
-		if herr == .None {
+		// A non-200 is the server's answer whatever the size of its body, which
+		// nobody reads: a 408 is still retried, and an error page is still an
+		// `HTTP_Error`, as on HTTP/2.
+		if herr == .None || (herr == .Too_Large && resp.status != 200) {
 			/*
 			A 408 on a pooled connection is the server closing one it found
 			idle, written before this request arrived; the client may repeat

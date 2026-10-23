@@ -976,6 +976,27 @@ test_chunk_size_too_large_is_refused :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
+// `max_body` is the most the caller's allocator is asked to hold, from the first
+// reservation on: a small limit is not met with a full-size starting buffer.
+@(test)
+test_read_chunked_never_reserves_past_its_limit :: proc(t: ^testing.T) {
+	body := "4\r\nabcd\r\n0\r\n\r\n"
+	r := Buf_Reader {
+		buf = make([dynamic]u8, 0, 128, context.temp_allocator),
+	}
+	append(&r.buf, ..transmute([]u8)body)
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+
+	got, err := read_chunked(&r, mem.tracking_allocator(&track), 100)
+	testing.expect_value(t, err, Error.None)
+	testing.expect_value(t, string(got), "abcd")
+	testing.expectf(t, track.peak_memory_allocated <= 100, "peaked at %d bytes for a limit of 100", track.peak_memory_allocated)
+	delete(got, mem.tracking_allocator(&track))
+	free_all(context.temp_allocator)
+}
+
 // A count that cannot be read cannot be satisfied, and must not be answered
 // with a slice running backwards from the cursor.
 @(test)
@@ -2773,7 +2794,8 @@ A 408 on a pooled connection is the server closing one it found idle, and the
 request may be repeated (RFC 9110 15.5.9): it is asked again on a fresh dial,
 which answers. On a connection the query dialled itself, a 408 is the server's
 answer to this request and is reported. The mock serves the pooled connection
-the 408 and the next one a reply.
+the 408 and the next one a reply. A body past a DNS message changes neither:
+a non-200 is the server's answer whatever it carries, and nobody reads it.
 */
 @(test)
 test_a_doh_h1_408_on_a_pooled_connection_is_retried :: proc(t: ^testing.T) {
@@ -2781,62 +2803,69 @@ test_a_doh_h1_408_on_a_pooled_connection_is_retried :: proc(t: ^testing.T) {
 	answer := make([]u8, len(query), context.temp_allocator)
 	copy(answer, query)
 	answer[2], answer[3] = 0x81, 0x80
-	timeout_page := "HTTP/1.1 408 Request Timeout\r\nContent-Length: 4\r\nConnection: close\r\n\r\nidle"
+	padding := strings.repeat("x", 98304, context.temp_allocator)
+	timeout_pages := []string {
+		"HTTP/1.1 408 Request Timeout\r\nContent-Length: 4\r\nConnection: close\r\n\r\nidle",
+		fmt.tprintf("HTTP/1.1 408 Request Timeout\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(padding), padding),
+		fmt.tprintf("HTTP/1.1 408 Request Timeout\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n%x\r\n%s\r\n0\r\n\r\n", len(padding), padding),
+	}
 	ok_reply := fmt.tprintf(
 		"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 		len(answer),
 		string(answer),
 	)
 
-	for pooled in ([]bool{true, false}) {
-		listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
-		if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
-			return
-		}
-		bound, _ := net.bound_endpoint(listener)
-		// The fresh-dial run takes one connection; the mock gives up on the other.
-		_ = net.set_option(listener, .Receive_Timeout, time.Second)
-		ms := [2]Http_Mock{{listener = listener, reply = timeout_page}, {listener = listener, reply = ok_reply}}
-		server := thread.create_and_start_with_poly_data(&ms, http_mock_twice)
+	for timeout_page, page in timeout_pages {
+		for pooled in ([]bool{true, false}) {
+			listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+			if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
+				return
+			}
+			bound, _ := net.bound_endpoint(listener)
+			// The fresh-dial run takes one connection; the mock gives up on the other.
+			_ = net.set_option(listener, .Receive_Timeout, time.Second)
+			ms := [2]Http_Mock{{listener = listener, reply = timeout_page}, {listener = listener, reply = ok_reply}}
+			server := thread.create_and_start_with_poly_data(&ms, http_mock_twice)
 
-		u, uerr := make_upstream(
-			config.Upstream_Spec {
-				name = "idle-closing",
-				kind = .TCP,
-				address = "127.0.0.1",
-				port = bound.port,
-				hostname = "doh.invalid",
-				path = "/dns-query",
-			},
-			8,
-			30 * time.Second,
-		)
-		track: mem.Tracking_Allocator
-		mem.tracking_allocator_init(&track, context.allocator)
-		if testing.expectf(t, uerr == .None, "cannot make the upstream: %v", uerr) {
-			if pooled {
-				socket, derr := dial_tcp_timeout(bound, time.Second)
-				if testing.expectf(t, derr == .None, "cannot dial the mock: %v", derr) {
-					put_idle(u, Idle_Conn{socket = socket})
+			u, uerr := make_upstream(
+				config.Upstream_Spec {
+					name = "idle-closing",
+					kind = .TCP,
+					address = "127.0.0.1",
+					port = bound.port,
+					hostname = "doh.invalid",
+					path = "/dns-query",
+				},
+				8,
+				30 * time.Second,
+			)
+			track: mem.Tracking_Allocator
+			mem.tracking_allocator_init(&track, context.allocator)
+			if testing.expectf(t, uerr == .None, "cannot make the upstream: %v", uerr) {
+				if pooled {
+					socket, derr := dial_tcp_timeout(bound, time.Second)
+					if testing.expectf(t, derr == .None, "cannot dial the mock: %v", derr) {
+						put_idle(u, Idle_Conn{socket = socket})
+					}
 				}
+				resp, err := exchange_doh_h1(u, query, query, 2 * time.Second, mem.tracking_allocator(&track))
+				if pooled {
+					testing.expectf(t, err == .None, "page %d: a 408 on a pooled connection was not retried: %v", page, err)
+					testing.expect(t, len(resp) == len(answer), "the retry's answer did not come back")
+				} else {
+					testing.expectf(t, err == .HTTP_Error, "page %d: a 408 on a fresh dial gave %v", page, err)
+				}
+				if resp != nil {
+					delete(resp, mem.tracking_allocator(&track))
+				}
+				expect_caller_holds_nothing(t, &track, "408")
+				destroy(u)
 			}
-			resp, err := exchange_doh_h1(u, query, query, 2 * time.Second, mem.tracking_allocator(&track))
-			if pooled {
-				testing.expectf(t, err == .None, "a 408 on a pooled connection was not retried: %v", err)
-				testing.expect(t, len(resp) == len(answer), "the retry's answer did not come back")
-			} else {
-				testing.expectf(t, err == .HTTP_Error, "a 408 on a fresh dial gave %v", err)
-			}
-			if resp != nil {
-				delete(resp, mem.tracking_allocator(&track))
-			}
-			expect_caller_holds_nothing(t, &track, "408")
-			destroy(u)
+			mem.tracking_allocator_destroy(&track)
+			thread.join(server)
+			thread.destroy(server)
+			net.close(listener)
 		}
-		mem.tracking_allocator_destroy(&track)
-		thread.join(server)
-		thread.destroy(server)
-		net.close(listener)
 	}
 	free_all(context.temp_allocator)
 }

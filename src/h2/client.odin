@@ -120,7 +120,8 @@ Client_Error :: enum u8 {
 	Timeout,
 	// This end reset the stream: the response ran past CLIENT_MAX_BODY, or
 	// spent half the receive window. What the peer sent, not a reset it chose,
-	// so the caller can report it as the HTTP/1.1 client does.
+	// so the caller can report it as the HTTP/1.1 client does. The response
+	// carries the status, and no body.
 	Too_Large,
 }
 
@@ -960,12 +961,13 @@ client_request :: proc(
 		reset := s.reset
 		refused := s.refused
 		oversized := s.oversized
+		status := s.status
 		sync.mutex_unlock(&c.mu)
 		switch {
 		// A response that overran while the body was still going up is the
 		// same `Too_Large` as one that overran after it; see below.
 		case oversized:
-			return {}, .Too_Large
+			return Client_Response{status = status}, .Too_Large
 		case dead:
 			return {}, .Closed
 		case refused:
@@ -992,10 +994,10 @@ client_request :: proc(
 	// A reset after a complete response is the peer ending the upload early
 	// (RFC 9113 8.1), and the client MUST NOT discard that response.
 	case s.reset && !s.done:
-		refused, oversized := s.refused, s.oversized
+		refused, oversized, status := s.refused, s.oversized, s.status
 		sync.mutex_unlock(&c.mu)
 		if oversized {
-			return {}, .Too_Large
+			return Client_Response{status = status}, .Too_Large
 		}
 		return {}, .Refused if refused else .Reset
 	case c.closed && !s.done:

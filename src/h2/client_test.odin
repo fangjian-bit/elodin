@@ -381,6 +381,9 @@ test_client_response_past_max_body_is_too_large :: proc(t: ^testing.T) {
 				testing.expectf(t, held.peak_memory_allocated < CLIENT_MAX_BODY + 8192, "the client peaked at %d bytes", held.peak_memory_allocated)
 			} else {
 				testing.expectf(t, err == .Too_Large, "a %d-byte response came back as %v", CLIENT_MAX_BODY + 1, err)
+				// With its status, so the caller can tell an oversized answer from
+				// an error page it would not have read anyway.
+				testing.expect_value(t, resp.status, 200)
 			}
 			delete(resp.body)
 			test_close_client(ct, tc)
@@ -418,12 +421,12 @@ test_client_oversized_response_during_upload_is_too_large :: proc(t: ^testing.T)
 		if _, ok := test_wait_for_frame_type(client, .Headers); !ok {
 			return
 		}
-		// :status 200 (static table index 8), then more DATA than a DNS message
+		// :status 500 (static table index 14), then more DATA than a DNS message
 		// and no END_STREAM. The upload stays stuck behind the initial window.
 		out := make([dynamic]u8, 0, 5 * (FRAME_HEADER_SIZE + 16384) + 32, context.temp_allocator)
 		write_frame_header(&out, 0, .Settings, 0, 0)
 		write_frame_header(&out, 1, .Headers, FLAG_END_HEADERS, 1)
-		append(&out, 0x88)
+		append(&out, 0x8e)
 		for _ in 0 ..< 5 {
 			write_frame_header(&out, 16384, .Data, 0, 1)
 			resize(&out, len(out) + 16384)
@@ -451,12 +454,14 @@ test_client_oversized_response_during_upload_is_too_large :: proc(t: ^testing.T)
 
 	// Past the peer's initial window, so the upload waits for credit that never comes.
 	body := make([]u8, 2 * 65535, context.temp_allocator)
-	_, err := client_request(
+	resp, err := client_request(
 		c,
 		Client_Request{method = "POST", scheme = "https", authority = "mock.invalid", path = "/dns-query", body = body},
 		2 * time.Second,
 	)
 	testing.expect_value(t, err, Client_Error.Too_Large)
+	testing.expect_value(t, resp.status, 500)
+	testing.expect_value(t, len(resp.body), 0)
 	free_all(context.temp_allocator)
 }
 

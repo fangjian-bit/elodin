@@ -657,7 +657,8 @@ split_header :: proc(line: string) -> (name, value: string, ok: bool) {
 
 @(private)
 read_chunked :: proc(r: ^Buf_Reader, allocator: mem.Allocator, limit: int) -> (body: []u8, err: Error) {
-	out := make([dynamic]u8, 0, 8192, allocator)
+	// Never more than `limit` from the start, as never more than it on the way.
+	out := make([dynamic]u8, 0, min(8192, limit), allocator)
 	// A body assembled only in part is of no use to anyone, and every `or_return`
 	// below is a way to end up holding one.
 	defer if err != .None {
