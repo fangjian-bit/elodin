@@ -93,10 +93,12 @@ What a full connection table may hold, said when it is past
 memory could not be measured.
 */
 connection_memory_warning :: proc(max_connections: int, m: Machine, allocator := context.temp_allocator) -> (text: string, say: bool) {
-	need := i64(max_connections) * CONNECTION_MEMORY_BYTES
-	if m.memory <= 0 || need * CONNECTION_MEMORY_SHARE <= m.memory {
+	// Divided rather than multiplied: `max_connections` has no upper bound, and
+	// a product that wraps would read as fitting.
+	if m.memory <= 0 || i64(max_connections) <= m.memory / (CONNECTION_MEMORY_BYTES * CONNECTION_MEMORY_SHARE) {
 		return "", false
 	}
+	need := i64(max_connections) * CONNECTION_MEMORY_BYTES
 	return fmt.aprintf(
 			"server.max_connections is %d: with every connection open that is about %#.1M, more than a quarter of the %#.1M this process may use",
 			max_connections,

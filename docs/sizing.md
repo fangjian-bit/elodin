@@ -85,8 +85,8 @@ retries. A DoH client over HTTP/2 is answered `503` instead.
 
 A connection's memory is its thread's: about 25 KB for TCP and 95 KB for DoT
 held open after a query, most of the DoT figure OpenSSL's session. The thread's
-scratch arena is mapped when the connection opens and unmapped when it closes;
-of a DoT connection, about 90 KB stays in glibc's heaps after the close, reused
+scratch arena is mapped at its first query and unmapped when the connection
+closes; of a DoT connection, about 90 KB stays in glibc's heaps after the close, reused
 by the next burst rather than added to.
 `--check` and startup warn when `max_connections` at 128 KB each is more than a
 quarter of the memory elodin may use:
@@ -95,11 +95,10 @@ quarter of the memory elodin may use:
 server.max_connections is 4096: with every connection open that is about 512.0 MiB, more than a quarter of the 1.0 GiB this process may use
 ```
 
-Lower `max_connections`, or give elodin more memory (`MemoryMax=`). The unit also
-sets `GLIBC_TUNABLES=glibc.malloc.hugetlb=0`: without it the kernel backs the
-heaps glibc gives concurrent threads with transparent huge pages, 2 MB resident
-each once touched, and a burst of connections leaves tens of MB behind. Started
-any other way, set it in elodin's environment.
+Lower `max_connections`, or give elodin more memory (`MemoryMax=`). elodin turns
+transparent huge pages off for itself at startup (`PR_SET_THP_DISABLE`): the
+heaps glibc gives concurrent threads would otherwise each cost 2 MB resident once
+touched, and a burst of connections would leave tens of MB behind.
 
 HTTP/2 costs more CPU per query than HTTP/1.1 on cache hits, and wins when queries
 are slow: a browser's concurrent requests overlap instead of queueing.

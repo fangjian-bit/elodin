@@ -68,6 +68,10 @@ there and would anywhere busier.
 length sit just below the pointer handed out. That pointer is at least the
 alignment asked for into a page-aligned mapping, so it is aligned for anything
 up to a page.
+
+The kernel merges neighbouring blocks into one mapping - 29 of them, 7.5 MB,
+with 200 connections held - so where transparent huge pages are on, a touch in
+a 2 MB span would fault in all of it; `main` turns them off for the process.
 */
 @(private)
 mapped_allocator := runtime.Allocator{mapped_allocator_proc, nil}
@@ -99,12 +103,18 @@ mapped_allocator_proc :: proc(
 			return nil, .Invalid_Argument
 		}
 		offset := uint(max(alignment, size_of(Mapping)))
-		mapping, err := virtual.reserve_and_commit(offset + uint(size))
+		// Not `reserve_and_commit`, which keeps the reservation when the commit
+		// fails.
+		mapping, err := virtual.reserve(offset + uint(size))
 		if err != nil {
 			return nil, err
 		}
 		if raw_data(mapping) == nil {
 			return nil, .Out_Of_Memory
+		}
+		if err = virtual.commit(raw_data(mapping), uint(len(mapping))); err != nil {
+			virtual.release(raw_data(mapping), uint(len(mapping)))
+			return nil, err
 		}
 		ptr := raw_data(mapping[offset:])
 		(^Mapping)(ptr[-size_of(Mapping):])^ = {raw_data(mapping), uint(len(mapping))}

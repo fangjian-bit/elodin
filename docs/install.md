@@ -71,9 +71,7 @@ have, a certificate it cannot read. `systemctl reset-failed elodin` clears that.
 The unit also sets `MALLOC_MMAP_THRESHOLD_=131072`, without which glibc keeps the
 memory each blocklist refresh frees (see [Sink lists](blocking.md));
 `UnsetEnvironment=MALLOC_MMAP_THRESHOLD_` in a drop-in takes glibc's default
-instead. It sets `GLIBC_TUNABLES=glibc.malloc.hugetlb=0` too, which keeps
-glibc's per-thread heaps off transparent huge pages (see
-[Transports](sizing.md#transports)).
+instead.
 
 GitHub releases also carry `linux-amd64` and `linux-arm64` tarballs of the
 binary, the unit and the example configuration.

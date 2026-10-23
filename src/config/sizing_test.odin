@@ -478,4 +478,6 @@ test_connection_memory_warning_at_a_quarter_of_memory :: proc(t: ^testing.T) {
 	testing.expect(t, !say, "the default on 1 GiB")
 	_, say = connection_memory_warning(1 << 20, Machine{})
 	testing.expect(t, !say, "memory not measured")
+	_, say = connection_memory_warning(1 << 62, Machine{memory = 1 * GIB})
+	testing.expect(t, say, "a table whose cost does not fit in an i64")
 }

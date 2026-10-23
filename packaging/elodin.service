@@ -62,14 +62,6 @@ LimitNOFILE=8192
 # For glibc's default, put UnsetEnvironment=MALLOC_MMAP_THRESHOLD_ in a drop-in.
 Environment=MALLOC_MMAP_THRESHOLD_=131072
 
-# glibc gives each thread that allocates at once a heap of its own, up to eight
-# per core, and left to itself the kernel backs those heaps with transparent
-# huge pages: once touched, each costs 2 MB resident for the life of the
-# process. 200 connections at once left 64 MB of them behind, against nothing
-# with this set (#526). The heaps are small and short-lived, so the huge pages
-# buy them nothing. Unset it the same way as above.
-Environment=GLIBC_TUNABLES=glibc.malloc.hugetlb=0
-
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes

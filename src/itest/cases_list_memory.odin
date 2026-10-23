@@ -285,9 +285,10 @@ A connection's memory is given back when it closes (#526).
 Every TCP connection answers on a thread of its own, and that thread's scratch
 arena is mapped by elodin and unmapped when the thread exits; left to libc it is
 a 256 KiB `calloc` that glibc memsets in full and keeps after the thread, some
-275 KB per connection that answered a query. The unit's `glibc.malloc.hugetlb=0`
-keeps the heaps glibc makes for those threads off huge pages, each of which
-would otherwise cost 2 MB once touched (only where the kernel has them on).
+275 KB per connection that answered a query. elodin also turns transparent
+huge pages off for itself, which keeps the heaps glibc makes for those threads
+off them, each of which would otherwise cost 2 MB once touched (only where the
+kernel has them on).
 
 The case holds CONN_BURST connections open with one query answered on each,
 then closes them and waits for their threads to exit, reading the server's
@@ -420,8 +421,8 @@ blocking: {{ enabled: false }}
 		return
 	}
 	after, aok := proc_status_int(pid, "VmRSS")
-	huge, _ := anon_huge_kib(pid)
-	if !check(r, aok, "cannot read the server's VmRSS") {
+	huge, sok := anon_huge_kib(pid)
+	if !check(r, aok && sok, "cannot read the server's VmRSS or smaps") {
 		return
 	}
 	check(
@@ -443,5 +444,5 @@ blocking: {{ enabled: false }}
 		held,
 		KEPT_KIB_PER_CONN,
 	)
-	check(r, huge <= KEPT_HUGE_KIB, "%d KiB of huge pages after the burst with the unit's environment %v", huge, unit_env[:])
+	check(r, huge <= KEPT_HUGE_KIB, "%d KiB of huge pages after the burst", huge)
 }
