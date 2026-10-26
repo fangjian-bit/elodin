@@ -237,6 +237,10 @@ test_trust_anchor_digest_length_mismatch_frees_the_digest :: proc(t: ^testing.T)
 	// A SHA-256 DS (digest type 2) carrying a 20-byte digest.
 	_, ok := parse_trust_anchor(". IN DS 20326 8 2 0123456789ABCDEF0123456789ABCDEF01234567")
 	testing.expect(t, !ok, "a 20-byte SHA-256 digest must be refused")
+
+	// The right length with a bad digit: `hex.decode` allocates before it reads one.
+	_, bad := parse_trust_anchor(". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8ECZZ")
+	testing.expect(t, !bad, "a digest that is not hex must be refused")
 }
 
 // ---------------------------------------------------------------------------
