@@ -192,3 +192,32 @@ test_close_idle_leaves_an_h2_conn_in_use :: proc(t: ^testing.T) {
 	testing.expect(t, !h2_idle_kept(&f), "`all` left an idle h2 connection")
 	h2_idle_reader_left(t, f.reader)
 }
+
+// The pooled HTTP/1.1 half of the same sweep: the expired connection goes, the
+// fresh one stays pooled.
+@(test)
+test_close_idle_keeps_only_fresh_pooled_conns :: proc(t: ^testing.T) {
+	f: H2_Idle_Fixture
+	if !h2_idle_setup(t, &f) {
+		return
+	}
+	defer h2_idle_teardown(&f)
+	bound, _ := net.bound_endpoint(f.listener)
+	fresh, ferr := dial_tcp_timeout(bound, time.Second)
+	stale, serr := dial_tcp_timeout(bound, time.Second)
+	if !testing.expect(t, ferr == .None && serr == .None, "cannot dial the listener") {
+		return
+	}
+	put_idle(f.u, Idle_Conn{socket = stale})
+	put_idle(f.u, Idle_Conn{socket = fresh})
+	sync.mutex_lock(&f.u.mu)
+	f.u.idle[0].since = time.time_add(f.u.idle[0].since, -2 * f.u.idle_timeout)
+	sync.mutex_unlock(&f.u.mu)
+
+	testing.expect_value(t, close_idle(f.u), 1)
+	sync.mutex_lock(&f.u.mu)
+	defer sync.mutex_unlock(&f.u.mu)
+	if testing.expect_value(t, len(f.u.idle), 1) {
+		testing.expect(t, f.u.idle[0].socket == fresh, "the fresh pooled connection was not the one kept")
+	}
+}
