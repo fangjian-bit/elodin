@@ -5,7 +5,7 @@ import "core:sync"
 import "core:thread"
 import "core:time"
 import "elodin:h2"
-import "elodin:pool"
+import "elodin:loop"
 import "elodin:tlsx"
 
 /*
@@ -235,7 +235,7 @@ start_h2_conn :: proc(u: ^Upstream, stream: Stream) -> ^H2_Conn {
 	hc.allocator = u.allocator
 	hc.refs = 2
 	hc.client = h2.client_make(h2.IO{user = hc, read = h2_io_read, write = h2_io_write}, u.allocator)
-	reader := pool.spawn(hc, h2_reader)
+	reader := loop.spawn_thread(hc, h2_reader)
 	if reader == nil {
 		// No thread to be had: nothing would ever read this connection's
 		// answers, so it goes out already closed, the next caller dials

@@ -1,0 +1,681 @@
+package loop
+
+import "core:net"
+import "core:sync"
+import "core:sys/linux"
+import "core:testing"
+import "core:thread"
+import "core:time"
+
+/*
+Every test runs its own loop on its own thread and touches nothing but what it
+made, since tests run in parallel. The waits that decide an outcome are on
+events; the timeouts on them only bound a run that has already failed.
+*/
+
+@(private = "file")
+WAIT :: 5 * time.Second
+
+@(private = "file")
+Running :: struct {
+	l:  ^Loop,
+	th: ^thread.Thread,
+}
+
+@(private = "file")
+start :: proc(t: ^testing.T) -> (r: Running, ok: bool) {
+	l, made := make_loop()
+	if !testing.expect(t, made, "no loop") {
+		return {}, false
+	}
+	r.l = l
+	r.th = spawn_thread(l, run, context)
+	return r, testing.expect(t, r.th != nil, "no loop thread")
+}
+
+@(private = "file")
+finish :: proc(r: Running) {
+	stop(r.l)
+	thread.join(r.th)
+	thread.destroy(r.th)
+	destroy(r.l)
+}
+
+@(private = "file")
+Probe :: struct {
+	done:    sync.Sema,
+	ran:     int,
+	on_loop: bool,
+	fiber:   bool,
+	handle:  Handle,
+	result:  Wait_Result,
+	reason:  Wake_Reason,
+	elapsed: time.Duration,
+	value:   int,
+	order:   [dynamic]int,
+}
+
+@(test)
+test_a_fiber_spawned_from_another_thread_runs_on_the_loop :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	p: Probe
+	_, ok := spawn(r.l, proc(data: rawptr) {
+		p := (^Probe)(data)
+		p.ran += 1
+		p.on_loop = current_loop() != nil
+		p.fiber = current() != nil
+		sync.sema_post(&p.done)
+	}, &p)
+	testing.expect(t, ok)
+	testing.expect(t, sync.sema_wait_with_timeout(&p.done, WAIT))
+	testing.expect_value(t, p.ran, 1)
+	testing.expect(t, p.on_loop && p.fiber)
+}
+
+/*
+The scratch is the fiber's own and lives exactly as long as its job: allocations
+through `context.temp_allocator` come from a block that a second fiber running
+at the same time does not share, so one fiber resetting its scratch cannot free
+the other's.
+*/
+@(test)
+test_each_fiber_has_its_own_scratch :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		probe:  Probe,
+		first:  []u8,
+		second: []u8,
+		gate:   Sema,
+	}
+	s: Shared
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		s.first = make([]u8, 32, context.temp_allocator)
+		s.first[0] = 0xAA
+		// Held until the second has allocated and reset its own scratch.
+		sema_wait(&s.gate)
+		s.probe.value = int(s.first[0])
+		sync.sema_post(&s.probe.done)
+	}, &s)
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		s.second = make([]u8, 32, context.temp_allocator)
+		s.second[0] = 0x55
+		free_all(context.temp_allocator)
+		sema_post(&s.gate)
+	}, &s)
+	testing.expect(t, sync.sema_wait_with_timeout(&s.probe.done, WAIT))
+	testing.expect(t, raw_data(s.first) != raw_data(s.second))
+	testing.expect_value(t, s.probe.value, 0xAA)
+}
+
+// --- Timers, on the loop's clock, driven by hand ----------------------------
+
+@(private = "file")
+fake_now: Tick
+
+@(private = "file")
+fake_clock :: proc "contextless" () -> Tick {
+	return fake_now
+}
+
+/*
+Deadlines fire in deadline order, and a park that ends before its deadline takes
+its timer with it: nothing fires later for a wait that is already over. Driven
+without a loop thread, by calling the scheduler's own steps, so what fires is
+decided by the clock this test moves and not by the machine's speed.
+*/
+@(test)
+test_timers_fire_in_deadline_order_and_an_ended_park_takes_its_timer :: proc(t: ^testing.T) {
+	l, made := make_loop()
+	if !testing.expect(t, made) {
+		return
+	}
+	defer destroy(l)
+	l.clock = fake_clock
+	tl_loop = l
+	defer tl_loop = nil
+
+	base := time.tick_now()
+	// 30, 10, 40, 20 ms out.
+	after := [4]time.Duration{30, 10, 40, 20}
+	fibers: [4]^Fiber
+	for &f, i in fibers {
+		f = new(Fiber)
+		f.loop = l
+		f.heap_index = -1
+		f.state = .Parked
+		f.token = u64(i)
+		f.deadline = time.tick_add(base, after[i] * time.Millisecond)
+		timer_push(l, f)
+	}
+	defer for f in fibers {
+		free(f)
+	}
+
+	// The 20 ms one ends early, as a wait that was answered would.
+	timer_remove(l, fibers[3])
+	testing.expect_value(t, fibers[3].heap_index, -1)
+
+	expire_timers(l, time.tick_add(base, 25 * time.Millisecond))
+	testing.expect_value(t, len(l.ready), 1)
+	testing.expect(t, l.ready[0] == fibers[1])
+	testing.expect_value(t, fibers[1].wake_reason, Wake_Reason.Timeout)
+
+	expire_timers(l, time.tick_add(base, 100 * time.Millisecond))
+	testing.expect_value(t, len(l.ready), 3)
+	testing.expect(t, l.ready[1] == fibers[0] && l.ready[2] == fibers[2])
+	testing.expect_value(t, len(l.timers), 0)
+	testing.expect(t, fibers[3].state == .Parked, "the removed timer fired")
+}
+
+/*
+A wake that names a park which has already ended does nothing. The token moves on
+with every park, so a timer that lost its race to a wake, or a wake posted from
+another thread for a wait the fiber has since left, lands on a different number.
+*/
+@(test)
+test_a_stale_wake_is_dropped :: proc(t: ^testing.T) {
+	l, made := make_loop()
+	if !testing.expect(t, made) {
+		return
+	}
+	defer destroy(l)
+	f := new(Fiber)
+	defer free(f)
+	f.loop = l
+	f.heap_index = -1
+	f.state = .Parked
+	f.token = 7
+
+	wake_local(f, 6, .Ready)
+	testing.expect_value(t, len(l.ready), 0)
+	wake_local(f, 7, .Ready)
+	testing.expect_value(t, len(l.ready), 1)
+	// Already woken: a second wake for the same park does not queue it twice.
+	wake_local(f, 7, .Ready)
+	testing.expect_value(t, len(l.ready), 1)
+}
+
+@(test)
+test_sleep_parks_for_the_duration :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	p: Probe
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		p := (^Probe)(data)
+		began := time.tick_now()
+		p.value = int(sleep(20 * time.Millisecond))
+		p.elapsed = time.tick_since(began)
+		sync.sema_post(&p.done)
+	}, &p)
+	testing.expect(t, sync.sema_wait_with_timeout(&p.done, WAIT))
+	testing.expect_value(t, p.value, 1)
+	testing.expectf(t, p.elapsed >= 20 * time.Millisecond, "woke after %v", p.elapsed)
+}
+
+// --- Cancellation ---------------------------------------------------------------
+
+@(test)
+test_cancel_ends_a_wait_and_every_later_one :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	p: Probe
+	parked: Sema
+	Shared :: struct {
+		p:      ^Probe,
+		parked: ^Sema,
+	}
+	s := Shared{&p, &parked}
+	h, ok := spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		sema_post(s.parked)
+		// Would be an hour; the cancel ends it.
+		s.p.value = int(sleep(time.Hour))
+		// Already cancelled: this does not park at all.
+		s.p.reason = park(time.tick_add(time.tick_now(), time.Hour))
+		sync.sema_post(&s.p.done)
+	}, &s)
+	testing.expect(t, ok)
+	testing.expect(t, sema_wait_with_timeout(&parked, WAIT))
+	cancel(h)
+	testing.expect(t, sync.sema_wait_with_timeout(&p.done, WAIT))
+	testing.expect_value(t, p.value, 0)
+	testing.expect_value(t, p.reason, Wake_Reason.Cancelled)
+}
+
+/*
+A handle to a fiber that has finished cancels nothing, even once the struct is
+handed to another fiber: the incarnation it names is over.
+*/
+@(test)
+test_a_handle_outlived_by_its_fiber_cancels_nothing :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	p: Probe
+	old, _ := spawn(r.l, proc(data: rawptr) {
+		sync.sema_post(&(^Probe)(data).done)
+	}, &p)
+	testing.expect(t, sync.sema_wait_with_timeout(&p.done, WAIT))
+	// Let the scheduler put the struct back on its free list first.
+	for fibers_alive(r.l) != 0 {
+		time.sleep(time.Millisecond)
+	}
+	second: Probe
+	h, _ := spawn(r.l, proc(data: rawptr) {
+		p := (^Probe)(data)
+		p.value = int(sleep(30 * time.Millisecond))
+		sync.sema_post(&p.done)
+	}, &second)
+	testing.expect(t, h.fiber == old.fiber, "the free list did not hand the struct out again")
+	cancel(old)
+	testing.expect(t, sync.sema_wait_with_timeout(&second.done, WAIT))
+	testing.expect_value(t, second.value, 1)
+}
+
+// --- Descriptors ----------------------------------------------------------------
+
+@(private = "file")
+socket_pair :: proc(t: ^testing.T) -> (a, b: linux.Fd, ok: bool) {
+	fds: [2]linux.Fd
+	if linux.socketpair(.UNIX, .STREAM, .HOPOPT, &fds) != .NONE {
+		testing.fail_now(t, "no socket pair")
+	}
+	for fd in fds {
+		flags, _ := linux.fcntl(fd, linux.F_GETFL)
+		_ = linux.fcntl(fd, linux.F_SETFL, flags + {.NONBLOCK})
+	}
+	return fds[0], fds[1], true
+}
+
+@(test)
+test_a_wait_on_a_descriptor_ends_when_it_is_readable :: proc(t: ^testing.T) {
+	a, b, paired := socket_pair(t)
+	if !paired {
+		return
+	}
+	defer linux.close(a)
+	defer linux.close(b)
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		p:      Probe,
+		fd:     linux.Fd,
+		parked: Sema,
+	}
+	s := Shared {
+		fd = a,
+	}
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		sema_post(&s.parked)
+		s.p.result = wait_fd(s.fd, {.In}, time.tick_add(time.tick_now(), WAIT))
+		buf: [8]u8
+		n, _ := linux.read(s.fd, buf[:])
+		s.p.value = n
+		sync.sema_post(&s.p.done)
+	}, &s)
+	testing.expect(t, sema_wait_with_timeout(&s.parked, WAIT))
+	_, _ = linux.write(b, transmute([]u8)string("ping"))
+	testing.expect(t, sync.sema_wait_with_timeout(&s.p.done, WAIT))
+	testing.expect_value(t, s.p.result, Wait_Result.Ready)
+	testing.expect_value(t, s.p.value, 4)
+}
+
+@(test)
+test_a_wait_on_a_quiet_descriptor_times_out :: proc(t: ^testing.T) {
+	a, b, paired := socket_pair(t)
+	if !paired {
+		return
+	}
+	defer linux.close(a)
+	defer linux.close(b)
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		p:  Probe,
+		fd: linux.Fd,
+	}
+	s := Shared {
+		fd = a,
+	}
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		s.p.result = wait_fd(s.fd, {.In}, time.tick_add(time.tick_now(), 20 * time.Millisecond))
+		// Nothing is registered once the wait is over.
+		s.p.value = len(current_loop().fds)
+		sync.sema_post(&s.p.done)
+	}, &s)
+	testing.expect(t, sync.sema_wait_with_timeout(&s.p.done, WAIT))
+	testing.expect_value(t, s.p.result, Wait_Result.Timeout)
+	testing.expect_value(t, s.p.value, 0)
+}
+
+/*
+Two fibers waiting on one descriptor, one to read and one to write - the shape of
+a shared upstream connection - are each woken for their own event, and the
+writer is not held up by the reader's wait.
+*/
+@(test)
+test_two_fibers_wait_on_one_descriptor :: proc(t: ^testing.T) {
+	a, b, paired := socket_pair(t)
+	if !paired {
+		return
+	}
+	defer linux.close(a)
+	defer linux.close(b)
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		reader, writer: Probe,
+		fd:             linux.Fd,
+		parked:         Sema,
+	}
+	s := Shared {
+		fd = a,
+	}
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		sema_post(&s.parked)
+		s.reader.result = wait_fd(s.fd, {.In}, time.tick_add(time.tick_now(), WAIT))
+		sync.sema_post(&s.reader.done)
+	}, &s)
+	testing.expect(t, sema_wait_with_timeout(&s.parked, WAIT))
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		s.writer.result = wait_fd(s.fd, {.Out}, time.tick_add(time.tick_now(), WAIT))
+		sync.sema_post(&s.writer.done)
+	}, &s)
+	testing.expect(t, sync.sema_wait_with_timeout(&s.writer.done, WAIT))
+	testing.expect_value(t, s.writer.result, Wait_Result.Ready)
+	_, _ = linux.write(b, transmute([]u8)string("x"))
+	testing.expect(t, sync.sema_wait_with_timeout(&s.reader.done, WAIT))
+	testing.expect_value(t, s.reader.result, Wait_Result.Ready)
+}
+
+// Off a loop, the same call is `poll(2)`: what a test thread or the rebuild does.
+@(test)
+test_a_wait_off_a_loop_polls :: proc(t: ^testing.T) {
+	a, b, paired := socket_pair(t)
+	if !paired {
+		return
+	}
+	defer linux.close(a)
+	defer linux.close(b)
+	testing.expect_value(t, wait_fd(a, {.In}, time.tick_add(time.tick_now(), 10 * time.Millisecond)), Wait_Result.Timeout)
+	_, _ = linux.write(b, transmute([]u8)string("x"))
+	testing.expect_value(t, wait_fd(a, {.In}, time.tick_add(time.tick_now(), WAIT)), Wait_Result.Ready)
+}
+
+/*
+The socket calls wait for as long as the socket's own receive timeout says, and
+then fail as a blocking read that timed out does.
+*/
+@(test)
+test_a_socket_read_on_a_fiber_honours_the_receive_timeout :: proc(t: ^testing.T) {
+	sock, err := net.make_unbound_udp_socket(.IP4)
+	if !testing.expect(t, err == nil) {
+		return
+	}
+	defer net.close(sock)
+	_ = net.bind(sock, {net.IP4_Loopback, 0})
+	_ = net.set_blocking(sock, false)
+	_ = net.set_option(sock, .Receive_Timeout, 30 * time.Millisecond)
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		p:    Probe,
+		sock: net.UDP_Socket,
+		err:  net.UDP_Recv_Error,
+	}
+	s := Shared {
+		sock = sock,
+	}
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		began := time.tick_now()
+		buf: [64]u8
+		_, _, s.err = recv_udp(s.sock, buf[:])
+		s.p.elapsed = time.tick_since(began)
+		sync.sema_post(&s.p.done)
+	}, &s)
+	testing.expect(t, sync.sema_wait_with_timeout(&s.p.done, WAIT))
+	testing.expect_value(t, s.err, net.UDP_Recv_Error.Would_Block)
+	testing.expectf(t, s.p.elapsed >= 30 * time.Millisecond, "gave up after %v", s.p.elapsed)
+}
+
+// --- Locks and waits shared with other fibers and threads ------------------------
+
+/*
+A `Mutex` held across a park does not stop the loop: the second fiber to ask for
+it parks, and runs once the first lets it go. A `sync.Mutex` in its place would
+have put the loop thread to sleep with the holder on it.
+*/
+@(test)
+test_a_mutex_held_across_a_park_does_not_stall_the_loop :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		m:      Mutex,
+		holder: Probe,
+		waiter: Probe,
+		held:   Sema,
+	}
+	s: Shared
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		lock(&s.m)
+		append(&s.holder.order, 1)
+		sema_post(&s.held)
+		_ = sleep(20 * time.Millisecond)
+		append(&s.holder.order, 2)
+		unlock(&s.m)
+		sync.sema_post(&s.holder.done)
+	}, &s)
+	testing.expect(t, sema_wait_with_timeout(&s.held, WAIT))
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		lock(&s.m)
+		append(&s.holder.order, 3)
+		unlock(&s.m)
+		sync.sema_post(&s.waiter.done)
+	}, &s)
+	testing.expect(t, sync.sema_wait_with_timeout(&s.holder.done, WAIT))
+	testing.expect(t, sync.sema_wait_with_timeout(&s.waiter.done, WAIT))
+	testing.expect_value(t, len(s.holder.order), 3)
+	if len(s.holder.order) == 3 {
+		testing.expect_value(t, s.holder.order[2], 3)
+	}
+	delete(s.holder.order)
+}
+
+// A fiber waiting on a `Cond` is woken by a plain thread signalling it.
+@(test)
+test_a_cond_wakes_a_fiber_from_another_thread :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		mu:     sync.Mutex,
+		c:      Cond,
+		ready:  bool,
+		p:      Probe,
+		parked: Sema,
+	}
+	s: Shared
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		sync.mutex_lock(&s.mu)
+		sema_post(&s.parked)
+		for !s.ready {
+			if !cond_wait_with_timeout(&s.c, &s.mu, WAIT) {
+				break
+			}
+		}
+		s.p.value = int(s.ready)
+		sync.mutex_unlock(&s.mu)
+		sync.sema_post(&s.p.done)
+	}, &s)
+	testing.expect(t, sema_wait_with_timeout(&s.parked, WAIT))
+	sync.mutex_lock(&s.mu)
+	s.ready = true
+	cond_signal(&s.c)
+	sync.mutex_unlock(&s.mu)
+	testing.expect(t, sync.sema_wait_with_timeout(&s.p.done, WAIT))
+	testing.expect_value(t, s.p.value, 1)
+}
+
+@(test)
+test_a_sema_wait_times_out_and_then_takes_a_post :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		s:      Sema,
+		p:      Probe,
+		first:  bool,
+		second: bool,
+		parked: Sema,
+	}
+	s: Shared
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		s.first = sema_wait_with_timeout(&s.s, 10 * time.Millisecond)
+		sema_post(&s.parked)
+		s.second = sema_wait_with_timeout(&s.s, WAIT)
+		sync.sema_post(&s.p.done)
+	}, &s)
+	testing.expect(t, sema_wait_with_timeout(&s.parked, WAIT))
+	sema_post(&s.s)
+	testing.expect(t, sync.sema_wait_with_timeout(&s.p.done, WAIT))
+	testing.expect(t, !s.first)
+	testing.expect(t, s.second)
+}
+
+// --- Thread-locals carried by the fiber --------------------------------------
+
+@(private = "file", thread_local)
+test_local: int
+
+@(private = "file", init)
+register_test_local :: proc "contextless" () {
+	context = {}
+	register_local(proc "contextless" () -> rawptr {return &test_local}, size_of(test_local))
+}
+
+/*
+A registered thread-local is the fiber's own: one fiber's value survives another
+fiber setting its own on the same thread in between, and the loop thread itself
+sees zero.
+*/
+@(test)
+test_a_registered_thread_local_follows_its_fiber :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		a, b:  Probe,
+		gate:  Sema,
+		other: Sema,
+	}
+	s: Shared
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		test_local = 11
+		sema_post(&s.other)
+		sema_wait(&s.gate)
+		s.a.value = test_local
+		sync.sema_post(&s.a.done)
+	}, &s)
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		sema_wait(&s.other)
+		s.b.value = test_local
+		test_local = 22
+		sema_post(&s.gate)
+		sync.sema_post(&s.b.done)
+	}, &s)
+	testing.expect(t, sync.sema_wait_with_timeout(&s.a.done, WAIT))
+	testing.expect(t, sync.sema_wait_with_timeout(&s.b.done, WAIT))
+	testing.expect_value(t, s.a.value, 11)
+	testing.expect_value(t, s.b.value, 0)
+}
+
+// --- Scale ---------------------------------------------------------------------
+
+/*
+Thousands of fibers parked at once, all on one loop thread, all finish - and a
+burst leaves no more than the stack cache behind once it is over.
+*/
+@(test)
+test_thousands_of_parked_fibers_on_one_thread :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	N :: 5000
+	Shared :: struct {
+		done:  sync.Sema,
+		count: int,
+	}
+	s: Shared
+	for _ in 0 ..< N {
+		_, ok := spawn(r.l, proc(data: rawptr) {
+			s := (^Shared)(data)
+			_ = sleep(20 * time.Millisecond)
+			if sync.atomic_add(&s.count, 1) == N - 1 {
+				sync.sema_post(&s.done)
+			}
+		}, &s)
+		if !testing.expect(t, ok) {
+			return
+		}
+	}
+	testing.expect(t, sync.sema_wait_with_timeout(&s.done, 4 * WAIT))
+	for fibers_alive(r.l) != 0 {
+		time.sleep(time.Millisecond)
+	}
+	sync.mutex_lock(&r.l.mu)
+	warm := r.l.warm
+	sync.mutex_unlock(&r.l.mu)
+	testing.expectf(t, warm <= STACK_CACHE, "%d stacks kept", warm)
+}

@@ -9,6 +9,7 @@ import "elodin:cache"
 import "elodin:dnssec"
 import "elodin:filter"
 import "elodin:logx"
+import "elodin:loop"
 import "elodin:metrics"
 import "elodin:pool"
 import "elodin:upstream"
@@ -171,7 +172,7 @@ start_metrics :: proc(s: ^Server, l: ^Listeners) -> bool {
 	// Not `conn_spawn`: that thread would sit in `l.conns` and be joined by
 	// `conn_manager_shutdown` along with every client connection, which is
 	// exactly the wait this loop is meant to survive. See `stop_metrics`.
-	t := pool.spawn(rawptr(ctx), metrics_accept_loop)
+	t := loop.spawn_thread(rawptr(ctx), metrics_accept_loop)
 	if t == nil {
 		logx.errorf("metrics: cannot start the accept loop")
 		// Nothing was ever handed it, so it is ours to release.

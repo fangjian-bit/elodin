@@ -3,6 +3,7 @@ package pool
 import "core:mem"
 import "core:sync"
 import "core:thread"
+import "elodin:loop"
 
 /*
 A fixed-size worker pool over a FIFO job queue.
@@ -89,7 +90,7 @@ make_pool :: proc(workers: int, limit := 0, allocator := context.allocator) -> ^
 
 	for i in 0 ..< n {
 		p.workers[i].pool = p
-		p.threads[i] = spawn(&p.workers[i], worker_loop)
+		p.threads[i] = loop.spawn_thread(&p.workers[i], worker_loop)
 	}
 	return p
 }

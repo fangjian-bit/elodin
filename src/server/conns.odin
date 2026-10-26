@@ -3,7 +3,7 @@ package server
 import "core:sync"
 import "core:thread"
 import "core:time"
-import "elodin:pool"
+import "elodin:loop"
 
 // Stamped at build time from the git tag; see ELODIN_VERSION in mise.toml. A
 // build that bypasses mise reports "dev" rather than claiming a release number.
@@ -141,7 +141,7 @@ conn_spawn :: proc(
 			return .Prefix_Limit_Reached
 		}
 	}
-	t := pool.spawn(data, fn)
+	t := loop.spawn_thread(data, fn)
 	if t == nil {
 		return .Thread_Failed
 	}

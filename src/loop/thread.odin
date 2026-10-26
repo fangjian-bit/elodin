@@ -1,11 +1,11 @@
-package pool
+package loop
 
 import "base:runtime"
 import "core:sys/posix"
 import "core:thread"
 
 /*
-Start a thread that never takes the signals `main` acts on: SIGTERM, SIGINT and
+Start a thread - a loop's, or one of the few that are not - that never takes the signals `main` acts on: SIGTERM, SIGINT and
 SIGHUP (#416), and whose scratch arena is mapped pages it gives back when it
 exits (#526).
 
@@ -17,7 +17,7 @@ the handler was installed: a list download fails, or an upstream read and the
 query behind it. Every thread is started here, so the main thread is the only
 one that takes them.
 */
-spawn :: proc(data: $T, fn: proc(data: T), init_context: Maybe(runtime.Context) = nil) -> ^thread.Thread {
+spawn_thread :: proc(data: $T, fn: proc(data: T), init_context: Maybe(runtime.Context) = nil) -> ^thread.Thread {
 	set, old: posix.sigset_t
 	posix.sigemptyset(&set)
 	for sig in ([]posix.Signal{.SIGTERM, .SIGINT, .SIGHUP}) {
