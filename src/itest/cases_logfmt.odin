@@ -146,6 +146,25 @@ log_file_case :: proc(r: ^Runner, upstream_port: int) {
 		return
 	}
 
+	// LeakSanitizer cannot run under a tracer: on exit it writes a fatal-error
+	// report instead of a leak check, and `mise run leakcheck` fails on any
+	// report. The leak check is off for this one traced process, and only that.
+	inherited, eerr := os.environ(context.temp_allocator)
+	if eerr != nil {
+		fail(r, "%s: cannot read the environment: %v", NAME, eerr)
+		return
+	}
+	env := make([dynamic]string, 0, len(inherited) + 1, context.temp_allocator)
+	asan_options := ""
+	for kv in inherited {
+		if strings.has_prefix(kv, "ASAN_OPTIONS=") {
+			asan_options = kv[len("ASAN_OPTIONS="):]
+		} else {
+			append(&env, kv)
+		}
+	}
+	append(&env, fmt.tprintf("ASAN_OPTIONS=%s:detect_leaks=0", asan_options))
+
 	udp_port := next_port(r)
 	config := fmt.tprintf(
 		`log: {{ level: info, queries: true, file: %q }}
@@ -166,6 +185,7 @@ blocking: {{ enabled: false }}
 		r,
 		config,
 		udp_port,
+		env = env[:],
 		// --kill-on-exit: `stop_server` kills strace, and a tracee outlives its
 		// tracer otherwise, still bound to the port.
 		wrap = {"strace", "--kill-on-exit", "-f", "-qq", "-e", "trace=fsync,fdatasync,sync_file_range", "-o", trace_path},
@@ -191,9 +211,12 @@ blocking: {{ enabled: false }}
 		fmt.tprintf("/proc/%d/task/%d/children", srv.process.pid, srv.process.pid),
 		context.temp_allocator,
 	)
-	if child, cok := strconv.parse_int(strings.trim_space(string(children)), 10); cok {
-		posix.kill(posix.pid_t(child), .SIGTERM)
+	child, cok := strconv.parse_int(strings.trim_space(string(children)), 10)
+	if !cok {
+		fail(r, "%s: cannot find the server under strace pid %d: %q", NAME, srv.process.pid, string(children))
+		return
 	}
+	posix.kill(posix.pid_t(child), .SIGTERM)
 	if state, werr := os.process_wait(srv.process, GRACEFUL_STOP_TIMEOUT); werr == nil && state.exited {
 		srv.running = false
 	}
@@ -214,7 +237,10 @@ blocking: {{ enabled: false }}
 			QUERIES,
 			string(logged),
 		)
-		syncs := strings.count(string(trace), "sync")
+		// One per call: "fsync(" and "fdatasync(" end in "sync(", and a call
+		// another thread interrupted adds a "<... fsync resumed>" line that
+		// does not, so it is not counted twice.
+		syncs := strings.count(string(trace), "sync(") + strings.count(string(trace), "sync_file_range(")
 		check(r, syncs == 0, "%d syncs for %d query lines:\n%s", syncs, QUERIES, string(trace))
 	}
 	end_case(r)
