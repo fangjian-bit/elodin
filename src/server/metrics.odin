@@ -11,7 +11,6 @@ import "elodin:filter"
 import "elodin:logx"
 import "elodin:loop"
 import "elodin:metrics"
-import "elodin:pool"
 import "elodin:upstream"
 
 /*
@@ -605,7 +604,7 @@ render_metrics :: proc(s: ^Server, l: ^Listeners, allocator := context.allocator
 	render_cache_metrics(&b, s)
 	render_filter_metrics(&b, s)
 	render_upstream_metrics(&b, s)
-	render_pool_metrics(&b, s)
+	render_loop_metrics(&b, s)
 	render_process_metrics(&b, s.started)
 
 	return strings.to_string(b)
@@ -989,26 +988,38 @@ render_upstream_metrics :: proc(b: ^strings.Builder, s: ^Server) {
 }
 
 /*
-The worker pools.
+The event loops, and the queries in flight on them.
 
-`pending` is the one number here that says whether this server is keeping up:
-queries queue there when every worker is inside an upstream round trip, and a
-figure that does not come back to zero is `server.workers` set too low - the
-same condition `elodin_queries_dropped_total` starts counting once the backlog
-is full.
+`elodin_queries_inflight` is the one number here that says whether this server
+is keeping up: every UDP and HTTP/2 query and every refresh is counted from the
+moment it is admitted until it is answered, and a figure that sits at
+`elodin_queries_inflight_max` is `server.max_pending` turning queries away - the
+same moment `elodin_queries_dropped_total` starts counting. `elodin_fibers` is
+everything each loop is running: those queries, the connections it serves, and
+the racers and upstream readers they started.
 */
 @(private)
-render_pool_metrics :: proc(b: ^strings.Builder, s: ^Server) {
-	if s.handler_pool == nil || s.race_pool == nil {
+render_loop_metrics :: proc(b: ^strings.Builder, s: ^Server) {
+	if len(s.loops) == 0 {
 		return
 	}
-	metrics.family(b, "elodin_pool_workers", .Gauge, "Worker threads in each pool.")
-	metrics.sample(b, "elodin_pool_workers", i64(pool.worker_count(s.handler_pool)), metrics.Label{"pool", "query"})
-	metrics.sample(b, "elodin_pool_workers", i64(pool.worker_count(s.race_pool)), metrics.Label{"pool", "upstream"})
+	metrics.family(b, "elodin_loops", .Gauge, "Event loops, one thread each.")
+	metrics.sample(b, "elodin_loops", i64(len(s.loops)))
 
-	metrics.family(b, "elodin_pool_pending", .Gauge, "Jobs waiting for a worker in each pool.")
-	metrics.sample(b, "elodin_pool_pending", i64(pool.pending(s.handler_pool)), metrics.Label{"pool", "query"})
-	metrics.sample(b, "elodin_pool_pending", i64(pool.pending(s.race_pool)), metrics.Label{"pool", "upstream"})
+	metrics.family(b, "elodin_fibers", .Gauge, "Fibers running on each event loop.")
+	for l, i in s.loops {
+		metrics.sample(b, "elodin_fibers", i64(loop.fibers_alive(l)), metrics.Label{"loop", fmt.tprintf("%d", i)})
+	}
+
+	metrics.family(b, "elodin_queries_inflight", .Gauge, "Queries admitted on fibers of their own and not yet answered.")
+	metrics.sample(b, "elodin_queries_inflight", i64(queries_pending(s)))
+	metrics.family(
+		b,
+		"elodin_queries_inflight_max",
+		.Gauge,
+		"The most queries that may be in flight at once, server.max_pending; 0 is no limit.",
+	)
+	metrics.sample(b, "elodin_queries_inflight_max", i64(live(s).cfg.server.max_pending))
 }
 
 /*

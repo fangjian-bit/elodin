@@ -12,7 +12,7 @@ import "elodin:dnssec"
 import "elodin:filter"
 import "elodin:logx"
 import "elodin:netx"
-import "elodin:pool"
+import "elodin:loop"
 import "elodin:upstream"
 
 Protocol :: enum u8 {
@@ -220,8 +220,17 @@ Server :: struct {
 	identity instead. See `profile.odin`.
 	*/
 	profiles:     ^Profile_Signer,
-	handler_pool: ^pool.Pool,
-	race_pool:    ^pool.Pool,
+	/*
+	The event loops the server runs on, one thread each. Set once before the
+	listeners start and never changed; a `Server` built as a literal - the tests -
+	has none, or the one its test started. See `queries.odin`.
+	*/
+	loops:        []^loop.Loop,
+	// Queries in flight on fibers of their own, against `max_pending`. See
+	// `submit_query`.
+	pending:      int,
+	// Where the next accepted connection goes; see `next_loop`.
+	next_loop:    uint,
 	/*
 	The expired entries being refreshed right now, one slot per cache key.
 
@@ -307,8 +316,12 @@ handle_query :: proc(
 	length of the message it reads, and a request holds about thirty-five, so
 	without this the bound is the reading's and the arena's is thirty-five times
 	larger. See `dns.REQUEST_DECODE_BUDGET` and issue #354.
+
+	A request that read past the ordinary allowance holds one of the process's
+	heavy slots until it is answered; see `dns.REQUEST_ORDINARY_DECODE`.
 	*/
 	spent: int
+	defer dns.request_release(&spent)
 
 	msg, derr := dns.decode_message(query, allocator, &spent)
 	limit := response_limit(s, msg, proto)
@@ -1526,7 +1539,7 @@ resolve_query :: proc(
 
 	Those three are the only ways out of this block. Every other reason
 	`start_refresh` declines - a refresh for this key already running, the
-	ceiling reached, the pool's backlog full or the pool shutting down - serves
+	ceiling reached, `max_pending` reached or the server shutting down - serves
 	the expired bytes here and now. Each of them says the same thing, which is
 	that this query is not the one to spend an upstream round trip on, and none
 	of them leaves the entry unrefreshed for longer than the refresh that is
@@ -1535,7 +1548,7 @@ resolve_query :: proc(
 	if unanswered == nil &&
 	   stale_hit.wire != nil &&
 	   live(s).cfg.cache.stale_timeout > 0 &&
-	   s.handler_pool != nil {
+	   can_detach(s) {
 		if r := start_refresh(s, key, query, proto, client, limit, started); r != nil {
 			defer refresh_release(r)
 			if out, refreshed, code, taken := refresh_take(r, live(s).cfg.cache.stale_timeout, allocator);

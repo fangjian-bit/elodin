@@ -13,6 +13,7 @@ import "core:thread"
 import "core:time"
 import "elodin:config"
 import "elodin:dns"
+import "elodin:loop"
 import "elodin:tlsx"
 
 /*
@@ -71,7 +72,7 @@ temp_arena :: proc() -> ^runtime.Arena {
 // that cannot build one keeps running, so a leak here is one per SIGHUP.
 @(test)
 test_a_group_with_no_usable_server_releases_what_it_took :: proc(t: ^testing.T) {
-	g, err := make_group(config.Upstream_Config{}, nil)
+	g, err := make_group(config.Upstream_Config{})
 	testing.expect(t, g == nil, "a group with no servers was built")
 	testing.expect_value(t, err, Error.Not_Resolved)
 }
@@ -3167,7 +3168,7 @@ release_connecting :: proc(r: ^Releaser) {
 	time.sleep(r.after)
 	sync.mutex_lock(&r.u.mu)
 	r.u.connecting = false
-	sync.cond_broadcast(&r.u.conn_cond)
+	loop.cond_broadcast(&r.u.conn_cond)
 	sync.mutex_unlock(&r.u.mu)
 }
 

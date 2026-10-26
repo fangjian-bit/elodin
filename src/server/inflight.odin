@@ -3,7 +3,7 @@ package server
 import "core:mem"
 import "core:sync"
 import "core:time"
-import "elodin:pool"
+import "elodin:loop"
 
 /*
 Identical questions in flight at once go to the upstream once (issue #311).
@@ -100,7 +100,7 @@ Flight :: struct {
 	// The leader's own key, which outlives the flight: the leader lands before
 	// its frame goes.
 	key:           string,
-	cond:          sync.Cond,
+	cond:          loop.Cond,
 	waiters:       int,
 	landed:        bool,
 	// Where this flight sits in the table, so landing need not look for it.
@@ -133,10 +133,11 @@ ceiling.
 */
 @(private)
 follower_ceiling :: proc(s: ^Server) -> int {
-	if s.handler_pool == nil {
+	limit := live(s).cfg.server.max_pending
+	if limit <= 0 {
 		return 0
 	}
-	return max(pool.worker_count(s.handler_pool) / 4, 1)
+	return max(limit / 4, 1)
 }
 
 /*
@@ -236,7 +237,6 @@ flight_follow :: proc(
 	landed: bool,
 	same: bool,
 ) {
-	pool.blocking_begin()
 	sync.mutex_lock(&s.inflight.mu)
 	start := time.tick_now()
 	for !f.landed {
@@ -244,14 +244,13 @@ flight_follow :: proc(
 		if left <= 0 {
 			break
 		}
-		_ = sync.cond_wait_with_timeout(&f.cond, &s.inflight.mu, left)
+		_ = loop.cond_wait_with_timeout(&f.cond, &s.inflight.mu, left)
 	}
 	landed = f.landed
 	if landed {
 		result = f.landing
 	}
 	sync.mutex_unlock(&s.inflight.mu)
-	pool.blocking_end()
 
 	// Copied outside the lock, which every miss on the server takes: the bytes
 	// cannot change while this follower is still counted, since the leader waits
@@ -276,7 +275,7 @@ flight_follow :: proc(
 	// The leader waits for exactly this, and nothing else sleeps on the cond
 	// once it has landed.
 	if f.landed && f.waiters == 0 {
-		sync.cond_signal(&f.cond)
+		loop.cond_signal(&f.cond)
 	}
 	sync.mutex_unlock(&s.inflight.mu)
 	return
@@ -292,8 +291,8 @@ flight_land :: proc(s: ^Server, f: ^Flight) {
 	defer sync.mutex_unlock(&s.inflight.mu)
 	s.inflight.slots[f.slot] = nil
 	f.landed = true
-	sync.cond_broadcast(&f.cond)
+	loop.cond_broadcast(&f.cond)
 	for f.waiters > 0 {
-		sync.cond_wait(&f.cond, &s.inflight.mu)
+		loop.cond_wait(&f.cond, &s.inflight.mu)
 	}
 }

@@ -4,14 +4,13 @@ import "core:mem"
 import "core:net"
 import "core:strings"
 import "core:sync"
-import "core:thread"
 import "core:time"
 import "elodin:config"
 import "elodin:dns"
 import "elodin:h2"
 import "elodin:logx"
+import "elodin:loop"
 import "elodin:netx"
-import "elodin:pool"
 import "elodin:tlsx"
 
 Error :: enum u8 {
@@ -92,6 +91,8 @@ H2_Conn :: struct {
 	allocator: mem.Allocator,
 	refs:      int,
 	stopping:  bool,
+	// Whose `h2_readers` the reader is counted in; see `h2_reader`.
+	upstream:  ^Upstream,
 }
 
 Upstream :: struct {
@@ -122,16 +123,22 @@ Upstream :: struct {
 	// `conn_cond` and `connecting` make concurrent first callers share one
 	// handshake instead of each racing to open their own. Used by both shared
 	// connections below, which no upstream has at once - `spec.kind` picks one.
-	conn_cond:  sync.Cond,
+	conn_cond:  loop.Cond,
 	connecting: bool,
 
 	// HTTPS only. `proto` is set once ALPN has settled it and never changes
 	// back.
 	proto:      Protocol,
 	h2:         ^H2_Conn,
-	// Every reader thread not yet joined, `h2`'s and those of connections it
-	// replaced; see `start_h2_conn`.
-	h2_readers: [dynamic]^thread.Thread,
+	/*
+	Readers still running, `h2`'s and those of connections it replaced, and the
+	cond the last of them broadcasts on as it leaves. Under `mu`. A reader is a
+	fiber of the loop that dialled its connection, and nothing joins a fiber:
+	`teardown_h2` waits for this to reach zero instead, since a reader frees
+	into `allocator` and a TLS one uses `tls_ctx`. See `start_h2_conn`.
+	*/
+	h2_readers:      int,
+	h2_readers_done: loop.Cond,
 
 	// The one connection everything this upstream sends over a stream is
 	// pipelined onto: `tcp` and `tls` throughout, and a `udp` upstream's retry
@@ -221,7 +228,6 @@ make_upstream :: proc(
 	u.max_idle = max(max_idle, 0)
 	u.idle_timeout = idle_timeout
 	u.idle = make([dynamic]Idle_Conn, 0, max(max_idle, 1), allocator)
-	u.h2_readers = make([dynamic]^thread.Thread, allocator)
 	u.max_outstanding = PIPELINE_MAX_OUTSTANDING
 	u.cookies = cookies
 	init_cookie(u)
@@ -698,10 +704,6 @@ take several, and every bound above - a group's budget, a question's
 	*/
 	entered := time.tick_now()
 	deadline := time.tick_add(entered, timeout)
-	// Every transport's round trip, and the bootstrap lookup before it, waits
-	// on the network rather than the CPU: another handler runs meanwhile.
-	pool.blocking_begin()
-	defer pool.blocking_end()
 	/*
 	A hostname the bootstrap resolvers were asked about and did not resolve is a
 	failure like any other, recorded so it counts towards the cooldown. With a

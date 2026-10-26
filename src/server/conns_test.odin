@@ -72,7 +72,7 @@ test_reaping_a_permanent_thread_keeps_the_count_honest :: proc(t: ^testing.T) {
 	/*
 	And the refusal says which of the two it was.
 
-	`Limit_Reached` and `Thread_Failed` ask an operator for opposite things -
+	`Limit_Reached` and `Spawn_Failed` ask an operator for opposite things -
 	raise the limit, or find out what stopped the OS giving this process a
 	thread - so the accept loop counts and reports them apart. A boolean could
 	not tell them apart, and named `max_connections` for both.
@@ -300,7 +300,7 @@ test_spawn_after_shutdown_is_refused :: proc(t: ^testing.T) {
 		"conn_spawn returned %v after conn_manager_shutdown; nothing will ever join that thread",
 		res,
 	)
-	testing.expect(t, len(cm.threads) == 0, "the late thread was tracked in a table nobody will drain")
+	testing.expect(t, len(cm.entries) == 0, "the late thread was tracked in a table nobody will drain")
 	// So are the server's own loops: nothing joins them either.
 	testing.expect_value(t, conn_spawn(&cm, &late, holds_until_released, counted = false), Spawn_Result.Stopped)
 	testing.expect_value(t, active_connections(&cm), 0)

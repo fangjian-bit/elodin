@@ -291,7 +291,7 @@ run_burst :: proc(
 		port    = bound.port,
 	}
 	cfg.upstream.servers = servers
-	group, gerr := upstream.make_group(cfg.upstream, nil, context.allocator, false)
+	group, gerr := upstream.make_group(cfg.upstream, context.allocator, false)
 	if !testing.expectf(t, gerr == .None, "cannot build the upstream group: %v", gerr) {
 		return -1
 	}
@@ -735,7 +735,7 @@ test_a_follower_waits_no_longer_than_its_deadline_allows :: proc(t: ^testing.T) 
 	cfg.upstream.attempts = 2
 	cfg.upstream.timeout = TIMEOUT
 	cfg.upstream.servers = servers
-	group, gerr := upstream.make_group(cfg.upstream, nil, context.allocator, false)
+	group, gerr := upstream.make_group(cfg.upstream, context.allocator, false)
 	if !testing.expectf(t, gerr == .None, "cannot build the upstream group: %v", gerr) {
 		return
 	}
@@ -821,7 +821,7 @@ test_a_follower_still_takes_an_answer_landing_just_past_its_deadline :: proc(t: 
 	cfg.upstream.timeout = TIMEOUT
 	servers := []config.Upstream_Spec{{name = "silent", kind = .UDP, address = "127.0.0.1", port = bound.port}}
 	cfg.upstream.servers = servers
-	group, gerr := upstream.make_group(cfg.upstream, nil, context.allocator, false)
+	group, gerr := upstream.make_group(cfg.upstream, context.allocator, false)
 	if !testing.expectf(t, gerr == .None, "cannot build the upstream group: %v", gerr) {
 		return
 	}

@@ -6,6 +6,7 @@ import "core:sync"
 import "core:time"
 import "elodin:dns"
 import "elodin:logx"
+import "elodin:loop"
 import "elodin:tlsx"
 
 /*
@@ -156,10 +157,10 @@ Pipe_Conn :: struct {
 	stream:    Stream,
 	// Held for the whole of one message going out, so two queries written at
 	// once cannot interleave their bytes on the wire.
-	wmu:       sync.Mutex,
+	wmu:       loop.Mutex,
 
 	mu:        sync.Mutex,
-	cond:      sync.Cond,
+	cond:      loop.Cond,
 	waiters:   map[u16]^Pipe_Waiter,
 	// Whether some caller is reading the socket on everyone's behalf.
 	reading:   bool,
@@ -479,7 +480,7 @@ get_pipe :: proc(
 		if !u.connecting {
 			break
 		}
-		sync.cond_wait_with_timeout(&u.conn_cond, &u.mu, remaining)
+		loop.cond_wait_with_timeout(&u.conn_cond, &u.mu, remaining)
 	}
 
 	u.connecting = true
@@ -495,14 +496,14 @@ get_pipe :: proc(
 	sync.mutex_lock(&u.mu)
 	u.connecting = false
 	if derr != .None {
-		sync.cond_broadcast(&u.conn_cond)
+		loop.cond_broadcast(&u.conn_cond)
 		sync.mutex_unlock(&u.mu)
 		return nil, derr
 	}
 	// This caller's, on top of the upstream's.
 	pipe_ref(dialled)
 	u.pipe = dialled
-	sync.cond_broadcast(&u.conn_cond)
+	loop.cond_broadcast(&u.conn_cond)
 	sync.mutex_unlock(&u.mu)
 	return dialled, .None
 }
@@ -783,13 +784,13 @@ pipe_wait :: proc(c: ^Pipe_Conn, w: ^Pipe_Waiter, id: u16, deadline: time.Tick) 
 				c.silent += 1
 				if c.silent >= PIPE_SILENT_TIMEOUTS {
 					pipe_kill(c, .Timeout)
-					sync.cond_broadcast(&c.cond)
+					loop.cond_broadcast(&c.cond)
 				}
 			}
 			return .Timeout
 		}
 		if c.reading {
-			sync.cond_wait_with_timeout(&c.cond, &c.mu, remaining)
+			loop.cond_wait_with_timeout(&c.cond, &c.mu, remaining)
 			continue
 		}
 
@@ -804,7 +805,7 @@ pipe_wait :: proc(c: ^Pipe_Conn, w: ^Pipe_Waiter, id: u16, deadline: time.Tick) 
 		if rerr != .None && rerr != .Timeout {
 			pipe_kill(c, rerr)
 		}
-		sync.cond_broadcast(&c.cond)
+		loop.cond_broadcast(&c.cond)
 	}
 }
 
@@ -969,7 +970,7 @@ pipe_read_full :: proc(c: ^Pipe_Conn, buf: []u8, deadline: time.Tick) -> (n: int
 			n += got
 			continue
 		}
-		got, nerr := net.recv_tcp(c.stream.socket, buf[n:])
+		got, nerr := loop.recv_tcp(c.stream.socket, buf[n:])
 		if nerr != nil {
 			// SO_RCVTIMEO expiring on a blocking recv() is EAGAIN on Linux,
 			// which core:net reports as .Would_Block rather than .Timeout -
@@ -1020,8 +1021,8 @@ pipe_write :: proc(c: ^Pipe_Conn, query: []u8, deadline: time.Tick) -> Error {
 	framed[1] = u8(len(query))
 	copy(framed[2:], query)
 
-	sync.mutex_lock(&c.wmu)
-	defer sync.mutex_unlock(&c.wmu)
+	loop.lock(&c.wmu)
+	defer loop.unlock(&c.wmu)
 	/*
 	Whoever was ahead of this in the queue may have found the connection gone
 	while this one waited, and a write to a connection that is finished is a
@@ -1071,7 +1072,7 @@ pipe_write :: proc(c: ^Pipe_Conn, query: []u8, deadline: time.Tick) -> Error {
 		*/
 		sync.mutex_lock(&c.mu)
 		pipe_kill(c, err)
-		sync.cond_broadcast(&c.cond)
+		loop.cond_broadcast(&c.cond)
 		sync.mutex_unlock(&c.mu)
 	}
 	return err
@@ -1124,7 +1125,7 @@ pipe_write_framed :: proc(c: ^Pipe_Conn, framed: []u8, deadline: time.Tick) -> (
 			return sent, .Timeout
 		}
 		pipe_set_write_timeout(c, remaining)
-		n, werr := net.send_tcp(c.stream.socket, framed[sent:])
+		n, werr := loop.send_tcp(c.stream.socket, framed[sent:])
 		if werr != nil {
 			// A send timeout is the peer not reading, which is a different
 			// thing from the peer closing and is counted as such; see

@@ -17,7 +17,12 @@ the handler was installed: a list download fails, or an upstream read and the
 query behind it. Every thread is started here, so the main thread is the only
 one that takes them.
 */
-spawn_thread :: proc(data: $T, fn: proc(data: T), init_context: Maybe(runtime.Context) = nil) -> ^thread.Thread {
+spawn_thread :: proc(
+	data: $T,
+	fn: proc(data: T),
+	init_context: Maybe(runtime.Context) = nil,
+	self_cleanup := false,
+) -> ^thread.Thread {
 	set, old: posix.sigset_t
 	posix.sigemptyset(&set)
 	for sig in ([]posix.Signal{.SIGTERM, .SIGINT, .SIGHUP}) {
@@ -27,7 +32,13 @@ spawn_thread :: proc(data: $T, fn: proc(data: T), init_context: Maybe(runtime.Co
 	// and delivered on the restore.
 	posix.pthread_sigmask(.BLOCK, &set, &old)
 	defer posix.pthread_sigmask(.SETMASK, &old, nil)
-	return thread.create_and_start_with_poly_data2(data, fn, run_with_mapped_scratch, init_context)
+	return thread.create_and_start_with_poly_data2(
+		data,
+		fn,
+		run_with_mapped_scratch,
+		init_context,
+		self_cleanup = self_cleanup,
+	)
 }
 
 /*

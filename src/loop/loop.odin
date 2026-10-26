@@ -73,6 +73,8 @@ Loop :: struct {
 	clock:               proc "contextless" () -> Tick,
 	// For the metrics endpoint and tests; written only by the loop's own thread.
 	parks:               u64,
+	// When the loop last had anything to do, for `trim_idle`.
+	last_busy:           Tick,
 }
 
 Tick :: time.Tick
@@ -188,6 +190,7 @@ run :: proc(l: ^Loop) {
 		l.local_addresses[i] = locals[i].address()
 	}
 	events: [128]linux.EPoll_Event
+	l.last_busy = l.clock()
 	for {
 		run_ready(l)
 		drain_posts(l)
@@ -204,6 +207,10 @@ run :: proc(l: ^Loop) {
 			// zero-length waits until it is due.
 			timeout = i32(max(0, (left + time.Millisecond - 1) / time.Millisecond))
 		}
+		// Wake to trim, if there is anything to trim; see `trim_idle`.
+		if trim_pending(l) && (timeout < 0 || timeout > i32(TRIM_AFTER / time.Millisecond)) {
+			timeout = i32(TRIM_AFTER / time.Millisecond)
+		}
 		n, err := epoll_wait(l.epfd, events[:], timeout)
 		if err != .NONE && err != .EINTR {
 			// Nothing the loop can do about a broken epoll descriptor but say so;
@@ -214,6 +221,17 @@ run :: proc(l: ^Loop) {
 			dispatch_event(l, events[i])
 		}
 		expire_timers(l, l.clock())
+		/*
+		Busy is a descriptor or another thread having had something for this
+		loop. A timer coming due is not: the listeners wake on one every
+		`LISTENER_POLL` to look for a stop, and a loop that counted those as work
+		would never be idle enough to trim.
+		*/
+		if n > 0 {
+			l.last_busy = l.clock()
+		} else if time.tick_diff(l.last_busy, l.clock()) >= TRIM_AFTER {
+			trim_idle(l)
+		}
 	}
 }
 
@@ -519,6 +537,50 @@ fiber_recycle :: proc(l: ^Loop, f: ^Fiber) {
 }
 
 /*
+How long a loop sits with nothing to do before it gives back the stacks it kept
+warm, and how many it keeps through the quiet.
+
+The cache is for the next query, which under load is microseconds away and would
+otherwise pay a `mmap` and the page faults of a fresh stack. After a burst that is
+over, the same cache is memory nobody will touch: a burst of two hundred
+connections leaves up to `STACK_CACHE` stacks per loop resident, some twenty
+kilobytes each. A second of nothing is long past any gap between the queries of a
+loaded server, and a few stacks are enough for a quiet one's next query.
+*/
+@(private)
+TRIM_AFTER :: time.Second
+@(private)
+WARM_IDLE_KEEP :: 8
+
+@(private)
+trim_pending :: proc(l: ^Loop) -> bool {
+	sync.mutex_lock(&l.mu)
+	defer sync.mutex_unlock(&l.mu)
+	return l.warm > WARM_IDLE_KEEP
+}
+
+// Unmap the warm stacks past `WARM_IDLE_KEEP`; their fibers stay, cold.
+@(private)
+trim_idle :: proc(l: ^Loop) {
+	for {
+		sync.mutex_lock(&l.mu)
+		if l.warm <= WARM_IDLE_KEEP || l.free_warm == nil {
+			sync.mutex_unlock(&l.mu)
+			return
+		}
+		f := l.free_warm
+		l.free_warm = f.next
+		l.warm -= 1
+		sync.mutex_unlock(&l.mu)
+		fiber_release(l, f)
+		sync.mutex_lock(&l.mu)
+		f.next = l.free_cold
+		l.free_cold = f
+		sync.mutex_unlock(&l.mu)
+	}
+}
+
+/*
 Unmap a free fiber's stack and destroy its scratch.
 
 The fiber is switched into one last time with no job, so that it leaves its stack
@@ -755,4 +817,23 @@ expire_timers :: proc(l: ^Loop, now: Tick) {
 		timer_remove(l, f)
 		wake_local(f, f.token, .Timeout)
 	}
+}
+
+/*
+Run `fn(data)` alongside the caller, which does not wait for it.
+
+On a loop it is a fiber of the caller's own loop, so detached work - a racer, a
+refresh, an upstream connection's reader - shares the caller's thread and costs
+a stack rather than a thread. Off a loop - the tests, which drive the resolver
+from a thread of their own - it is a thread that cleans up after itself, with
+the signals `main` acts on blocked as every thread of this process has them.
+
+False when nothing was started, and `data` is then still the caller's.
+*/
+go :: proc(fn: proc(data: rawptr), data: rawptr) -> bool {
+	if l := tl_loop; l != nil {
+		_, ok := spawn(l, fn, data)
+		return ok
+	}
+	return spawn_thread(data, fn, context, self_cleanup = true) != nil
 }

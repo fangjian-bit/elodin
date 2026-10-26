@@ -7,7 +7,7 @@ import "core:time"
 import "elodin:config"
 import "elodin:dns"
 import "elodin:logx"
-import "elodin:pool"
+import "elodin:loop"
 
 /*
 A set of upstreams plus the policy for choosing between them.
@@ -22,7 +22,6 @@ Group :: struct {
 	timeout:    time.Duration,
 	attempts:   int,
 	cursor:     u64,
-	race_pool:  ^pool.Pool,
 	allocator:  mem.Allocator,
 	/*
 	Race workers still running against this group's servers.
@@ -37,7 +36,6 @@ Group :: struct {
 
 make_group :: proc(
 	cfg: config.Upstream_Config,
-	race_pool: ^pool.Pool,
 	allocator := context.allocator,
 	// Whether plain upstreams are asked with a DNS cookie; see upstream/cookie.odin.
 	cookies := false,
@@ -49,7 +47,6 @@ make_group :: proc(
 	g.strategy = cfg.strategy
 	g.timeout = cfg.timeout
 	g.attempts = max(cfg.attempts, 1)
-	g.race_pool = race_pool
 	g.allocator = allocator
 
 	servers := make([dynamic]^Upstream, 0, len(cfg.servers), allocator)
@@ -935,7 +932,7 @@ The last reference to leave frees the block.
 @(private)
 Race_State :: struct {
 	mu:          sync.Mutex,
-	sema:        sync.Sema,
+	sema:        loop.Sema,
 	refs:        int,
 	// Set once a winner is recorded; later arrivals discard their answers.
 	done:        bool,
@@ -975,10 +972,8 @@ race_state_release :: proc(st: ^Race_State) {
 
 @(private)
 race_worker :: proc(data: rawptr) {
-	// A race-pool worker runs for the life of the process and `exchange` below
-	// takes scratch space for every query it makes. Nothing else resets this
-	// thread's arena, and the arena chains a new block rather than reusing the
-	// old one, so without this it grows for as long as the server runs.
+	// The scratch `exchange` takes is this racer's own, and goes with it - a
+	// fiber's when on a loop, a thread's otherwise.
 	defer free_all(context.temp_allocator)
 
 	job := cast(^Race_Job)data
@@ -1005,7 +1000,7 @@ race_worker :: proc(data: rawptr) {
 		delete(resp)
 	}
 	if won || last_one {
-		sync.sema_post(&st.sema)
+		loop.sema_post(&st.sema)
 	}
 	// Last, after the worker's final touch of `job.upstream`: a reload may
 	// destroy the group the moment this reaches zero.
@@ -1070,8 +1065,12 @@ resolve_race :: proc(
 		sync.mutex_unlock(&st.mu)
 		sync.atomic_add(&g.racing, 1)
 
-		if !pool.submit(g.race_pool, race_worker, &st.jobs[i]) {
-			// The pool is shutting down; undo this leg's bookkeeping.
+		/*
+		A fiber beside the caller's on its loop: the racers wait on the network
+		while the caller waits on them, and none of them holds a thread.
+		*/
+		if !loop.go(race_worker, &st.jobs[i]) {
+			// The loop is shutting down; undo this leg's bookkeeping.
 			sync.mutex_lock(&st.mu)
 			st.refs -= 1
 			st.outstanding -= 1
@@ -1085,9 +1084,7 @@ resolve_race :: proc(
 		return resolve_sequential(g, query, 0, budget, allocator, unreachable)
 	}
 
-	pool.blocking_begin()
-	answered := sync.sema_wait_with_timeout(&st.sema, g.timeout)
-	pool.blocking_end()
+	answered := loop.sema_wait_with_timeout(&st.sema, g.timeout)
 	if !answered {
 		// Nobody answered in time. Workers still running will see `done` and
 		// throw their answers away rather than writing into a dead frame.

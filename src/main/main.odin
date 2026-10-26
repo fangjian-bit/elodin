@@ -6,13 +6,13 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
+import "core:thread"
 import "core:time"
 import "elodin:cache"
 import "elodin:config"
 import "elodin:filter"
 import "elodin:logx"
 import "elodin:loop"
-import "elodin:pool"
 import "elodin:privdrop"
 import "elodin:server"
 
@@ -742,16 +742,20 @@ connection_memory_warning :: proc(cfg: ^config.Config) -> (text: string, say: bo
 }
 
 run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
-	handler_pool := pool.make_pool(cfg.server.workers, cfg.server.running_workers)
-	race_pool := pool.make_pool(cfg.server.upstream_workers)
+	/*
+	The event loops, one thread each, as many as `listeners.udp.readers` says:
+	the usable CPUs, at most eight, unless the file names a figure. Everything
+	that waits on the network runs on them - see `loop` - and each takes one UDP
+	reader. Started before anything that could spawn on one.
+	*/
+	loops, loop_threads := start_loops(max(cfg.listeners.udp.readers, 1))
 
 	filters := filter.engine_make()
 	defer filter.engine_destroy(filters)
 
 	s := server.Server {
 		filters      = filters,
-		handler_pool = handler_pool,
-		race_pool    = race_pool,
+		loops        = loops,
 		started      = time.now(),
 		running      = true,
 	}
@@ -767,7 +771,7 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 		os.exit(1)
 	}
 	// Released last of all, once nothing can be using any generation: the
-	// block below drains both pools before this runs.
+	// block below drains the queries and stops the loops before this runs.
 	defer server.destroy_generations(&s)
 
 	// The main thread reads the configuration through `server.live` like any
@@ -828,42 +832,36 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 	}
 	/*
 	Shutdown, in the one order that works, which is why it is a block rather
-	than four separate defers.
+	than separate defers.
 
-	Deferred last so it runs first. Stopping the listeners closes the sockets
-	and joins every connection thread, but it does not empty the pools: a query
-	accepted a moment earlier is still queued, and `pool.destroy` runs what is
-	queued before it joins its workers. Those jobs reach for the validator, the
-	filters, the cache, the upstream group and the rate limiter - `udp_job`
-	charges the answer it just packed to the prefix it is addressed to - so the
-	pools have to be drained before any of that is torn down - the defers written
-	above this one, which run after it - and the listener contexts released only once nothing is left that
-	could hold one.
+	Deferred last so it runs first. Stopping the listeners stops the read and
+	accept loops, closes their sockets and waits on every connection, but a
+	query a reader admitted a moment earlier is still in flight on a fiber of
+	its own. Those reach for the validator, the filters, the cache, the upstream
+	group and the rate limiter - `udp_job` charges the answer it just packed to
+	the prefix it is addressed to - so they are drained before any of that is
+	torn down by the defers written above this one, which run after it.
 
-	The pools are handled here rather than at the point they are created, where
-	a `defer` of their own would put them last in the unwind and hand every
-	draining job a set of freed dependencies.
+	Metrics is stopped right after `stop_listeners`, not merged into it and not
+	left running past the loops. `stop_listeners` is the slow, client-facing
+	part: a DoT or DoH connection can hold out for `server.client_timeout`, and
+	an operator scraping through that wait wants to see it happening rather than
+	find the port already closed. The loops are a different hazard: the endpoint
+	reads them, and `stop_loops` frees them.
 
-	Metrics is stopped here too, right after `stop_listeners` and before
-	either pool is touched - not merged into `stop_listeners` and not left
-	running past it. `stop_listeners` is the slow, client-facing part: a DoT or
-	DoH connection can hold out for `server.client_timeout`, the shutdown waits
-	on every one of them, and an operator scraping through
-	that wait wants to see it happening rather than find the port already
-	closed. `pool.destroy` is a different hazard rather than a smaller version
-	of the same one: it frees the pool it joins, and `render_pool_metrics`
-	reads `handler_pool`/`race_pool` with no lock of its own, on the assumption
-	that nothing frees them while the endpoint can still be reached. Stopping
-	metrics before either `pool.destroy` call keeps that assumption true. See
-	`stop_metrics`.
+	What is left on the loops after the drain is detached work nobody answers to
+	- a racer still waiting out its timeout, the reader of an upstream's HTTP/2
+	connection - and it is cancelled rather than waited for, since a reader lives
+	as long as its connection and the connection as long as the generation,
+	which is released after this.
 	*/
 	defer {
 		server.stop_listeners(&listeners)
 		server.stop_metrics(&listeners)
-		pool.destroy(handler_pool)
-		pool.destroy(race_pool)
+		server.drain_queries(&s)
+		stop_loops(loops, loop_threads)
 		server.destroy_listeners(&listeners)
-		// Last: a draining job can be a DoH request still building a profile,
+		// Last: a draining query can be a DoH request still building a profile,
 		// and this is what it signs with.
 		server.stop_profile_signer(&s)
 	}
@@ -1252,4 +1250,46 @@ parse_args :: proc() -> (opts: Options, ok: bool) {
 		i += 1
 	}
 	return opts, true
+}
+
+/*
+Start `n` event loops, each on a thread that never takes the signals `main` acts
+on (#416). A loop that cannot be made is fatal: the server would run with fewer
+than it reported, and on a machine that refuses an epoll descriptor nothing
+else would work either.
+*/
+@(private)
+start_loops :: proc(n: int) -> (loops: []^loop.Loop, threads: []^thread.Thread) {
+	loops = make([]^loop.Loop, n)
+	threads = make([]^thread.Thread, n)
+	for i in 0 ..< n {
+		l, ok := loop.make_loop()
+		if !ok {
+			logx.errorf("cannot create event loop %d of %d", i + 1, n)
+			os.exit(1)
+		}
+		loops[i] = l
+		threads[i] = loop.spawn_thread(l, loop.run, context)
+		if threads[i] == nil {
+			logx.errorf("cannot start a thread for event loop %d of %d", i + 1, n)
+			os.exit(1)
+		}
+	}
+	return
+}
+
+// Cancel what is still running on the loops, wait for each to finish, and free them.
+@(private)
+stop_loops :: proc(loops: []^loop.Loop, threads: []^thread.Thread) {
+	for l in loops {
+		loop.cancel_all(l)
+		loop.stop(l)
+	}
+	for t, i in threads {
+		thread.join(t)
+		thread.destroy(t)
+		loop.destroy(loops[i])
+	}
+	delete(threads)
+	delete(loops)
 }

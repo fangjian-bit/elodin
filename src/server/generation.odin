@@ -10,6 +10,7 @@ import "elodin:cache"
 import "elodin:config"
 import "elodin:dnssec"
 import "elodin:logx"
+import "elodin:loop"
 import "elodin:upstream"
 
 /*
@@ -148,7 +149,7 @@ Pin :: struct {
 /*
 The generation this thread's request is running under.
 
-Per thread rather than passed along, because the request reaches its
+Per request rather than passed along, because the request reaches its
 configuration through some two hundred reads in a few dozen procedures that all
 take the `Server` and nothing else; threading a second argument through every
 one of them would be the same guarantee bought with a much larger change. What
@@ -158,6 +159,17 @@ it needs up front, or pins for itself when it starts.
 */
 @(private, thread_local)
 pinned: Pin
+
+/*
+Per fiber on a loop thread, where many requests take turns and each holds its
+own generation across the waits in it: the pin is saved when the request's fiber
+parks and put back when it runs. See `loop.register_local`.
+*/
+@(private, init)
+register_pinned :: proc "contextless" () {
+	context = {}
+	loop.register_local(proc "contextless" () -> rawptr {return &pinned}, size_of(pinned))
+}
 
 /*
 Take a reference to the current generation for the rest of this request.
@@ -323,14 +335,14 @@ replies rather than failing.
 @(private)
 build_upstreams :: proc(s: ^Server, l: ^Live) -> bool {
 	cfg := l.cfg
-	group, gerr := upstream.make_group(cfg.upstream, s.race_pool, cookies = cfg.cookies.upstream)
+	group, gerr := upstream.make_group(cfg.upstream, cookies = cfg.cookies.upstream)
 	if gerr != .None {
 		logx.errorf("no usable upstream servers")
 		return false
 	}
 	routes := make([]Zone_Route, len(cfg.upstream.zones))
 	for zone, i in cfg.upstream.zones {
-		zg, zerr := upstream.make_group(zone.upstream, s.race_pool, cookies = cfg.cookies.upstream)
+		zg, zerr := upstream.make_group(zone.upstream, cookies = cfg.cookies.upstream)
 		if zerr != .None {
 			logx.errorf("upstream.zones[%d]: no usable servers for %s", i, zone.domains[0])
 			// The routes built so far and the slice under them, which this

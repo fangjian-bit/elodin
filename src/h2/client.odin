@@ -2,8 +2,8 @@ package h2
 
 import "core:mem"
 import "core:strconv"
-import "core:sync"
 import "core:time"
+import "elodin:loop"
 
 /*
 A multiplexed HTTP/2 client connection (RFC 9113), for talking to upstream DoH
@@ -27,11 +27,11 @@ response's headers may still arrive split, and that direction is handled.
 Client :: struct {
 	io: IO,
 
-	mu:        sync.Mutex,
-	cond:      sync.Cond,
+	mu:        loop.Mutex,
+	cond:      loop.Cond,
 	// Requests waiting for a stream slot, apart from `cond` so that every
 	// frame answering some other stream does not wake the whole queue.
-	slot_cond: sync.Cond,
+	slot_cond: loop.Cond,
 	refs:      int,
 	closed:    bool,
 	// When a reference was last let go of, which is when a request on the
@@ -172,17 +172,17 @@ client_make :: proc(io: IO, allocator := context.allocator) -> ^Client {
 // `client_request` takes its own for the length of the call, so this is only
 // needed by code that keeps a pointer to `c` around between calls.
 client_ref :: proc(c: ^Client) {
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	c.refs += 1
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 }
 
 client_unref :: proc(c: ^Client) {
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	c.refs -= 1
 	c.released = time.tick_now()
 	last := c.refs == 0
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 	if !last {
 		return
 	}
@@ -204,8 +204,8 @@ client_stream_destroy :: proc(c: ^Client, s: ^Client_Stream) {
 // Whether the connection is known dead. Callers check this before reusing a
 // cached connection and dial a fresh one instead of reusing this one.
 client_closed :: proc(c: ^Client) -> bool {
-	sync.mutex_lock(&c.mu)
-	defer sync.mutex_unlock(&c.mu)
+	loop.lock(&c.mu)
+	defer loop.unlock(&c.mu)
 	return c.closed
 }
 
@@ -216,8 +216,8 @@ its length, and so does a caller between taking the connection and making the
 request, so a connection is only idle once all of them have let go.
 */
 client_idle_for :: proc(c: ^Client) -> (idle: time.Duration, busy: bool) {
-	sync.mutex_lock(&c.mu)
-	defer sync.mutex_unlock(&c.mu)
+	loop.lock(&c.mu)
+	defer loop.unlock(&c.mu)
 	return time.tick_since(c.released), c.refs > 1
 }
 
@@ -231,11 +231,11 @@ close this performs on its way out.
 */
 client_serve :: proc(c: ^Client) {
 	defer {
-		sync.mutex_lock(&c.mu)
+		loop.lock(&c.mu)
 		c.closed = true
-		sync.cond_broadcast(&c.cond)
-		sync.cond_broadcast(&c.slot_cond)
-		sync.mutex_unlock(&c.mu)
+		loop.cond_broadcast(&c.cond)
+		loop.cond_broadcast(&c.slot_cond)
+		loop.unlock(&c.mu)
 	}
 
 	header: [FRAME_HEADER_SIZE]u8
@@ -298,8 +298,8 @@ client_read_exact :: proc(c: ^Client, buf: []u8, starts_frame := true) -> bool {
 
 @(private)
 client_write_all :: proc(c: ^Client, buf: []u8) -> bool {
-	sync.mutex_lock(&c.mu)
-	defer sync.mutex_unlock(&c.mu)
+	loop.lock(&c.mu)
+	defer loop.unlock(&c.mu)
 	if c.closed {
 		return false
 	}
@@ -377,13 +377,13 @@ client_handle_frame :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> bool 
 			client_goaway(c, .Protocol_Error if h.stream_id == 0 else .Frame_Size_Error)
 			return false
 		}
-		sync.mutex_lock(&c.mu)
+		loop.lock(&c.mu)
 		if s, found := c.streams[h.stream_id]; found {
 			s.reset = true
 			s.refused = Error_Code(read_u32(payload)) == .Refused_Stream
-			sync.cond_broadcast(&c.cond)
+			loop.cond_broadcast(&c.cond)
 		}
-		sync.mutex_unlock(&c.mu)
+		loop.unlock(&c.mu)
 		return true
 
 	case .Priority:
@@ -412,14 +412,14 @@ client_handle_settings :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> bo
 		return false
 	}
 
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	for i := 0; i + 6 <= len(payload); i += 6 {
 		id := Setting(read_u16(payload[i:]))
 		value := read_u32(payload[i + 2:])
 		#partial switch id {
 		case .Max_Frame_Size:
 			if value < DEFAULT_MAX_FRAME || value > 16777215 {
-				sync.mutex_unlock(&c.mu)
+				loop.unlock(&c.mu)
 				client_goaway(c, .Protocol_Error)
 				return false
 			}
@@ -427,10 +427,10 @@ client_handle_settings :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> bo
 		case .Max_Concurrent_Streams:
 			c.peer_max_streams = int(value)
 			// A raised limit lets a waiting request in.
-			sync.cond_broadcast(&c.slot_cond)
+			loop.cond_broadcast(&c.slot_cond)
 		case .Initial_Window_Size:
 			if value > MAX_WINDOW {
-				sync.mutex_unlock(&c.mu)
+				loop.unlock(&c.mu)
 				client_goaway(c, .Flow_Control_Error)
 				return false
 			}
@@ -443,15 +443,15 @@ client_handle_settings :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> bo
 				s.send_window += delta
 				overflow ||= s.send_window > MAX_WINDOW
 			}
-			sync.cond_broadcast(&c.cond)
+			loop.cond_broadcast(&c.cond)
 			if overflow {
-				sync.mutex_unlock(&c.mu)
+				loop.unlock(&c.mu)
 				client_goaway(c, .Flow_Control_Error)
 				return false
 			}
 		}
 	}
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 
 	out := make([dynamic]u8, 0, FRAME_HEADER_SIZE, context.temp_allocator)
 	write_frame_header(&out, 0, .Settings, FLAG_ACK, 0)
@@ -470,7 +470,7 @@ client_handle_window_update :: proc(c: ^Client, h: Frame_Header, payload: []u8) 
 		return false
 	}
 
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	overflow := false
 	if h.stream_id == 0 {
 		c.send_window += increment
@@ -479,8 +479,8 @@ client_handle_window_update :: proc(c: ^Client, h: Frame_Header, payload: []u8) 
 		s.send_window += increment
 		overflow = s.send_window > MAX_WINDOW
 	}
-	sync.cond_broadcast(&c.cond)
-	sync.mutex_unlock(&c.mu)
+	loop.cond_broadcast(&c.cond)
+	loop.unlock(&c.mu)
 
 	if overflow {
 		client_goaway(c, .Flow_Control_Error)
@@ -502,10 +502,10 @@ client_handle_headers :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> boo
 	here ends the connection, so there is no later frame left that would need
 	the decoder still in step with the peer's encoder.
 	*/
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	_, tracked := c.streams[h.stream_id]
 	idle := !tracked && (h.stream_id >= c.next_stream_id || h.stream_id % 2 == 0)
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 	if idle {
 		client_goaway(c, .Protocol_Error)
 		return false
@@ -529,7 +529,7 @@ client_handle_headers :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> boo
 	clear(&c.header_scratch)
 	append(&c.header_scratch, ..block)
 
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	// A stream already done or reset only takes the already_ended path in
 	// `client_finish_headers` below; `end_stream` recorded here is what that
 	// path would otherwise read to decide whether to (re-)mark it done, so
@@ -537,7 +537,7 @@ client_handle_headers :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> boo
 	if s, found := c.streams[h.stream_id]; found && !s.done && !s.reset {
 		s.end_stream = h.flags & FLAG_END_STREAM != 0
 	}
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 
 	if h.flags & FLAG_END_HEADERS == 0 {
 		c.continuation_on = h.stream_id
@@ -623,7 +623,7 @@ client_finish_headers :: proc(c: ^Client, stream_id: u32) -> bool {
 		return false
 	}
 
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	s, found := c.streams[stream_id]
 	/*
 	RFC 9113 5.1: once a stream is done, the peer has reset it, or this end
@@ -661,10 +661,10 @@ client_finish_headers :: proc(c: ^Client, stream_id: u32) -> bool {
 		}
 		if s.end_stream {
 			s.done = true
-			sync.cond_broadcast(&c.cond)
+			loop.cond_broadcast(&c.cond)
 		}
 	}
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 
 	free_headers(headers, c.allocator)
 
@@ -687,7 +687,7 @@ client_handle_data :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> bool {
 		return false
 	}
 
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	s, found := c.streams[h.stream_id]
 	/*
 	RFC 9113 5.1: a stream id this end never allocated is idle, and idle only
@@ -705,7 +705,7 @@ client_handle_data :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> bool {
 	has moved that bound past it.
 	*/
 	if !found && (h.stream_id >= c.next_stream_id || h.stream_id % 2 == 0) {
-		sync.mutex_unlock(&c.mu)
+		loop.unlock(&c.mu)
 		client_goaway(c, .Protocol_Error)
 		return false
 	}
@@ -745,9 +745,9 @@ client_handle_data :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> bool {
 		}
 	}
 	if oversized {
-		sync.cond_broadcast(&c.cond)
+		loop.cond_broadcast(&c.cond)
 	}
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 
 	if oversized {
 		/*
@@ -789,15 +789,15 @@ client_handle_data :: proc(c: ^Client, h: Frame_Header, payload: []u8) -> bool {
 	by now. A response landing at the same moment the caller stops waiting for
 	it is all this needs.
 	*/
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	live, still_open := c.streams[h.stream_id]
 	if !still_open {
-		sync.mutex_unlock(&c.mu)
+		loop.unlock(&c.mu)
 		return true
 	}
 	live.done = true
-	sync.cond_broadcast(&c.cond)
-	sync.mutex_unlock(&c.mu)
+	loop.cond_broadcast(&c.cond)
+	loop.unlock(&c.mu)
 	return true
 }
 
@@ -871,7 +871,7 @@ client_request :: proc(
 	// A `Tick`, not a `Time`: this bounds waiting, and the wall clock steps.
 	deadline := time.tick_add(time.tick_now(), timeout)
 
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	/*
 	RFC 9113 5.1.2: no more open streams than the peer allows. Every query to
 	this upstream shares the one connection, so past the limit a request waits
@@ -895,18 +895,18 @@ client_request :: proc(
 		*/
 		if len(c.streams) == 0 {
 			c.closed = true
-			sync.cond_broadcast(&c.slot_cond)
+			loop.cond_broadcast(&c.slot_cond)
 			break
 		}
 		remaining := time.tick_diff(time.tick_now(), deadline)
 		if remaining <= 0 {
-			sync.mutex_unlock(&c.mu)
+			loop.unlock(&c.mu)
 			return {}, .Timeout
 		}
-		sync.cond_wait_with_timeout(&c.slot_cond, &c.mu, remaining)
+		loop.cond_wait_with_timeout(&c.slot_cond, &c.mu, remaining)
 	}
 	if c.closed {
-		sync.mutex_unlock(&c.mu)
+		loop.unlock(&c.mu)
 		return {}, .Closed
 	}
 	// RFC 9113 §5.1.1: an endpoint that has exhausted the stream id space must
@@ -920,9 +920,9 @@ client_request :: proc(
 	// 2^30 requests away, not because there is nothing to cut short.
 	if c.next_stream_id > 0x7fff_ffff {
 		c.closed = true
-		sync.cond_broadcast(&c.cond)
-		sync.cond_broadcast(&c.slot_cond)
-		sync.mutex_unlock(&c.mu)
+		loop.cond_broadcast(&c.cond)
+		loop.cond_broadcast(&c.slot_cond)
+		loop.unlock(&c.mu)
 		return {}, .Closed
 	}
 	c.refs += 1
@@ -948,7 +948,7 @@ client_request :: proc(
 	write_frame_header(&out, len(block), .Headers, FLAG_END_HEADERS | end_stream, stream_id)
 	append(&out, ..block[:])
 	sent := c.io.write(c.io.user, out[:])
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 
 	/*
 	The stream is released under the lock, not after it. The reader thread
@@ -958,7 +958,7 @@ client_request :: proc(
 	`client_unref` takes the lock itself, so it stays outside.
 	*/
 	defer {
-		sync.mutex_lock(&c.mu)
+		loop.lock(&c.mu)
 		delete_key(&c.streams, stream_id)
 		client_stream_destroy(c, s)
 		// One slot is free: wake one request waiting on the peer's stream
@@ -967,20 +967,20 @@ client_request :: proc(
 		// the slot being taken. Only a table that was at the limit can have
 		// one waiting.
 		if len(c.streams) + 1 >= c.peer_max_streams {
-			sync.cond_signal(&c.slot_cond)
+			loop.cond_signal(&c.slot_cond)
 		}
-		sync.mutex_unlock(&c.mu)
+		loop.unlock(&c.mu)
 		client_unref(c)
 	}
 
 	if !sent || (len(req.body) > 0 && !client_send_body(c, s, req.body, deadline)) {
-		sync.mutex_lock(&c.mu)
+		loop.lock(&c.mu)
 		dead := c.closed
 		reset := s.reset
 		refused := s.refused
 		oversized := s.oversized
 		status := s.status
-		sync.mutex_unlock(&c.mu)
+		loop.unlock(&c.mu)
 		switch {
 		// A response that overran while the body was still going up is the
 		// same `Too_Large` as one that overran after it; see below.
@@ -997,15 +997,15 @@ client_request :: proc(
 		}
 	}
 
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	for !s.done && !s.reset && !c.closed {
 		remaining := time.tick_diff(time.tick_now(), deadline)
 		if remaining <= 0 {
-			sync.mutex_unlock(&c.mu)
+			loop.unlock(&c.mu)
 			client_rst_stream(c, stream_id, .Cancel)
 			return {}, .Timeout
 		}
-		sync.cond_wait_with_timeout(&c.cond, &c.mu, remaining)
+		loop.cond_wait_with_timeout(&c.cond, &c.mu, remaining)
 	}
 
 	switch {
@@ -1013,20 +1013,20 @@ client_request :: proc(
 	// (RFC 9113 8.1), and the client MUST NOT discard that response.
 	case s.reset && !s.done:
 		refused, oversized, status := s.refused, s.oversized, s.status
-		sync.mutex_unlock(&c.mu)
+		loop.unlock(&c.mu)
 		if oversized {
 			return Client_Response{status = status}, .Too_Large
 		}
 		return {}, .Refused if refused else .Reset
 	case c.closed && !s.done:
-		sync.mutex_unlock(&c.mu)
+		loop.unlock(&c.mu)
 		return {}, .Closed
 	}
 
 	status := s.status
 	body := make([]u8, len(s.body), allocator)
 	copy(body, s.body[:])
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 	return Client_Response{status = status, body = body}, .None
 }
 
@@ -1040,7 +1040,7 @@ client_send_body :: proc(c: ^Client, s: ^Client_Stream, body: []u8, deadline: ti
 	for sent < len(body) {
 		remaining := len(body) - sent
 
-		sync.mutex_lock(&c.mu)
+		loop.lock(&c.mu)
 		chunk := 0
 		for {
 			/*
@@ -1067,7 +1067,7 @@ client_send_body :: proc(c: ^Client, s: ^Client_Stream, body: []u8, deadline: ti
 				// ordinary append path, on a stream this end just closed.
 				rst_needed := !s.rst_sent
 				s.rst_sent = true
-				sync.mutex_unlock(&c.mu)
+				loop.unlock(&c.mu)
 				if rst_needed {
 					client_rst_stream(c, s.id, .No_Error)
 				}
@@ -1077,7 +1077,7 @@ client_send_body :: proc(c: ^Client, s: ^Client_Stream, body: []u8, deadline: ti
 			// violation on this id with an RST_STREAM of its own - writing DATA
 			// after that is a frame on a stream we just reset.
 			if c.closed || s.reset || s.rst_sent {
-				sync.mutex_unlock(&c.mu)
+				loop.unlock(&c.mu)
 				return false
 			}
 			available := min(c.send_window, s.send_window)
@@ -1095,7 +1095,7 @@ client_send_body :: proc(c: ^Client, s: ^Client_Stream, body: []u8, deadline: ti
 				// the peer already had in flight must find this stream already
 				// reset from our side, not take the ordinary append path.
 				s.rst_sent = true
-				sync.mutex_unlock(&c.mu)
+				loop.unlock(&c.mu)
 				// Matches the response-wait timeout below: a peer that stops
 				// granting window and says nothing else is given up on the same
 				// way, and left the same courtesy RST_STREAM rather than holding
@@ -1103,9 +1103,9 @@ client_send_body :: proc(c: ^Client, s: ^Client_Stream, body: []u8, deadline: ti
 				client_rst_stream(c, s.id, .Cancel)
 				return false
 			}
-			sync.cond_wait_with_timeout(&c.cond, &c.mu, left)
+			loop.cond_wait_with_timeout(&c.cond, &c.mu, left)
 		}
-		sync.mutex_unlock(&c.mu)
+		loop.unlock(&c.mu)
 
 		last := sent + chunk >= len(body)
 		out := make([dynamic]u8, 0, chunk + FRAME_HEADER_SIZE, context.temp_allocator)

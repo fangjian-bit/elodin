@@ -679,3 +679,49 @@ test_thousands_of_parked_fibers_on_one_thread :: proc(t: ^testing.T) {
 	sync.mutex_unlock(&r.l.mu)
 	testing.expectf(t, warm <= STACK_CACHE, "%d stacks kept", warm)
 }
+
+/*
+A burst's warm stacks are kept while the loop is busy and given back once it has
+had nothing to do for `TRIM_AFTER`, down to `WARM_IDLE_KEEP`. Waited for on the
+count itself; the deadline only ends a failing run.
+*/
+@(test)
+test_an_idle_loop_gives_back_its_warm_stacks :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	N :: 40
+	Shared :: struct {
+		done:  sync.Sema,
+		count: int,
+	}
+	s: Shared
+	for _ in 0 ..< N {
+		_, _ = spawn(r.l, proc(data: rawptr) {
+			s := (^Shared)(data)
+			// Parked together, so the burst needs N stacks at once.
+			_ = sleep(10 * time.Millisecond)
+			if sync.atomic_add(&s.count, 1) == N - 1 {
+				sync.sema_post(&s.done)
+			}
+		}, &s)
+	}
+	testing.expect(t, sync.sema_wait_with_timeout(&s.done, WAIT))
+	warm :: proc(l: ^Loop) -> int {
+		sync.mutex_lock(&l.mu)
+		defer sync.mutex_unlock(&l.mu)
+		return l.warm
+	}
+	for fibers_alive(r.l) != 0 {
+		time.sleep(time.Millisecond)
+	}
+	// The premise: the burst left more than a quiet loop keeps.
+	testing.expectf(t, warm(r.l) > WARM_IDLE_KEEP, "only %d stacks were kept after a burst of %d", warm(r.l), N)
+	start := time.tick_now()
+	for warm(r.l) > WARM_IDLE_KEEP && time.tick_since(start) < 4 * TRIM_AFTER {
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expectf(t, warm(r.l) <= WARM_IDLE_KEEP, "%d stacks still warm after %v idle", warm(r.l), time.tick_since(start))
+}

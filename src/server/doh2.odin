@@ -7,7 +7,6 @@ import "core:time"
 import "elodin:dns"
 import "elodin:h2"
 import "elodin:logx"
-import "elodin:pool"
 import "elodin:tlsx"
 
 /*
@@ -241,7 +240,7 @@ h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 	thread per connection here, and a gap between the two is one all of them can
 	pass through at once.
 	*/
-	switch pool.try_submit(ctx.server.handler_pool, h2_job, job, max_pending) {
+	switch submit_query(ctx.server, h2_job, job, max_pending) {
 	case .Accepted:
 	case .Full:
 		if asked {
@@ -251,8 +250,9 @@ h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 		free(job)
 		h2_shed(ctx, hc, req, max_pending)
 	case .Stopped:
-		// Shutting down: answer inline rather than dropping the stream - on this
-		// reader thread rather than a pool worker, which is what `on_pool` says.
+		// Shutting down: answer inline rather than dropping the stream - on the
+		// connection's own fiber rather than one counted against `max_pending`,
+		// which is what `on_pool` says.
 		job.on_pool = false
 		h2_answer(job)
 	}
@@ -346,8 +346,12 @@ h2_rate_limited :: proc(ctx: ^H2_Context, hc: ^h2.Conn, req: ^h2.Request) {
 
 @(private)
 h2_job :: proc(data: rawptr) {
-	// On a pool worker the arena is ours for the length of the job.
-	defer free_all(context.temp_allocator)
+	s := (^H2_Job)(data).ctx.server
+	// The fiber's own scratch, and the query's count, both for exactly this job.
+	defer {
+		free_all(context.temp_allocator)
+		query_done(s)
+	}
 	h2_answer(data)
 }
 
@@ -382,9 +386,7 @@ h2_answer :: proc(data: rawptr) {
 	// A body waits on the client's flow-control credit, up to the write
 	// timeout, and a client that stops reading is one anybody can open many
 	// of: that wait must not hold one of the pool's running slots.
-	pool.blocking_begin()
 	h2.respond(hc, req.stream_id, resp)
-	pool.blocking_end()
 }
 
 /*

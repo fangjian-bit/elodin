@@ -6,7 +6,7 @@ import "core:sync"
 import "core:time"
 import "elodin:cache"
 import "elodin:dns"
-import "elodin:pool"
+import "elodin:loop"
 
 /*
 The refresh of an expired entry, running clear of the client that asked for it.
@@ -80,6 +80,13 @@ finish; `refresh_job` sets and clears it around that one call.
 @(private)
 @(thread_local)
 prefetching: bool
+
+// Per fiber, for the reason `register_pinned` gives.
+@(private, init)
+register_prefetching :: proc "contextless" () {
+	context = {}
+	loop.register_local(proc "contextless" () -> rawptr {return &prefetching}, size_of(prefetching))
+}
 
 // Count an answer this server gave a client, which a prefetch is not.
 @(private)
@@ -163,7 +170,7 @@ Refresh :: struct {
 	policy:     u64,
 	cache_id:   u64,
 	mu:         sync.Mutex,
-	sema:       sync.Sema,
+	sema:       loop.Sema,
 	/*
 	The waiter's, the table's and the job's. The last one to let go frees it,
 	which is how a refresh that outlives its client is cleaned up by the worker
@@ -213,13 +220,17 @@ fewer of them is the point.
 Never zero, so a single-worker pool still refreshes one name at a time rather
 than serving expired data for as long as the entry is kept.
 
-`ponytail: a flat fraction of the workers. A figure worth deriving from the
-upstream timeout and the deadline - how many refreshes one worker retires per
-second - only once somebody has a pool this starves.`
+`ponytail: a flat fraction of the queries in flight. A figure worth deriving
+from the upstream timeout and the deadline - how many refreshes one slot retires
+per second - only once somebody has a server this starves.`
 */
 @(private)
 refresh_ceiling :: proc(s: ^Server) -> int {
-	return clamp(pool.worker_count(s.handler_pool) / 4, 1, REFRESH_SLOTS)
+	limit := live(s).cfg.server.max_pending
+	if limit <= 0 {
+		return REFRESH_SLOTS
+	}
+	return clamp(limit / 4, 1, REFRESH_SLOTS)
 }
 
 /*
@@ -246,7 +257,7 @@ start_refresh :: proc(
 	prefetch := false,
 	serial: u64 = 0,
 ) -> ^Refresh {
-	if s.handler_pool == nil {
+	if !can_detach(s) {
 		return nil
 	}
 	ceiling := refresh_ceiling(s)
@@ -294,9 +305,10 @@ start_refresh :: proc(
 	s.refreshes.slots[free_slot] = r
 	sync.mutex_unlock(&s.refreshes.mu)
 
-	if pool.try_submit(s.handler_pool, refresh_job, r, live(s).cfg.server.max_pending) != .Accepted {
+	if submit_query(s, refresh_job, r, live(s).cfg.server.max_pending) != .Accepted {
 		/*
-		The backlog is full or the pool is stopping, so nothing will run this.
+		The server has as many queries in flight as it takes, or is stopping, so
+		nothing will run this.
 		The table's reference, the job's and the caller's all go here - the
 		caller is handed nil and has nothing left to release.
 		*/
@@ -401,9 +413,7 @@ refresh_take :: proc(
 	finished := r.done
 	sync.mutex_unlock(&r.mu)
 	if !finished {
-		pool.blocking_begin()
-		finished = sync.sema_wait_with_timeout(&r.sema, timeout)
-		pool.blocking_end()
+		finished = loop.sema_wait_with_timeout(&r.sema, timeout)
 	}
 	if !finished {
 		return nil, .Failed, 0, false
@@ -430,6 +440,8 @@ refresh_job :: proc(data: rawptr) {
 	may read it after the frame this was built in is gone.
 	*/
 	s := r.server
+	// Last of all, after the refresh has let go of everything it held.
+	defer query_done(s)
 	// Before the deferred block below, so it is still pinned when that runs.
 	pin_scope(s)
 	prefetching = r.prefetch
@@ -467,6 +479,8 @@ refresh_job :: proc(data: rawptr) {
 	so the reading taken from them is too.
 	*/
 	spent: int
+	// Its heavy slot, if it took one, as `handle_query` gives back its own.
+	defer dns.request_release(&spent)
 	msg, derr := dns.decode_message(r.query, context.temp_allocator, &spent)
 	if derr != .None || msg.flags.qr || len(msg.question) != 1 {
 		return
@@ -527,6 +541,6 @@ finish_refresh :: proc(r: ^Refresh) {
 	sync.mutex_lock(&r.mu)
 	r.done = true
 	sync.mutex_unlock(&r.mu)
-	sync.sema_post(&r.sema)
+	loop.sema_post(&r.sema)
 	refresh_release(r)
 }

@@ -1,6 +1,7 @@
 package dns
 
 import "core:mem"
+import "core:sync"
 
 Decode_Error :: enum u8 {
 	None,
@@ -123,6 +124,104 @@ tests.
 */
 REQUEST_DECODE_BUDGET :: 8 * 1024 * 1024
 
+/*
+What every request may take without asking, and how many may take more at once.
+
+`REQUEST_DECODE_BUDGET` is a ceiling per request, and it was safe because the
+requests were few: one per worker thread, and the workers were counted. On an
+event loop the queries in flight are counted by `server.max_pending` instead -
+thousands on a large box - and thousands of requests each allowed eight
+megabytes is a ceiling on nothing. So the budget is split where the
+amplification is.
+
+Every request may take `REQUEST_ORDINARY_DECODE` freely. Ordinary traffic lives
+well inside it: a reply read the three times the answer path reads one is a few
+kilobytes, and a chain walk's DNSKEY sets a few dozen more. A request that goes
+past it - a full-length answer built to expand, or the longest honest chain -
+takes one of `heavy` slots, process-wide, and holds it until it ends
+(`request_release`); with every slot taken, the charge that would have crossed
+is refused as the budget refuses one, and the reading fails the same way. So
+what an attacker steering answers can hold is `heavy` requests at the whole
+budget and every other request at the allowance - both flat, both counted
+against memory where they are derived (`config.derive_heavy_decodes`,
+`config.derive_max_pending`) - rather than every request at the whole budget.
+
+256 KiB, which is a fifth of the heaviest honest request measured above: that
+one takes a slot, and an ordinary query never comes near one.
+*/
+REQUEST_ORDINARY_DECODE :: 256 * 1024
+
+// Requests past `REQUEST_ORDINARY_DECODE` that may be in flight at once; zero is
+// no limit, which is every process that never sets one - the tests, the fuzz
+// targets. Set once, at startup, by `set_heavy_decodes`.
+@(private)
+heavy_slots: int
+
+// Requests holding a slot now.
+@(private)
+heavy_held: int
+
+/*
+How many requests may decode past `REQUEST_ORDINARY_DECODE` at once. Set before
+any request runs; zero lifts the limit.
+*/
+set_heavy_decodes :: proc(n: int) {
+	sync.atomic_store(&heavy_slots, max(n, 0))
+}
+
+/*
+Charge `n` bytes to a request's running total, `spent` being nil for a reading
+nobody counts. False when the request may not have them: past the whole budget,
+or crossing the ordinary allowance with no slot to be had - in which case the
+charge is not made, so the total stays at or under the allowance and still says
+truthfully that the request holds no slot.
+
+The one place a request's total moves, so the decoder and the validator's
+scratch refuse on the same byte and every slot taken is one `request_release`
+gives back.
+*/
+request_charge :: proc(spent: ^int, n: int) -> bool {
+	if spent == nil {
+		return true
+	}
+	before := spent^
+	after := before + n
+	if before <= REQUEST_ORDINARY_DECODE && after > REQUEST_ORDINARY_DECODE && !take_heavy() {
+		return false
+	}
+	spent^ = after
+	return after <= REQUEST_DECODE_BUDGET
+}
+
+/*
+The end of a request: give back its slot if it took one. Called by whatever owns
+the total, once, when nothing will read on its behalf again.
+*/
+request_release :: proc(spent: ^int) {
+	if spent != nil && spent^ > REQUEST_ORDINARY_DECODE {
+		sync.atomic_sub(&heavy_held, 1)
+	}
+}
+
+// Requests holding a heavy slot now, for the metrics endpoint.
+heavy_decodes_held :: proc() -> int {
+	return sync.atomic_load(&heavy_held)
+}
+
+@(private)
+take_heavy :: proc() -> bool {
+	limit := sync.atomic_load(&heavy_slots)
+	for {
+		held := sync.atomic_load(&heavy_held)
+		if limit > 0 && held >= limit {
+			return false
+		}
+		if _, ok := sync.atomic_compare_exchange_weak(&heavy_held, held, held + 1); ok {
+			return true
+		}
+	}
+}
+
 @(private)
 Reader :: struct {
 	msg:        []u8,
@@ -153,8 +252,8 @@ charged ahead of itself, because that one is known before it is taken.
 @(private)
 charge_name :: proc(r: ^Reader, n: int) -> Decode_Error {
 	r.name_bytes += n
-	if r.spent != nil {
-		r.spent^ += n
+	if !request_charge(r.spent, n) {
+		return .Request_Budget
 	}
 	return budget_spent(r)
 }
@@ -202,11 +301,7 @@ because names are not. What was unbounded is the number of readings; see
 */
 @(private)
 charge_bytes :: proc(r: ^Reader, n: int) -> Decode_Error {
-	if r.spent == nil {
-		return .None
-	}
-	r.spent^ += n
-	return .Request_Budget if over_request_budget(r.spent) else .None
+	return .None if request_charge(r.spent, n) else .Request_Budget
 }
 
 @(private)

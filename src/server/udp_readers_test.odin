@@ -8,7 +8,6 @@ import "core:time"
 import "elodin:config"
 import "elodin:dns"
 import "elodin:logx"
-import "elodin:pool"
 
 /*
 Several readers, one port.
@@ -95,21 +94,22 @@ machine has.
 test_every_reader_binds_the_same_port :: proc(t: ^testing.T) {
 	cfg: config.Config
 	fixture(&cfg, READERS)
-	handler_pool := pool.make_pool(2)
+	handler_pool: Test_Loop
+	start_test_loop(&handler_pool)
 	s := Server {
 		cfg          = &cfg,
-		handler_pool = handler_pool,
+		loops        = handler_pool.loops[:],
 	}
 
 	l: Listeners
 	if !start_listeners(&s, &l) {
-		pool.destroy(handler_pool)
+		stop_test_loop(&handler_pool)
 		testing.expect(t, false, "could not start the UDP listener")
 		return
 	}
 	defer {
 		stop_listeners(&l)
-		pool.destroy(handler_pool)
+		stop_test_loop(&handler_pool)
 		destroy_listeners(&l)
 	}
 
@@ -160,21 +160,22 @@ reaching the cache, the filters or an upstream, none of which are wired up here.
 test_the_kernel_spreads_datagrams_over_the_readers :: proc(t: ^testing.T) {
 	cfg: config.Config
 	fixture(&cfg, READERS)
-	handler_pool := pool.make_pool(4)
+	handler_pool: Test_Loop
+	start_test_loop(&handler_pool)
 	s := Server {
 		cfg          = &cfg,
-		handler_pool = handler_pool,
+		loops        = handler_pool.loops[:],
 	}
 
 	l: Listeners
 	if !start_listeners(&s, &l) {
-		pool.destroy(handler_pool)
+		stop_test_loop(&handler_pool)
 		testing.expect(t, false, "could not start the UDP listener")
 		return
 	}
 	defer {
 		stop_listeners(&l)
-		pool.destroy(handler_pool)
+		stop_test_loop(&handler_pool)
 		destroy_listeners(&l)
 	}
 
@@ -250,21 +251,22 @@ worked only in a plural is one nobody would notice was broken until they set
 test_one_reader_is_a_whole_listener :: proc(t: ^testing.T) {
 	cfg: config.Config
 	fixture(&cfg, 1)
-	handler_pool := pool.make_pool(2)
+	handler_pool: Test_Loop
+	start_test_loop(&handler_pool)
 	s := Server {
 		cfg          = &cfg,
-		handler_pool = handler_pool,
+		loops        = handler_pool.loops[:],
 	}
 
 	l: Listeners
 	if !start_listeners(&s, &l) {
-		pool.destroy(handler_pool)
+		stop_test_loop(&handler_pool)
 		testing.expect(t, false, "could not start the UDP listener")
 		return
 	}
 	defer {
 		stop_listeners(&l)
-		pool.destroy(handler_pool)
+		stop_test_loop(&handler_pool)
 		destroy_listeners(&l)
 	}
 
@@ -364,22 +366,23 @@ test_a_port_already_held_is_refused :: proc(t: ^testing.T) {
 	cfg: config.Config
 	fixture(&cfg, READERS)
 	cfg.listeners.udp.port = bound.port
-	handler_pool := pool.make_pool(2)
+	handler_pool: Test_Loop
+	start_test_loop(&handler_pool)
 	s := Server {
 		cfg          = &cfg,
-		handler_pool = handler_pool,
+		loops        = handler_pool.loops[:],
 	}
 
 	l: Listeners
 	if !start_listeners(&s, &l) {
 		// The port was taken between the probe and here, which is nobody's bug.
-		pool.destroy(handler_pool)
+		stop_test_loop(&handler_pool)
 		logx.infof("the free port %d was taken before the listener could bind it", bound.port)
 		return
 	}
 	defer {
 		stop_listeners(&l)
-		pool.destroy(handler_pool)
+		stop_test_loop(&handler_pool)
 		destroy_listeners(&l)
 	}
 	testing.expect_value(t, len(l.udp), READERS)
@@ -389,10 +392,11 @@ test_a_port_already_held_is_refused :: proc(t: ^testing.T) {
 	second_cfg: config.Config
 	fixture(&second_cfg, READERS)
 	second_cfg.listeners.udp.port = bound.port
-	second_pool := pool.make_pool(2)
+	second_pool: Test_Loop
+	start_test_loop(&second_pool)
 	second := Server {
 		cfg          = &second_cfg,
-		handler_pool = second_pool,
+		loops        = second_pool.loops[:],
 	}
 	second_l: Listeners
 	started := start_listeners(&second, &second_l)
@@ -400,7 +404,7 @@ test_a_port_already_held_is_refused :: proc(t: ^testing.T) {
 	// manager before it binds anything, and `stop_listeners` is what gives it
 	// back.
 	stop_listeners(&second_l)
-	pool.destroy(second_pool)
+	stop_test_loop(&second_pool)
 	destroy_listeners(&second_l)
 	testing.expect(t, !started, "a second listener joined the running one's port and took a share of its datagrams")
 }

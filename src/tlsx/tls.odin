@@ -7,8 +7,10 @@ import "core:mem"
 import "core:net"
 import "core:strings"
 import "core:sync"
+import "core:sys/linux"
 import "core:sys/posix"
 import "core:time"
+import "elodin:loop"
 
 Error :: enum u8 {
 	None,
@@ -53,7 +55,7 @@ time. `mu` is what makes it so.
 
 The lock is never held across a wait. The socket is put into non-blocking mode
 before the handshake, so a call into OpenSSL either makes progress or
-asks to be retried, and the waiting happens in `poll` with the lock released.
+asks to be retried, and the waiting happens in `wait_ready` with the lock released.
 Holding it across a blocking read instead would park every writer behind a
 reader sitting on a quiet connection, which on the DoH server is a ten-second
 wait by default - trading a rare race for a constant stall.
@@ -160,6 +162,20 @@ reason OpenSSL keeps its queue that way.
 @(private)
 @(thread_local)
 last_handshake_errno: posix.Errno
+
+/*
+Per fiber on a loop thread, where many handshakes take turns: one that fails and
+parks before its caller logs would otherwise have its errno replaced by whichever
+handshake failed next on the same thread.
+*/
+@(private, init)
+register_handshake_errno :: proc "contextless" () {
+	context = {}
+	loop.register_local(
+		proc "contextless" () -> rawptr {return &last_handshake_errno},
+		size_of(last_handshake_errno),
+	)
+}
 
 /*
 Classify a handshake that did not complete for any reason but a would-block,
@@ -702,7 +718,7 @@ per-query budgets can see it; on the client side - `client_connect`, which dials
 DoT and DoH upstreams - an upstream, or anything on the path to it, trickling its
 ServerHello holds the worker that dialled it (#346). The data phase is already
 bounded this way - see `transfer`, which takes its deadline once and waits in
-`poll` - and this is the same shape in front of it, on the socket `adopt_socket`
+`wait_ready` - and this is the same shape in front of it, on the socket `adopt_socket`
 has just made non-blocking.
 
 The deadline is the socket's receive timeout, which is the caller's figure: for
@@ -728,11 +744,11 @@ handshake_loop :: proc(conn: ^Conn, side: Handshake_Side) -> Error {
 		code := SSL_get_error(conn.ssl, ret)
 		switch code {
 		case SSL_ERROR_WANT_READ:
-			if !wait_ready(conn, {.IN}, timeout, deadline) {
+			if !wait_ready(conn, {.In}, timeout, deadline) {
 				return .Timeout
 			}
 		case SSL_ERROR_WANT_WRITE:
-			if !wait_ready(conn, {.OUT}, timeout, deadline) {
+			if !wait_ready(conn, {.Out}, timeout, deadline) {
 				return .Timeout
 			}
 		case:
@@ -748,7 +764,7 @@ server_accept :: proc(ctx: ^Context, socket: net.TCP_Socket, allocator := contex
 }
 
 /*
-Take over the socket: carry the caller's timeouts over as poll deadlines and stop
+Take over the socket: carry the caller's timeouts over as wait deadlines and stop
 blocking on it.
 
 A blocking read waits on SO_RCVTIMEO, which bounds one read and is restarted by
@@ -828,7 +844,7 @@ One transfer, with the waiting done outside the lock.
 
 The lock covers only the call into OpenSSL, which cannot block now that the
 socket is non-blocking: it either makes progress or asks to be retried once the
-socket is ready. That wait then happens in `poll` with the lock released, so a
+socket is ready. That wait then happens in `wait_ready` with the lock released, so a
 reader parked on an idle connection holds nothing a writer needs.
 */
 @(private)
@@ -857,11 +873,11 @@ transfer :: proc(conn: ^Conn, op: Op, buf: []u8, timeout: time.Duration) -> (n: 
 		}
 		switch code {
 		case SSL_ERROR_WANT_READ:
-			if !wait_ready(conn, {.IN}, timeout, deadline) {
+			if !wait_ready(conn, {.In}, timeout, deadline) {
 				return 0, .Timeout
 			}
 		case SSL_ERROR_WANT_WRITE:
-			if !wait_ready(conn, {.OUT}, timeout, deadline) {
+			if !wait_ready(conn, {.Out}, timeout, deadline) {
 				return 0, .Timeout
 			}
 		case SSL_ERROR_ZERO_RETURN:
@@ -880,6 +896,12 @@ transfer :: proc(conn: ^Conn, op: Op, buf: []u8, timeout: time.Duration) -> (n: 
 Wait for the socket, with the connection's lock released. A zero timeout waits
 indefinitely, which is what a blocking socket with no SO_RCVTIMEO did.
 
+On a loop this parks the fiber on the loop's epoll, and the loop runs other
+connections meanwhile; off one - the blocklist downloads, a test - it is `poll`.
+Either way the deadline is the one the caller took at the start of the transfer,
+so a wait woken early and found not ready resumes against what is left of it
+rather than starting over. A cancelled fiber's wait ends as a timeout does.
+
 The deadline is a `Tick` rather than a `Time` because it is a bound on waiting
 rather than a moment anyone reads off a clock: `Time` is the wall clock, and a
 backward step of it - an NTP correction on a host whose clock has drifted -
@@ -888,33 +910,11 @@ is the unbounded hold `handshake_loop` exists to end, arriving by another route.
 forward step cuts healthy waits short. The monotonic clock has neither.
 */
 @(private)
-wait_ready :: proc(conn: ^Conn, events: posix.Poll_Event, timeout: time.Duration, deadline: time.Tick) -> bool {
-	for {
-		ms: c.int = -1
-		if timeout > 0 {
-			remaining := time.tick_diff(time.tick_now(), deadline)
-			if remaining <= 0 {
-				return false
-			}
-			// Rounded up, so `poll` never gives up before the deadline: rounded
-			// down, a wait ended with a fraction of a millisecond still to run,
-			// and a caller holding a deadline of its own found budget left
-			// over and spent it on a retry that could not finish (#445).
-			ms = c.int((remaining + time.Millisecond - 1) / time.Millisecond)
-		}
-		fds := [1]posix.pollfd{{fd = posix.FD(socket_fd(conn.socket)), events = events}}
-		ret := posix.poll(raw_data(fds[:]), 1, ms)
-		if ret > 0 {
-			return true
-		}
-		if ret == 0 {
-			return false
-		}
-		if posix.errno() == .EINTR {
-			continue
-		}
+wait_ready :: proc(conn: ^Conn, events: loop.Events, timeout: time.Duration, deadline: time.Tick) -> bool {
+	if timeout > 0 && time.tick_diff(time.tick_now(), deadline) <= 0 {
 		return false
 	}
+	return loop.wait_fd(linux.Fd(socket_fd(conn.socket)), events, deadline if timeout > 0 else {}) == .Ready
 }
 
 read :: proc(conn: ^Conn, buf: []u8) -> (n: int, err: Error) {

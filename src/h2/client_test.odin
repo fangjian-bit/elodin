@@ -6,6 +6,7 @@ import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
+import "elodin:loop"
 
 /*
 Client tests run over a plain loopback TCP socket, no TLS: ALPN selection
@@ -631,9 +632,9 @@ test_client_closes_connection_once_stream_ids_are_exhausted :: proc(t: ^testing.
 		client_unref(c)
 	}
 
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	c.next_stream_id = 0x8000_0001
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 
 	_, err := client_request(
 		c,
@@ -709,9 +710,9 @@ test_client_wakes_a_pending_request_when_stream_ids_are_exhausted :: proc(t: ^te
 
 	// One id short of exhaustion: stream A's request takes the last valid id,
 	// so a second request right behind it is the one that trips the close.
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	c.next_stream_id = 0x7fff_ffff
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 
 	Waiter :: struct {
 		c:       ^Client,
@@ -2498,8 +2499,8 @@ limit_request_run :: proc(r: ^Limit_Request) {
 // How many HEADERS the client has written, and the stream id of the last.
 @(private = "file")
 limit_opened :: proc(c: ^Client, log: ^Client_Frame_Log) -> (n: int, last: u32) {
-	sync.mutex_lock(&c.mu)
-	defer sync.mutex_unlock(&c.mu)
+	loop.lock(&c.mu)
+	defer loop.unlock(&c.mu)
 	for f in log.frames {
 		if f.type == .Headers {
 			n += 1
@@ -2525,12 +2526,12 @@ limit_wait_opened :: proc(c: ^Client, log: ^Client_Frame_Log, want: int) -> (las
 // Finishes a stream as a response with END_STREAM would.
 @(private = "file")
 limit_answer :: proc(c: ^Client, id: u32) {
-	sync.mutex_lock(&c.mu)
-	defer sync.mutex_unlock(&c.mu)
+	loop.lock(&c.mu)
+	defer loop.unlock(&c.mu)
 	if s, found := c.streams[id]; found {
 		s.status = 200
 		s.done = true
-		sync.cond_broadcast(&c.cond)
+		loop.cond_broadcast(&c.cond)
 	}
 }
 
@@ -2622,11 +2623,11 @@ test_client_wait_for_a_stream_slot_ends_on_deadline_or_close :: proc(t: ^testing
 	time.sleep(100 * time.Millisecond)
 	start = time.tick_now()
 	// What client_serve does on its way out.
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	c.closed = true
-	sync.cond_broadcast(&c.cond)
-	sync.cond_broadcast(&c.slot_cond)
-	sync.mutex_unlock(&c.mu)
+	loop.cond_broadcast(&c.cond)
+	loop.cond_broadcast(&c.slot_cond)
+	loop.unlock(&c.mu)
 	thread.join(th)
 	thread.destroy(th)
 	testing.expect_value(t, r.err, Client_Error.Closed)
@@ -2690,14 +2691,14 @@ test_client_keeps_a_complete_response_reset_after_it_finished :: proc(t: ^testin
 	th := thread.create_and_start_with_poly_data(&r, limit_request_run)
 	id, ok := limit_wait_opened(c, &log, 1)
 	testing.expect(t, ok, "the request never opened a stream")
-	sync.mutex_lock(&c.mu)
+	loop.lock(&c.mu)
 	if s, found := c.streams[id]; found {
 		s.status = 200
 		s.done = true
 		s.reset = true
-		sync.cond_broadcast(&c.cond)
+		loop.cond_broadcast(&c.cond)
 	}
-	sync.mutex_unlock(&c.mu)
+	loop.unlock(&c.mu)
 	thread.join(th)
 	thread.destroy(th)
 	testing.expect_value(t, r.err, Client_Error.None)
