@@ -45,28 +45,29 @@ server:
   # ask for".
   allow_from: []
 
-  # Left to derive: 128, which a box with 3 GiB or more of memory reaches -
-  # about 6,400 cache misses a second against a 20 ms upstream, whatever the
-  # core count, with twice the usable CPUs of them running at once so cache
-  # hits keep the rate of a small pool. A 1 GiB VPS derives 42. A worker is
-  # held for a whole upstream round trip, so if you need more than the
-  # ceiling, the shape is `target_qps * upstream_rtt`: set a number here and
-  # `--check` will report it. Budget ~0.3 MB resident per worker a burst
-  # reaches, paid from its first query onward.
-  workers: 0
+  # Queries in flight, left to derive: an eighth of memory over what one query
+  # can come to hold at its worst, 320 KiB - 409 on a 1 GiB VPS, 3,276 on 8 GiB,
+  # 4,096 at most. A query waiting on an upstream holds no thread, so against a
+  # 20 ms upstream 409 in flight is 20,000 cache misses a second whatever the
+  # core count. Past it a datagram is dropped and a DoH/2 request answered 503,
+  # as `dropped=`. elodin_queries_inflight against elodin_queries_inflight_max
+  # says how close it runs; set a number here only when the drops say so, and
+  # `--check` will report it.
+  max_pending: 0
 
   # The table, and one client's share of it.
   #
-  # 2,048 concurrent TCP/DoT/DoH connections, each of which is a thread and a
-  # file descriptor - so this is also a claim about what the box will give the
+  # 2,048 concurrent TCP/DoT/DoH connections, each of which is a fiber - about
+  # 30 KB held, and the OpenSSL session on top for DoT and DoH - and a file
+  # descriptor, so this is also a claim about what the box will give the
   # process, in two limits rather than one. A connection refused because the OS
-  # would not give another thread is counted apart, as conn_failed=, and
-  # raising this figure makes that worse rather than better.
+  # would not map a stack for it is counted apart, as conn_failed=, and raising
+  # this figure makes that worse rather than better.
   #
   # The descriptor limit is the one that bites first at this figure, and it is
   # not in this file: systemd leaves the soft RLIMIT_NOFILE at 1024 unless the
   # unit says otherwise, and the shipped unit sets LimitNOFILE=8192, which this
-  # table fits inside. Copy this configuration onto a box that has neither and
+  # table and every query max_pending allows in flight fit inside. Copy this configuration onto a box that has neither and
   # elodin will say so at startup - a table it cannot accept into is a listener
   # that stops accepting, counted as accept_backoff=, rather than a table that
   # fills.
@@ -205,10 +206,10 @@ listeners:
     enabled: true
     address: "0.0.0.0"
     port: 53
-    # Left to derive - one reader thread per usable CPU, to eight - and on a
-    # public instance this is the figure under every other bound in this file.
-    # Everything a datagram costs before the rate limiter can see it happens on
-    # the thread that read it, so past what the readers drain the kernel's
+    # Left to derive - one reader, which is one event loop, per usable CPU, to
+    # eight - and on a public instance this is the figure under every other
+    # bound in this file. Everything a datagram costs before the rate limiter
+    # can see it happens on the loop that read it, so past what the readers drain the kernel's
     # receive queue overflows and the datagrams dropped there are chosen by the
     # queue rather than by any budget. Measured, one reader drains 2.3 million
     # datagrams a second and a flood of two million still cost 4% of arrivals
@@ -265,8 +266,7 @@ upstream:
   #
   # Consider `race` if you have three or more upstreams and latency matters
   # more than the extra queries: it asks all of them and takes the first
-  # answer, at the cost of one query per upstream per miss and a thread pool to
-  # run them (`upstream_workers`).
+  # answer, at the cost of one query per upstream per miss.
   strategy: failover
   timeout: 5s
   attempts: 2
@@ -340,10 +340,10 @@ dnssec:
   # work we do, as Unbound and BIND do past their own ceilings. RFC 9276 asks
   # zones for zero. A larger number is held down to 255 — see examples/elodin.yaml.
   max_nsec3_iterations: 100
-  # Chain walks that may be waiting on an upstream at once; 0 is server.workers
-  # less a reserved quarter. The reservation is what stops a client choosing
-  # names whose labels are all fresh from holding every worker on a DS lookup
-  # apiece. Watch elodin_dnssec_queries_shed_total — see examples/elodin.yaml.
+  # Chain walks that may be waiting on an upstream at once; 0 is
+  # server.max_pending less a reserved quarter. The reservation is what stops a
+  # client choosing names whose labels are all fresh from holding every query in
+  # flight on a DS lookup apiece. Watch elodin_dnssec_queries_shed_total — see examples/elodin.yaml.
   # max_chain_walks: 0
 
 cookies:

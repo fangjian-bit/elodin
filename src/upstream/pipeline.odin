@@ -29,11 +29,12 @@ their caller by ID, in whatever order they arrive - section 7 recommends
 servers answer out of order, so nothing here may assume FIFO.
 
 What reads the socket is the difference from `h2client.odin`, and it is the
-laziness this file is worth: there is no reader thread. Whichever caller finds
-nobody reading does the reading, for everyone, until its own reply turns up;
-the others wait on `cond`. A connection with nothing outstanding therefore has
-nobody blocked on it and needs no poll interval, no stopping flag and no thread
-to join - the whole of `H2_Conn`'s lifecycle problem does not arise.
+laziness this file is worth: there is no reader of its own. Whichever caller
+finds nobody reading does the reading, for everyone, until its own reply turns
+up; the others wait on `cond`, on whichever loop they are. A connection with
+nothing outstanding therefore has nobody waiting on it and needs no poll
+interval, no stopping flag and no reader to wait for - the whole of `H2_Conn`'s
+lifecycle problem does not arise.
 
 Two properties matter besides. A pooled connection found dead is retried once on
 a fresh one, which is what makes an upstream closing an idle connection
@@ -150,7 +151,7 @@ Pipe_Waiter :: struct {
 	The query as it went out, under the ID this connection gave it.
 
 	Read by whichever caller is reading the socket, which is not the caller
-	that owns these bytes and may not be on this thread's arena. Safe because
+	that owns these bytes and may not be in this fiber's scratch. Safe because
 	it is only ever reached through `Pipe_Conn.waiters` under `Pipe_Conn.mu`,
 	and a caller takes itself out of that map before it returns.
 	*/
@@ -459,7 +460,7 @@ get_pipe :: proc(
 		Unbounded, the caller that was waiting for it then starts a dial of its
 		own with the next one waiting behind that, so a burst of N callers
 		dials N times end to end and the last of them returns at N times the
-		budget it was given - holding an upstream worker for all of it, long
+		budget it was given - holding a query in flight for all of it, long
 		past the point its own caller stopped waiting. Guarding only the wait
 		would leave the same queue one dial shorter, and guarding only the
 		shared dial would still spend a connect on every caller that came out
@@ -551,13 +552,13 @@ exchange_pipelined :: proc(
 	One deadline for the whole of this, set by `exchange` and handed to every
 	stage. Waiting for somebody else's dial, dialling, asking, writing and
 retrying each starting a clock of its own would let a query cost several
-times the timeout its caller was promised - with an upstream worker held for
+times the timeout its caller was promised - with a query in flight held for
 all of it.
 
 	A `Tick` rather than a `Time`, for the reason `tlsx.wait_ready` gives: this
 	is a bound on waiting rather than a moment anyone reads off a clock, and
 	the wall clock steps. An NTP correction backwards extends every deadline in
-	flight by the size of the step - here that is workers parked past their
+	flight by the size of the step - here that is queries parked past their
 	timeout, and, through `pipe_framing_deadline`, a bound whose blast radius
 	is the shared connection rather than one query.
 	*/
@@ -720,7 +721,7 @@ pipe_take_id :: proc(c: ^Pipe_Conn) -> (id: u16, ok: bool) {
 Wait for this caller's reply, reading the socket for everyone if nobody is.
 
 The caller that finds `reading` clear takes it, reads one message off the wire,
-hands it to whichever waiter it belongs to and goes round again - so the thread
+hands it to whichever waiter it belongs to and goes round again - so the fiber
 doing the reading is always one that is waiting anyway, and a connection with
 nothing outstanding has nobody on it. Every other waiter parks on `cond` until
 its own reply lands, the connection dies, or its own deadline passes, whichever
@@ -906,8 +907,8 @@ pipe_read_one :: proc(c: ^Pipe_Conn, budget: time.Duration) -> Error {
 	}
 
 	// The connection's allocator rather than any caller's: this is read before
-	// it is known whose it is, and the waiter it goes to may be on a thread
-	// whose arena this one has no business allocating from.
+	// it is known whose it is, and the waiter it goes to may be on another loop,
+	// with scratch this one has no business allocating from.
 	msg := make([]u8, length, c.allocator)
 	if _, merr := pipe_read_full(c, msg, framing); merr != .None {
 		delete(msg, c.allocator)

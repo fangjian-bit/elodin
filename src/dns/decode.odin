@@ -110,13 +110,15 @@ A DoH response is read once more, for its `Cache-Control` (`server.doh_max_age`)
 and one this budget can no longer afford goes out with `max-age=0` rather than
 refused.
 
-Against the pool rather than against one query is where the figure is worth
-checking: `config` derives 16 to 128 workers and charges each
-`WORKER_MEMORY_BYTES` of ordinary use, so a flood holding every worker inside a
-request of this shape is 128 MB on the small box the issue was filed from, where
-the three lines above were gigabytes. Lowering this is the lever if that is
-still too much; what it costs is the headroom above, and what it must not go
-under is the answer path's three readings.
+Against the server rather than against one query is where the figure is worth
+checking, and that is what `REQUEST_ORDINARY_DECODE` and the heavy slots below are
+for: a request may hold this much only while it holds one of the few slots the
+process has, so what a flood can hold is the slots at this figure and every other
+query in flight at the ordinary allowance - on a 1 GiB box, four of its 409
+queries at this figure and the rest at the allowance, 133 MiB, about the eighth
+of memory `config.QUERY_MEMORY_SHARE` gives them. Lowering this is the lever if that is still too
+much; what it costs is the headroom above, and what it must not go under is the
+answer path's three readings.
 
 A reading passed no counter keeps `NAME_BUDGET` alone and nothing else, which is
 every caller outside a request: the fuzz target, the bootstrap resolver, the
@@ -127,12 +129,11 @@ REQUEST_DECODE_BUDGET :: 8 * 1024 * 1024
 /*
 What every request may take without asking, and how many may take more at once.
 
-`REQUEST_DECODE_BUDGET` is a ceiling per request, and it was safe because the
-requests were few: one per worker thread, and the workers were counted. On an
-event loop the queries in flight are counted by `server.max_pending` instead -
-thousands on a large box - and thousands of requests each allowed eight
-megabytes is a ceiling on nothing. So the budget is split where the
-amplification is.
+`REQUEST_DECODE_BUDGET` is a ceiling per request, and a ceiling per request is
+only a ceiling on memory when the requests are few. The queries in flight are
+counted by `server.max_pending` - thousands on a large box - and thousands of
+requests each allowed eight megabytes is a ceiling on nothing. So the budget is
+split where the amplification is.
 
 Every request may take `REQUEST_ORDINARY_DECODE` freely. Ordinary traffic lives
 well inside it: a reply read the three times the answer path reads one is a few

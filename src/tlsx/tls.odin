@@ -48,8 +48,8 @@ Context :: struct {
 /*
 One TLS session.
 
-A connection may be driven by two threads at once - HTTP/2 reads frames on the
-connection's own thread while responses are written from handler-pool workers -
+A connection may be driven by two threads at once - a shared HTTP/2 upstream is
+read on the loop that dialled it while queries on every other loop write to it -
 and OpenSSL does not allow that: one `SSL` object belongs to one thread at a
 time. `mu` is what makes it so.
 
@@ -713,10 +713,10 @@ Shake hands within one deadline, however many messages the peer splits it into.
 SO_RCVTIMEO bounds one read and is restarted by every byte that arrives, so a
 handshake run on a blocking socket has no bound at all against a peer that sends
 a byte inside every wait. On the server side that holds the connection, its
-thread and one of the server's connection slots before any of the server's
+fiber and one of the server's connection slots before any of the server's
 per-query budgets can see it; on the client side - `client_connect`, which dials
 DoT and DoH upstreams - an upstream, or anything on the path to it, trickling its
-ServerHello holds the worker that dialled it (#346). The data phase is already
+ServerHello holds the query that dialled it (#346). The data phase is already
 bounded this way - see `transfer`, which takes its deadline once and waits in
 `wait_ready` - and this is the same shape in front of it, on the socket `adopt_socket`
 has just made non-blocking.

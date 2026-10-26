@@ -318,7 +318,7 @@ The CPU allowance of the cgroup this process is in, in whole CPUs.
 Worth reading because affinity does not see it: `docker run --cpus 0.5` and
 systemd's `CPUQuota=` both leave every CPU in the mask and throttle instead, so
 without this a container limited to half a core would size itself for the host.
-Rounded up - half a CPU is still a machine that can run one worker's worth of
+Rounded up - half a CPU is still a machine that can run one loop's worth of
 work - and read from the process's own cgroup path rather than the hierarchy
 root, for the reason `cgroup_file` gives.
 */
@@ -363,7 +363,7 @@ not, so `/sys/fs/cgroup/memory/memory.limit_in_bytes` there is the root group's
 Only this process's own cgroup, not the ancestors it inherits limits from. Every
 case above puts the limit on the leaf, and reading the whole chain to catch a
 hand-built hierarchy is more machinery than a default is worth: what it would
-miss is a limit an operator can still name a worker count under.
+miss is a limit an operator can still name a loop count under.
 */
 @(private)
 cgroup_file :: proc(buf: []u8, cgroups, mount, controller, leaf: string) -> (path: string, ok: bool) {
@@ -465,7 +465,7 @@ Same reasoning as the CPU quota, and it matters more: `/proc/meminfo` inside a
 container reports the host's RAM, so a 128 MB container would otherwise size
 itself against tens of gigabytes it cannot touch. `MemoryMax=` in the systemd
 unit lands here too, which makes it a way to say how large elodin should
-consider itself without naming a worker count.
+consider itself without naming a `max_pending`.
 */
 @(private)
 cgroup_memory :: proc(cgroups: string) -> (bytes: i64, ok: bool) {

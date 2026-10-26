@@ -10,8 +10,9 @@ A multiplexed HTTP/2 client connection (RFC 9113), for talking to upstream DoH
 servers.
 
 One connection is shared by every concurrent caller: `client_request` opens a
-new stream, writes it, and blocks until that stream's response arrives, while
-a single background reader (`client_serve`, meant to run on its own thread)
+new stream, writes it, and waits until that stream's response arrives, while
+a single background reader (`client_serve`, meant to run on a fiber or thread
+of its own)
 demultiplexes frames for every open stream at once. That is the point of
 running HTTP/2 on the upstream side rather than the HTTP/1.1
 request-per-connection pool the plain client uses: concurrent DNS queries to
@@ -50,14 +51,14 @@ Client :: struct {
 	decoder:             Dynamic_Table,
 	streams:             map[u32]^Client_Stream,
 	// Scratch for a response header block spanning CONTINUATION frames. Only
-	// the reader thread touches this, so it needs no lock.
+	// the reader touches this, so it needs no lock.
 	header_scratch:      [dynamic]u8,
 	continuation_on:     u32,
 	// How many CONTINUATION frames have arrived for the block currently open.
 	continuation_frames: int,
-	// PINGs and SETTINGS answered; see Control_Budget. Reader thread only.
+	// PINGs and SETTINGS answered; see Control_Budget. Reader only.
 	control:             Control_Budget,
-	// Connection credit not yet returned; see CREDIT_BATCH. Reader thread only.
+	// Connection credit not yet returned; see CREDIT_BATCH. Reader only.
 	credit_owed:         int,
 
 	allocator: mem.Allocator,
@@ -159,7 +160,7 @@ client_make :: proc(io: IO, allocator := context.allocator) -> ^Client {
 
 	// Sent here rather than from client_serve so it happens before this
 	// procedure returns: client_serve only starts once the caller has spawned
-	// it on its own thread, by which point a concurrent client_request could
+	// it on its own fiber, by which point a concurrent client_request could
 	// otherwise have already written a HEADERS frame as the connection's first
 	// bytes, corrupting the preface.
 	if !client_send_preface(c) {
@@ -224,7 +225,7 @@ client_idle_for :: proc(c: ^Client) -> (idle: time.Duration, busy: bool) {
 /*
 Run the connection until the peer goes away or the protocol is violated.
 
-Meant to run on its own thread, started by the caller right after
+Meant to run on a fiber or thread of its own, started by the caller right after
 `client_make` (which has already sent the preface). Returns once no more
 frames will be read; callers blocked in `client_request` are released by the
 close this performs on its way out.
@@ -832,9 +833,9 @@ client_goaway :: proc(c: ^Client, code: Error_Code) {
 /*
 Send one request and wait for its response.
 
-Opens a new stream on `c`, writes it, and blocks until the response completes,
-the connection dies, or `timeout` passes. Safe to call from many threads at
-once — that concurrency is the reason this client exists rather than the
+Opens a new stream on `c`, writes it, and waits until the response completes,
+the connection dies, or `timeout` passes. Safe to call from many fibers at
+once, on any loop — that concurrency is the reason this client exists rather than the
 HTTP/1.1 request-per-connection pool.
 */
 client_request :: proc(
@@ -951,7 +952,7 @@ client_request :: proc(
 	loop.unlock(&c.mu)
 
 	/*
-	The stream is released under the lock, not after it. The reader thread
+	The stream is released under the lock, not after it. The reader
 	looks streams up while holding `c.mu` and acts on what it finds; freeing
 	one outside the lock would let this cleanup run between that lookup and
 	the use, leaving the reader writing into memory already handed back.

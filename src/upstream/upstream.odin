@@ -76,9 +76,9 @@ Protocol :: enum u8 {
 /*
 A shared HTTP/2 connection plus what owns it.
 
-`stopping` exists because closing a socket does not reliably wake a thread
-already blocked in a read on it (the same reason itest/mock.odin polls rather
-than relying on close to interrupt a loop): the reader thread's socket carries
+`stopping` exists because closing a socket does not reliably wake a reader
+already waiting in a read on it (the same reason itest/mock.odin polls rather
+than relying on close to interrupt a loop): the reader's socket carries
 a short receive timeout so it wakes on its own and can notice this flag. The
 `shutdown(2)` in `retire_h2_conn` is what normally wakes it; the flag and the
 timeout bound a reader that shutdown missed. `refs` counts the two owners,
@@ -147,8 +147,8 @@ Upstream :: struct {
 	// Queries that connection may carry at once, from
 	// `PIPELINE_MAX_OUTSTANDING`. Per upstream rather than a constant read
 	// where it is used, so a test can reach the overflow path without the
-	// hundreds of threads the shipped figure would need - and so it has
-	// somewhere to come from should it ever be derived from the worker counts.
+	// hundreds of callers the shipped figure would need, and so the server can
+	// derive it from what may be in flight (`pipeline_outstanding`).
 	max_outstanding: int,
 
 	// Whether queries to this server carry a DNS cookie. The client half is

@@ -261,8 +261,8 @@ Cache_Config :: struct {
 	the refresh to answer this client itself; lowering it serves expired data
 	sooner and more often.
 
-	The refresh is not cancelled when the timer fires. It carries on under a
-	worker of the query pool and writes whatever it gets to the cache, so the
+	The refresh is not cancelled when the timer fires. It carries on on a fiber
+	of its own and writes whatever it gets to the cache, so the
 	entry is refreshed even though this client was answered from it - which is
 	the other half of what section 5 asks for. One refresh per cache key is in
 	flight at a time, so a popular expired name does not put an upstream query
@@ -677,8 +677,8 @@ Server_Config :: struct {
 	*/
 	max_udp_response:           int,
 	rate_limit:                 Rate_Limit_Config,
-	// What the two worker counts were derived from, when they were. Not a
-	// setting: filled in at load so startup and `--check` can report it.
+	// What the derived sizes were derived from, when they were. Not a setting:
+	// filled in at load so startup and `--check` can report it.
 	sizing:                     Sizing,
 }
 
@@ -1161,8 +1161,8 @@ default_config :: proc() -> Config {
 		enabled        = true,
 		address        = "0.0.0.0",
 		port           = 53,
-		// Zero, and worked out from the machine at load, for the reason the
-		// worker counts are: one reader per usable CPU is a property of the
+		// Zero, and worked out from the machine at load, for the reason
+		// `max_pending` is: one reader per usable CPU is a property of the
 		// box rather than a number anybody wants to maintain, and a figure
 		// written here would be one on every machine that installs this.
 		readers        = 0,

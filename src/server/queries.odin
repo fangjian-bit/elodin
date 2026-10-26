@@ -77,9 +77,9 @@ queries_pending :: proc(s: ^Server) -> int {
 }
 
 /*
-Wait until every query `submit_query` started has finished, which at shutdown is
-what the drain of the worker pool was: an answer already being worked on still
-goes out, and nothing it reaches for is torn down under it.
+Wait until every query `submit_query` started has finished, so that at shutdown
+an answer already being worked on still goes out, and nothing it reaches for is
+torn down under it.
 
 Polled rather than signalled, as `conn_manager_shutdown` is: this runs once, at
 the end of the process, and the queries it waits for end on their own clocks.

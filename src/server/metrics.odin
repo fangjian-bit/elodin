@@ -26,12 +26,12 @@ none. There is no timing histogram and no per-name label for that reason: both
 would mean measuring on the path being measured.
 
 The isolation is structural rather than a promise. This listener is served
-inline on its own accept loop:
+inline on a thread of its own, off the event loops:
 
-  - It never submits to a worker pool, so a scrape cannot queue behind, or
-    ahead of, a query.
-  - It never spawns a thread per connection, so nothing reaching this port can
-    spend the budget `server.max_connections` keeps for clients.
+  - It never runs on a loop, so a scrape cannot wait behind, or delay, a query,
+    and a loop that is behind does not stop the scrape that would show it.
+  - It never starts a fiber or a thread per connection, so nothing reaching
+    this port can spend the budget `server.max_connections` keeps for clients.
   - It answers one request per connection and closes, so a scraper holding a
     connection open cannot keep the loop from the next scrape.
 
@@ -42,9 +42,8 @@ not to spend.
 
 Its own thread, and its own stop flag, rather than one more entry in `Listeners.conns`.
 Shutdown closes the DNS listeners and then waits out every client connection
-and both worker pools before this endpoint is told to stop - see `stop_metrics`
-in listeners.odin - so a scrape during that wait sees the drain in progress
-instead of a closed port.
+before this endpoint is told to stop - see `stop_metrics` in listeners.odin - so
+a scrape during that wait sees the drain in progress instead of a closed port.
 */
 
 /*
@@ -169,7 +168,7 @@ start_metrics :: proc(s: ^Server, l: ^Listeners) -> bool {
 	ctx := new(Metrics_Context)
 	ctx.server = s
 	ctx.listeners = l
-	// Not `conn_spawn`: that thread would sit in `l.conns` and be joined by
+	// Not `conn_spawn`: that would put it in `l.conns`, waited on by
 	// `conn_manager_shutdown` along with every client connection, which is
 	// exactly the wait this loop is meant to survive. See `stop_metrics`.
 	t := loop.spawn_thread(rawptr(ctx), metrics_accept_loop)
@@ -208,7 +207,7 @@ metrics_accept_loop :: proc(data: rawptr) {
 	l := ctx.listeners
 
 	// `metrics_stop` rather than `stop`: this loop outlives the DNS listeners
-	// and the pool drain that follows them. See `stop_metrics`.
+	// and the connections they leave behind. See `stop_metrics`.
 	run: Accept_Run
 	for !sync.atomic_load(&l.metrics_stop) {
 		client_socket, client, err := net.accept_tcp(l.metrics_socket)
@@ -429,7 +428,7 @@ render_metrics :: proc(s: ^Server, l: ^Listeners, allocator := context.allocator
 		&b,
 		"elodin_connections_failed_total",
 		.Counter,
-		"Connections turned away because the OS would not start a thread for one.",
+		"Connections turned away because the OS would not map a stack for one.",
 		st.conn_failed,
 	)
 	metrics.scalar(
@@ -443,7 +442,7 @@ render_metrics :: proc(s: ^Server, l: ^Listeners, allocator := context.allocator
 		&b,
 		"elodin_connections_active",
 		.Gauge,
-		"Client connections being served on a thread of their own.",
+		"Client connections being served, one fiber each.",
 		i64(active_connections(&l.conns)),
 	)
 	metrics.scalar(

@@ -259,8 +259,8 @@ DS and DNSKEY lookups one client question may provoke, in total.
 The chain depth alone does not bound the work: a response is free to carry
 records under many different owner names, each naming a different signer, and
 validating every one of them would have the resolver walk a chain apiece. That
-turns one question into hundreds of upstream queries, with a worker held for all
-of them. Real answers need a handful, so a response that needs more than this is
+turns one question into hundreds of upstream queries, with a query held in flight
+for all of them. Real answers need a handful, so a response that needs more than this is
 answered with SERVFAIL rather than chased.
 */
 MAX_LOOKUPS_PER_QUERY :: 32
@@ -789,16 +789,16 @@ the only thing that would, and there is no bound that separates the two cases: a
 customer's reverse zone can sit fifteen empty non-terminals below its provider's
 under `ip6.arpa.`, which is deeper than the walk an attacker needs. So what is
 left bounding one question is `MAX_LOOKUPS_PER_QUERY`, as before, and what would
-change it is not caching but not holding a handler thread for the walk.
+change it is not caching but not holding a query in flight for the walk.
 */
 
 /*
 Chain walks allowed upstream at once when the caller names no figure.
 
-The server derives its own from the handler pool - all of it but a reserved
-quarter, so some threads are always free to answer what needs no walk - and this
+The server derives its own from `server.max_pending` - all of it but a reserved
+quarter, so some queries are always free to answer what needs no walk - and this
 is for every other caller, the tests among them. Eight is well past what a single
-thread can want, since a walk is entered and left on one thread and never nested,
+caller can want, since a walk is entered and left on one fiber and never nested,
 so nothing sequential ever meets it.
 */
 DEFAULT_MAX_CHAIN_WALKS :: 8
@@ -2580,7 +2580,7 @@ validate_rrset :: proc(
 	would be the thing an attacker could multiply: a padded answer carrying two
 	thousand RRSIGs whose signer merely names an ancestor of the owner would buy
 	two thousand walks, thousands of acquisitions of a lock every validating
-	worker shares, and megabytes of arena, for one question.
+	query shares, and megabytes of arena, for one question.
 
 	Memoised by signer, which bounds it by the number of ancestors a name has
 	rather than by the number of records somebody wrote. Distinct signers are

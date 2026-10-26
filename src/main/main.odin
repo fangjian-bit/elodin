@@ -70,8 +70,8 @@ on_stop_signal :: proc "c" (sig: posix.Signal) {
 	/*
 	A second signal is an operator saying the first is taking too long. Put the
 	default disposition back and let this one through, so nobody is ever held
-	by a shutdown that has stopped making progress - a connection thread waiting
-	out a client timeout, most likely.
+	by a shutdown that has stopped making progress - a connection waiting out a
+	client timeout, most likely.
 
 	Both calls are on the short list of what a handler may do.
 	*/
@@ -87,7 +87,7 @@ Ask for an orderly shutdown on the signals that mean one.
 SIGTERM is what an init system sends; SIGINT is Ctrl-C. Without these the
 default disposition applies and the process is simply terminated, which means
 nothing is put away: connections are cut mid-answer, and the teardown that
-drains the worker pools before releasing what their jobs are using never runs
+drains the queries in flight before releasing what they are using never runs
 at all.
 */
 install_stop_handlers :: proc() {

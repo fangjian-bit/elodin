@@ -185,10 +185,9 @@ Hold every key that needs a restart at the value the process started with, and
 name the ones the file changed.
 
 The listeners and the metrics endpoint, because their sockets were bound before
-privileges were dropped: a port below 1024 cannot be bound again, and the worker
-threads that serve them are started once. The pool sizes and the connection
-table, because pools are not resized in place, and the DNSSEC chain-walk bounds
-derived from them would otherwise describe pools that do not exist. And the
+privileges were dropped: a port below 1024 cannot be bound again, and the event
+loops that serve them are started once. The loop count and the connection
+table, because neither is resized in place. And the
 account, because root, once given up, cannot be had back - nor, with it, the
 handover of the blocklist cache directory to that account. The certificates under
 `listeners.dot` and `listeners.doh` are still read again on every SIGHUP, from

@@ -1099,7 +1099,7 @@ resolve_query :: proc(
 
 	Two things turn on it, and both are about who owns the expired bytes. A
 	refresh does not start another one, which is what keeps `serve_stale` from
-	recursing a worker at a time; and where the upstream produces nothing, it
+	recursing a query at a time; and where the upstream produces nothing, it
 	reports that here instead of reaching for the entry and counting a client
 	answer against it - the request that started the refresh is holding those
 	bytes and serves them itself. See `refresh.odin`.
@@ -1499,7 +1499,7 @@ resolve_query :: proc(
 	upstream that is unreachable rather than answering (issue #164).
 
 	RFC 8767 section 5 asks for the other shape, and this is it: the refresh
-	runs on a worker of its own and the client waits for it with a deadline,
+	runs on a fiber of its own and the client waits for it with a deadline,
 	`cache.stale_timeout`, after which the held bytes go out and the refresh
 	carries on into the cache without it. `refresh.odin` is where the mechanism
 	is set out, including why a query that finds a refresh already running for

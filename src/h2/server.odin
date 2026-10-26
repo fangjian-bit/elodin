@@ -11,7 +11,7 @@ import "elodin:netx"
 A server-side HTTP/2 connection, scoped to what a DoH endpoint needs.
 
 Requests are delivered to a handler which may answer inline or hand the work to
-another thread and call `respond` later; the connection is reference counted so
+another fiber and call `respond` later; the connection is reference counted so
 a late responder cannot outlive it. Writes are serialised, so responses may be
 produced concurrently and interleave on the wire in any order — which is the
 point of running HTTP/2 at all, since a browser resolving a name sends its A and
@@ -29,7 +29,7 @@ Transport, so this package does not depend on the TLS layer.
 preface, a frame header, a frame payload - and is what lets the transport bound
 one of those as a whole rather than bounding each read of it. Without it a peer
 trickling a byte at a time restarts the transport's wait with every byte and is
-never given up on, which on a DoH server is a connection and a thread held for
+never given up on, which on a DoH server is a connection and its fiber held for
 nothing before any stream exists. Optional: a transport with nothing to bound
 leaves it nil.
 
@@ -89,7 +89,7 @@ this many held. Every refusal is charged to MAX_CONTROL_FRAMES_PER_SECOND:
 - Charging only on the peer's count would leave a free RST_STREAM per HEADERS
   for as long as a peer kept MAX_CONCURRENT reset queries running; this cap is
   what stops that, and a peer past it is refused on the budget like any other.
-The work behind the extra slots is bounded where it is queued, by the pool's
+The work behind the extra slots is bounded where it is started, by the server's
 max_pending, and their bytes by MAX_CONN_REQUEST.
 */
 MAX_HELD_STREAMS :: 2 * MAX_CONCURRENT
@@ -115,8 +115,8 @@ How long a response may wait for the peer to open its flow-control window.
 
 A client that advertises a zero window and then goes quiet is otherwise
 indistinguishable from a slow one, and waiting on it forever hands over a
-handler thread per stream. Long enough that a genuinely slow reader is not cut
-off, short enough that a deliberate one cannot accumulate workers.
+query in flight per stream. Long enough that a genuinely slow reader is not cut
+off, short enough that a deliberate one cannot accumulate them.
 */
 DEFAULT_WRITE_TIMEOUT :: 10 * time.Second
 // Advertised receive window. Generous, so a client streaming request bodies is
@@ -239,7 +239,7 @@ Conn :: struct {
 	write_timeout:       time.Duration,
 	// Answered control frames and stream errors; see Control_Budget.
 	control:             Control_Budget,
-	// Connection credit not yet returned; see CREDIT_BATCH. Reader thread only.
+	// Connection credit not yet returned; see CREDIT_BATCH. Reader only.
 	credit_owed:         int,
 	// Streams in `streams` marked Closed, which the peer no longer counts; see
 	// MAX_HELD_STREAMS and set_state.
@@ -302,10 +302,10 @@ stream_destroy :: proc(c: ^Conn, s: ^Stream) {
 }
 
 /*
-Block until every handler has finished, leaving only the caller's reference.
+Wait until every handler has finished, leaving only the caller's reference.
 
 Serving code calls this after `serve` returns and before dropping its own
-reference, so a handler still running on another thread cannot reach for a
+reference, so a handler still running on another fiber cannot reach for a
 transport its owner has already torn down. Handlers waiting on flow control are
 released by the close that `serve` performs on its way out, and give up on their
 own deadline in any case, so this cannot wait indefinitely on a peer that has
@@ -527,7 +527,7 @@ handle_frame :: proc(c: ^Conn, h: Frame_Header, payload: []u8) -> bool {
 Frames a peer drew out of this end, held to MAX_CONTROL_FRAMES_PER_SECOND plus
 whatever it has earned: `frames` counts the second starting at `window`, and
 `earned` is frames paid for by work this end asked for (the client's answers;
-the server earns nothing). One per connection; reader thread only.
+the server earns nothing). One per connection; reader only.
 
 `earned` is not reset with the window. A PING may trail the answer that paid
 for it by any lag, across a second boundary, and a busy pooled connection
@@ -773,7 +773,7 @@ handle_continuation :: proc(c: ^Conn, h: Frame_Header, payload: []u8) -> bool {
 
 	The size cap below is no cap against frames that carry nothing: an empty
 	CONTINUATION never advances `len(s.header_block)`, so a peer sending them
-	holds the block open and this thread reading nine-byte frames for as long as
+	holds the block open and this reader reading nine-byte frames for as long as
 	it likes. Nothing accrues, which is why the cap is generous - a legitimate
 	block is MAX_HEADER_LIST at the outside and arrives in a handful of frames,
 	so anything near this many is a peer with something else in mind.
@@ -1182,7 +1182,7 @@ Decode a completed header block and, if the request is already complete,
 dispatch it.
 
 HPACK state is per connection and order-dependent, so the block must be decoded
-here on the reader thread even when the request body has yet to arrive.
+here on the reader even when the request body has yet to arrive.
 */
 @(private)
 finish_headers :: proc(c: ^Conn, s: ^Stream) -> bool {
@@ -1697,8 +1697,8 @@ write_body :: proc(c: ^Conn, stream_id: u32, body: []u8) -> bool {
 			No credit. A WINDOW_UPDATE or a close will wake us; the deadline is
 			what handles the peer that sends neither. Its reader stays perfectly
 			healthy, so nothing else would ever mark this connection dead, and
-			the wait would keep a handler thread for as long as the peer felt
-			like holding it.
+			the wait would keep the query and its fiber for as long as the peer
+			felt like holding it.
 			*/
 			left := time.diff(time.now(), deadline)
 			if left <= 0 {
@@ -1733,7 +1733,7 @@ write_body :: proc(c: ^Conn, stream_id: u32, body: []u8) -> bool {
 /*
 Retire a stream and release it.
 
-The free happens under the lock, not after it. The reader thread looks streams
+The free happens under the lock, not after it. The reader looks streams
 up while holding `c.mu` and acts on what it finds; releasing one outside the
 lock would let this run between that lookup and the use, leaving the reader
 writing into memory that has already gone back to the allocator. Nothing here

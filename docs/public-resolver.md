@@ -88,7 +88,8 @@ land, and one that lands moves the client to TCP for good.
 ### Handshake floods
 
 `bench/results/2026-09-04-handshake-budget.md` (before and after charging
-connections) and `2026-09-03-handshake-floods.md` (the load): 32 workers dialling,
+connections) and `2026-09-03-handshake-floods.md` (the load), both taken before
+the event loops (#547), with a thread per connection: 32 workers dialling,
 completing a DoT handshake and hanging up, beside a DoT client holding one
 connection at 50 q/s in another /24.
 
@@ -122,8 +123,9 @@ full table either way.
 
 ### One-hour soak
 
-`bench/results/2026-09-03-soak-one-hour.md`, a 20,000 q/s flood held for an hour:
-74–75 MB resident, 103 threads, the cache pinned at `max_entries` after turning
+`bench/results/2026-09-03-soak-one-hour.md`, a 20,000 q/s flood held for an hour,
+taken before the event loops (#547), when a query and a connection each held a
+thread: 74–75 MB resident, 103 threads, the cache pinned at `max_entries` after turning
 over about 187 times, and the connection table lending and reclaiming a slot
 174,176 times without leaking or refusing one. Nothing measured drifts with
 uptime.
