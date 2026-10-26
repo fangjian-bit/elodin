@@ -139,10 +139,10 @@ log_file_case :: proc(r: ^Runner, upstream_port: int) {
 	trace_path := filepath.join({r.work_dir, "log-sync.strace"}, context.temp_allocator) or_else ""
 	log_path := filepath.join({r.work_dir, "log-sync.log"}, context.temp_allocator) or_else ""
 	_ = os.remove(log_path)
-	// A tracer that cannot attach here - absent, or ptrace refused - is no
-	// evidence either way.
-	if !runs_ok({"strace", "-o", "/dev/null", "true"}) {
-		skip_case(r, NAME, "strace is not installed or cannot trace here")
+	// A tracer that cannot attach here - absent, ptrace refused, or older than
+	// 6.6 and so without --kill-on-exit - is no evidence either way.
+	if !runs_ok({"strace", "--kill-on-exit", "-o", "/dev/null", "true"}) {
+		skip_case(r, NAME, "strace 6.6 or later is not installed or cannot trace here")
 		return
 	}
 
@@ -166,23 +166,27 @@ blocking: {{ enabled: false }}
 		r,
 		config,
 		udp_port,
-		wrap = {"strace", "-f", "-qq", "-e", "trace=fsync,fdatasync,sync_file_range", "-o", trace_path},
+		// --kill-on-exit: `stop_server` kills strace, and a tracee outlives its
+		// tracer otherwise, still bound to the port.
+		wrap = {"strace", "--kill-on-exit", "-f", "-qq", "-e", "trace=fsync,fdatasync,sync_file_range", "-o", trace_path},
 	)
 	if !ok {
-		skip_case(r, NAME, "server did not start")
+		// start_server_raw has failed the run already.
 		return
 	}
 	defer stop_server(&srv)
+	// strace is known to work here, so a server that does not answer under it
+	// is a failure, not a skip.
 	if !wait_ready(&srv, 10 * time.Second) {
-		skip_case(r, NAME, "server did not answer under strace")
+		fail(r, "server on port %d never became ready under strace; log:\n%s", udp_port, read_log(&srv))
 		return
 	}
 
 	for i in 0 ..< QUERIES {
-		_ = query_udp(udp_port, build_query(fmt.tprintf("sync-%d.example.", i), u16(dns.Type.A)))
+		_ = query_udp(udp_port, build_query(fmt.tprintf("sync-%d.example.", i), u16(dns.Type.A)), context.temp_allocator)
 	}
 	// strace's own child is the server. Stopped through it rather than through
-	// strace, which leaves a tracee running when it is killed itself.
+	// strace, so the server takes its own shutdown path while traced.
 	children, _ := os.read_entire_file(
 		fmt.tprintf("/proc/%d/task/%d/children", srv.process.pid, srv.process.pid),
 		context.temp_allocator,
@@ -198,8 +202,11 @@ blocking: {{ enabled: false }}
 	{
 		logged, _ := os.read_entire_file(log_path, context.temp_allocator)
 		trace, _ := os.read_entire_file(trace_path, context.temp_allocator)
-		// The premise: the lines went to the file, so a sync per line would
-		// have been taken.
+		// The premise: the server ran to its end under the tracer, which saw
+		// the SIGTERM, and the lines went to the file, so a sync per line would
+		// have been taken and seen.
+		check(r, !srv.running, "the server did not exit on SIGTERM under strace; log:\n%s", read_log(&srv))
+		check(r, strings.contains(string(trace), "SIGTERM"), "strace did not trace the server:\n%s", string(trace))
 		check(
 			r,
 			strings.count(string(logged), "msg=query") >= QUERIES,
