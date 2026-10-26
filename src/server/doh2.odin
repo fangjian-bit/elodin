@@ -5,6 +5,7 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import "elodin:dns"
+import "elodin:dnssec"
 import "elodin:h2"
 import "elodin:logx"
 import "elodin:tlsx"
@@ -239,8 +240,9 @@ h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 		h2_shed(ctx, hc, req, max_pending)
 	case .Stopped:
 		// Shutting down: answer inline, on the connection's own fiber, rather than
-		// dropping the stream.
-		h2_answer(job)
+		// dropping the stream - a query `max_pending` does not count, so it is
+		// one of the connections' for the chain-walk bound too.
+		h2_answer(job, .Connection)
 	}
 }
 
@@ -349,7 +351,7 @@ connection's reader fiber, whose scratch holds the frame `h2.serve` is still
 working through — resetting it there would free the ground from under it.
 */
 @(private)
-h2_answer :: proc(data: rawptr) {
+h2_answer :: proc(data: rawptr, pool := dnssec.Walk_Pool.Shared) {
 	job := cast(^H2_Job)data
 	hc := job.h2conn
 	req := job.req
@@ -365,7 +367,7 @@ h2_answer :: proc(data: rawptr) {
 		free(job)
 	}
 
-	resp, ok := build_h2_response(ctx, req)
+	resp, ok := build_h2_response(ctx, req, pool)
 	if !ok {
 		return
 	}
@@ -457,6 +459,8 @@ h2_query_message :: proc(
 build_h2_response :: proc(
 	ctx: ^H2_Context,
 	req: ^h2.Request,
+	// Which queries this one is among; see `handle_query`'s `pool`.
+	pool := dnssec.Walk_Pool.Shared,
 ) -> (
 	resp: h2.Response,
 	ok: bool,
@@ -486,6 +490,7 @@ build_h2_response :: proc(
 		.DoH,
 		ctx.client,
 		context.temp_allocator,
+		pool = pool,
 		max_age = &max_age,
 	)
 	if !handled || len(answer) == 0 {

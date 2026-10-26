@@ -229,7 +229,10 @@ get_h2_conn :: proc(
 }
 
 /*
-Wrap a negotiated stream in an h2 client and start its reader. Under `u.mu`.
+Wrap a negotiated stream in an h2 client and start its reader: `make_h2_conn`,
+then `start_h2_reader`, the caller holding `u.mu`. For a caller off a loop - the
+tests - where a preface write that waits blocks only its own thread; a fiber
+builds the connection before taking the lock instead (see `get_h2_conn`).
 
 The reader is a fiber of the loop the dialling query runs on - a thread of its
 own off a loop, which is the tests - and it reads every stream's frames for as
@@ -239,11 +242,6 @@ counted in `u.h2_readers` until its last touch of `u`, which `teardown_h2` waits
 for.
 */
 @(private)
-/*
-Both halves at once, the caller holding `u.mu`: for a caller off a loop - the
-tests - where a preface write that waits blocks only its own thread. A fiber
-builds the connection before taking the lock instead; see `get_h2_conn`.
-*/
 start_h2_conn :: proc(u: ^Upstream, stream: Stream) -> ^H2_Conn {
 	hc := make_h2_conn(u, stream)
 	start_h2_reader(u, hc)
@@ -251,6 +249,7 @@ start_h2_conn :: proc(u: ^Upstream, stream: Stream) -> ^H2_Conn {
 }
 
 // The connection and its client, which writes the preface. Not under `u.mu`.
+@(private)
 make_h2_conn :: proc(u: ^Upstream, stream: Stream) -> ^H2_Conn {
 	hc := new(H2_Conn, u.allocator)
 	hc.stream = stream
@@ -262,6 +261,7 @@ make_h2_conn :: proc(u: ^Upstream, stream: Stream) -> ^H2_Conn {
 }
 
 // Under `u.mu`, which `h2_readers` is counted under. Starting a fiber does not park.
+@(private)
 start_h2_reader :: proc(u: ^Upstream, hc: ^H2_Conn) {
 	u.h2_readers += 1
 	if !loop.go(h2_reader, hc) {

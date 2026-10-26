@@ -53,9 +53,10 @@ The floor is what keeps a small machine answering while one upstream is slow:
 sixty-four queries waiting on a stalled upstream still leave room for others.
 
 The ceiling is descriptors as much as memory. Each query in flight may hold an
-upstream socket - one per member under `strategy: race` - and 4096 of them with
-the default connection table fit inside the `LimitNOFILE=8192` the shipped unit
-sets. 4096 against a 20 ms upstream is two hundred thousand cache misses a
+upstream socket - and under `strategy: race` its racers one more each, up to the
+same figure again (`Descriptor_Demand.racers`) - and 4096 of each with the
+default connection table fit inside the `LimitNOFILE=16384` the shipped unit sets.
+4096 against a 20 ms upstream is two hundred thousand cache misses a
 second, more than eight loops answer.
 
 Where memory could not be measured, `DEFAULT_MAX_PENDING`: a figure small

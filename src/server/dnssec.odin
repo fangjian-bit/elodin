@@ -260,9 +260,9 @@ zone it has cached, and it cannot call a zone unsigned without one either - so
 while every slot is held, what still answers is what the caches hold, and every
 other cold name is SERVFAIL, signed or not.
 
-One bound for every transport: a query on a connection's fiber holds what one on
-a fiber of its own does. See `Validator.walks`, `dnssec.max_chain_walks` and
-issue #356.
+A query answered on a connection's fiber is held to `dnssec.max_connection_walks`
+instead, a share of `server.max_connections`, so a flood on one population cannot
+spend the other's walks. See `Validator.walks`, `dnssec.Walk_Pool` and issue #356.
 */
 @(private)
 validator_query :: proc(

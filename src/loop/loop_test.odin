@@ -639,6 +639,40 @@ test_a_registered_thread_local_follows_its_fiber :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.b.value, 0)
 }
 
+/*
+A job starts with its registered thread-locals at zero, whatever the last job on
+the same fiber left in them: the fiber struct and its stack are reused, and a
+value carried over - a pinned generation, say - would belong to somebody else's
+query.
+*/
+@(test)
+test_a_reused_fiber_starts_with_its_thread_locals_at_zero :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	first, second: Probe
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		p := (^Probe)(data)
+		test_local = 33
+		// Parked once, so the value is saved with the fiber, as a real job's is.
+		_ = sleep(time.Millisecond)
+		p.value = test_local
+		sync.sema_post(&p.done)
+	}, &first)
+	testing.expect(t, sync.sema_wait_with_timeout(&first.done, WAIT))
+	testing.expect_value(t, first.value, 33)
+	// The finished fiber is the warm one the next spawn takes.
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		p := (^Probe)(data)
+		p.value = test_local
+		sync.sema_post(&p.done)
+	}, &second)
+	testing.expect(t, sync.sema_wait_with_timeout(&second.done, WAIT))
+	testing.expect_value(t, second.value, 0)
+}
+
 // --- Scale ---------------------------------------------------------------------
 
 /*

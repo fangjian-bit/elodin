@@ -124,6 +124,9 @@ make_loop :: proc(allocator := context.allocator) -> (l: ^Loop, ok: bool) {
 	l.wakefd = wakefd
 	l.clock = time.tick_now
 	l.ctx = context
+	// Everything the loop allocates, and every fiber's own allocations, come from
+	// the allocator it was made with; `destroy` frees through it.
+	l.ctx.allocator = allocator
 	l.fds = make(map[linux.Fd]^Fd_Watch, allocator)
 	ev := linux.EPoll_Event {
 		events = {.IN},
@@ -150,6 +153,7 @@ destroy :: proc(l: ^Loop) {
 	if l == nil {
 		return
 	}
+	context.allocator = l.ctx.allocator
 	for list in ([]^Fiber{l.free_warm, l.free_cold}) {
 		for f := list; f != nil; {
 			next := f.next
@@ -385,6 +389,9 @@ spawn :: proc(l: ^Loop, fn: proc(data: rawptr), data: rawptr) -> (h: Handle, ok:
 	f.data = data
 	f.cancelled = false
 	f.wake_reason = .None
+	// A job starts from the zero values a fresh thread would, whatever the last
+	// job on this fiber left in its registered thread-locals.
+	f.locals = {}
 	/*
 	Published in this order, the state last: from another thread this struct is
 	being reused while the loop may be acting on a `cancel` posted for its last

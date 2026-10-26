@@ -165,6 +165,14 @@ Pipe_Waiter :: struct {
 	// that runs out of time can tell "my reply never came" from "nothing at
 	// all is coming". See `pipe_wait`.
 	seen:  u64,
+	/*
+	What this waiter parks on, under `Pipe_Conn.mu`: signalled when its reply
+	lands, when the reading is handed to it, and when the connection dies. One
+	per waiter rather than one for the connection, so a reply wakes the caller
+	it is for and not every caller on the connection - thousands of them, at
+	`pipeline_outstanding` - each to take the lock and park again.
+	*/
+	cond:  loop.Cond,
 }
 
 @(private)
@@ -175,7 +183,6 @@ Pipe_Conn :: struct {
 	wmu:       loop.Mutex,
 
 	mu:        sync.Mutex,
-	cond:      loop.Cond,
 	waiters:   map[u16]^Pipe_Waiter,
 	// Whether some caller is reading the socket on everyone's behalf.
 	reading:   bool,
@@ -375,6 +382,27 @@ pipe_kill :: proc(c: ^Pipe_Conn, err: Error) {
 	}
 	c.dead = true
 	c.err = err
+	// Everybody on it, which is the one time everybody is woken.
+	for _, w in c.waiters {
+		loop.cond_signal(&w.cond)
+	}
+}
+
+/*
+Under `c.mu`, once a reader has stopped reading: wake one other waiter, so that
+if the reader goes - its reply came, or its time ran out - somebody takes the
+reading on. One rather than all: the rest are not needed for it, and whoever is
+woken and finds the reading taken again parks again. `self` is skipped; it is
+awake.
+*/
+@(private)
+pipe_hand_on :: proc(c: ^Pipe_Conn, self: ^Pipe_Waiter) {
+	for _, w in c.waiters {
+		if w != self {
+			loop.cond_signal(&w.cond)
+			return
+		}
+	}
 }
 
 /*
@@ -724,13 +752,24 @@ The caller that finds `reading` clear takes it, reads one message off the wire,
 hands it to whichever waiter it belongs to and goes round again - so the fiber
 doing the reading is always one that is waiting anyway, and a connection with
 nothing outstanding has nobody on it. Every other waiter parks on `cond` until
-its own reply lands, the connection dies, or its own deadline passes, whichever
-comes first.
+its own reply lands, the reading is handed to it, the connection dies, or its own
+deadline passes, whichever comes first - each on a cond of its own (see
+`Pipe_Waiter.cond`).
 */
 @(private)
 pipe_wait :: proc(c: ^Pipe_Conn, w: ^Pipe_Waiter, id: u16, deadline: time.Tick) -> Error {
 	sync.mutex_lock(&c.mu)
 	defer sync.mutex_unlock(&c.mu)
+	/*
+	Whatever this caller leaves with - its reply, its deadline, a cancel - the
+	reading must not leave with it: a caller handed the reading that goes instead
+	would leave the rest parked until their own deadlines, with their replies
+	sitting unread on the socket. Under the lock, which the defer above releases
+	after this.
+	*/
+	defer if !c.reading && !c.dead {
+		pipe_hand_on(c, w)
+	}
 	for {
 		// Ahead of `dead`: a reply that landed before the connection went is
 		// still this caller's answer.
@@ -799,14 +838,23 @@ pipe_wait :: proc(c: ^Pipe_Conn, w: ^Pipe_Waiter, id: u16, deadline: time.Tick) 
 				c.silent += 1
 				if c.silent >= PIPE_SILENT_TIMEOUTS {
 					pipe_kill(c, .Timeout)
-					loop.cond_broadcast(&c.cond)
 				}
 			}
 			return .Timeout
 		}
 		if c.reading {
-			loop.cond_wait_with_timeout(&c.cond, &c.mu, remaining)
+			loop.cond_wait_with_timeout(&w.cond, &c.mu, remaining)
 			continue
+		}
+		/*
+		A cancelled fiber - the server stopping - has every read end at once as a
+		timeout, which consumes nothing, so taking the reading would go round here
+		without ever parking until the deadline, holding its loop the whole time.
+		It gives up instead, as a caller out of time does.
+		*/
+		if loop.cancelled() {
+			delete_key(&c.waiters, id)
+			return .Timeout
 		}
 
 		c.reading = true
@@ -820,7 +868,7 @@ pipe_wait :: proc(c: ^Pipe_Conn, w: ^Pipe_Waiter, id: u16, deadline: time.Tick) 
 		if rerr != .None && rerr != .Timeout {
 			pipe_kill(c, rerr)
 		}
-		loop.cond_broadcast(&c.cond)
+		pipe_hand_on(c, w)
 	}
 }
 
@@ -947,10 +995,12 @@ pipe_deliver :: proc(c: ^Pipe_Conn, msg: []u8) {
 		delete(msg, c.allocator)
 		w.err = .Bad_Response
 		w.done = true
+		loop.cond_signal(&w.cond)
 		return
 	}
 	w.reply = msg
 	w.done = true
+	loop.cond_signal(&w.cond)
 }
 
 /*
@@ -1087,7 +1137,6 @@ pipe_write :: proc(c: ^Pipe_Conn, query: []u8, deadline: time.Tick) -> Error {
 		*/
 		sync.mutex_lock(&c.mu)
 		pipe_kill(c, err)
-		loop.cond_broadcast(&c.cond)
 		sync.mutex_unlock(&c.mu)
 	}
 	return err
