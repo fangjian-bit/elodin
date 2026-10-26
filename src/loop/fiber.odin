@@ -149,13 +149,16 @@ Stack :: struct {
 	size: uint,
 }
 
-when ODIN_ARCH == .arm64 {
-	foreign import fiber_switch "switch_arm64.S"
-} else when ODIN_ARCH == .amd64 {
-	foreign import fiber_switch "switch_amd64.S"
-} else {
+/*
+Assembled by `mise run prepare` from `switch_arm64.S` or `switch_amd64.S`, with
+the C compiler that links every build anyway, rather than imported as source:
+for x86-64 source Odin runs `nasm`, which reads Intel syntax and is one more
+thing every machine building elodin would have to install.
+*/
+when ODIN_ARCH != .arm64 && ODIN_ARCH != .amd64 {
 	#panic("elodin's fiber switch is written for arm64 and amd64 only")
 }
+foreign import fiber_switch "../../bin/elodin_switch.o"
 
 @(private, default_calling_convention = "c")
 foreign fiber_switch {

@@ -54,7 +54,12 @@ ELODIN_TEST_DEFINES = "-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true"
 # linker is asked to write there.
 [tasks.prepare]
 hide = true
-run = "mkdir -p bin"
+# The fiber switch, as an object src/loop/fiber.odin links; see the comment there.
+run = """
+mkdir -p bin
+arch=$(uname -m); case $arch in aarch64) arch=arm64;; x86_64) arch=amd64;; esac
+clang -c src/loop/switch_$arch.S -o bin/elodin_switch.o
+"""
 
 [tasks.build]
 description = "Build elodin (debug symbols, unoptimised)"
