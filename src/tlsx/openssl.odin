@@ -12,6 +12,7 @@ foreign import libcrypto "system:crypto"
 SSL_CTX :: struct {}
 SSL :: struct {}
 SSL_METHOD :: struct {}
+SSL_SESSION :: struct {}
 
 // Only what signing an Apple configuration profile needs: the certificate and
 // key a server context already holds, and the CMS structure they are wrapped in.
@@ -40,6 +41,8 @@ SSL_ERROR_WANT_WRITE :: 3
 SSL_ERROR_SYSCALL :: 5
 SSL_ERROR_ZERO_RETURN :: 6
 
+SSL_CTRL_SESS_NUMBER :: 20
+SSL_CTRL_SET_SESS_CACHE_MODE :: 44
 SSL_CTRL_SET_TLSEXT_HOSTNAME :: 55
 SSL_CTRL_GET_CHAIN_CERTS :: 115
 SSL_CTRL_SET_MIN_PROTO_VERSION :: 123
@@ -65,6 +68,11 @@ CMS_BINARY :: 0x80
 CMS_NOSMIMECAP :: 0x200
 
 TLSEXT_NAMETYPE_host_name :: 0
+
+SSL_OP_NO_TICKET :: u64(1) << 14
+
+SSL_SESS_CACHE_OFF :: 0x0000
+SSL_SESS_CACHE_SERVER :: 0x0002
 
 TLS1_2_VERSION :: 0x0303
 TLS1_3_VERSION :: 0x0304
@@ -138,6 +146,14 @@ foreign libssl {
 	SSL_get_verify_result :: proc(ssl: ^SSL) -> c.long ---
 	SSL_get0_alpn_selected :: proc(ssl: ^SSL, data: ^[^]u8, len: ^c.uint) ---
 
+	// Client-side resumption and refusing tickets. Nothing here resumes an
+	// upstream; the tests use these to drive clients against `server_context`.
+	SSL_get1_session :: proc(ssl: ^SSL) -> ^SSL_SESSION ---
+	SSL_set_session :: proc(ssl: ^SSL, session: ^SSL_SESSION) -> c.int ---
+	SSL_SESSION_free :: proc(session: ^SSL_SESSION) ---
+	SSL_session_reused :: proc(ssl: ^SSL) -> c.int ---
+	SSL_CTX_set_options :: proc(ctx: ^SSL_CTX, op: u64) -> u64 ---
+
 	// The material a context was loaded with, borrowed back out of it. `get0`
 	// means no reference is taken; see `signer_of`.
 	SSL_CTX_get0_certificate :: proc(ctx: ^SSL_CTX) -> ^X509 ---
@@ -189,6 +205,16 @@ ssl_ctx_set_min_proto_version :: proc(ctx: ^SSL_CTX, version: c.long) -> bool {
 
 ssl_ctx_set_max_proto_version :: proc(ctx: ^SSL_CTX, version: c.long) -> bool {
 	return SSL_CTX_ctrl(ctx, SSL_CTRL_SET_MAX_PROTO_VERSION, version, nil) == 1
+}
+
+// OpenSSL answers with the previous mode, and setting one cannot fail.
+ssl_ctx_set_session_cache_mode :: proc(ctx: ^SSL_CTX, mode: c.long) {
+	SSL_CTX_ctrl(ctx, SSL_CTRL_SET_SESS_CACHE_MODE, mode, nil)
+}
+
+// How many sessions the context's internal cache holds right now.
+ssl_ctx_sess_number :: proc(ctx: ^SSL_CTX) -> int {
+	return int(SSL_CTX_ctrl(ctx, SSL_CTRL_SESS_NUMBER, 0, nil))
 }
 
 ssl_set_tlsext_host_name :: proc(ssl: ^SSL, name: cstring) -> bool {

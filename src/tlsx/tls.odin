@@ -458,6 +458,21 @@ server_context :: proc(
 		SSL_CTX_free(ptr)
 		return nil, .Context_Failed
 	}
+	/*
+	No server-side session cache: resumption is by ticket alone.
+
+	OpenSSL's server default caches the session of every TLS 1.2 full handshake
+	that issues no ticket, up to 20,480 per context at a few hundred bytes each.
+	A client that refuses tickets fills it without ever coming back: ~10 MB per
+	context that a public endpoint lets the internet allocate, twice over with
+	DoT and DoH, and kept by a context a reload displaced until its last
+	connection closes. RFC 7858 §3.4 asks DNS servers to "enable fast TLS session
+	resumption [RFC5077]", which is resumption without server-side state, and §5
+	gives avoiding per-client state as its point. Tickets are untouched by this
+	mode, so TLS 1.2 and 1.3 clients holding one still resume; a client that
+	refuses them does a full handshake each time.
+	*/
+	ssl_ctx_set_session_cache_mode(ptr, SSL_SESS_CACHE_OFF)
 
 	ccert := strings.clone_to_cstring(cert_file, context.temp_allocator)
 	ckey := strings.clone_to_cstring(key_file, context.temp_allocator)

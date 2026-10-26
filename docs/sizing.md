@@ -108,6 +108,12 @@ magnitude more CPU than answering on an open connection. ECDSA P-256 costs about
 half what RSA-2048 does; `mise run certs` generates ECDSA, and production should
 use it too.
 
+Clients resume by session ticket (RFC 5077, and TLS 1.3's own), which costs the
+server nothing per client. elodin keeps no server-side session cache: OpenSSL's
+default would hold up to 20,480 sessions per DoT and DoH listener, about 10 MB
+each, for clients that refuse tickets. Those clients do a full handshake every
+time instead.
+
 Opening a connection is charged to the prefix's [rate
 limit](rate-limiting.md#rate-limiting), per /24 and /64 only, and a refusal is
 cheap rather than free. **If you expose DoT or DoH to the internet, rate-limit new
