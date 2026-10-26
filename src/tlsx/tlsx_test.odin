@@ -1267,10 +1267,18 @@ resume_client :: proc(
 	_ = net.set_option(sock, .Receive_Timeout, 10 * time.Second)
 	_ = net.set_option(sock, .Send_Timeout, 10 * time.Second)
 	ssl := SSL_new(cctx)
+	if ssl == nil {
+		testing.expect(t, false, "SSL_new failed")
+		return
+	}
 	defer SSL_free(ssl)
-	SSL_set_fd(ssl, socket_fd(sock))
-	if offer != nil {
-		SSL_set_session(ssl, offer)
+	if SSL_set_fd(ssl, socket_fd(sock)) != 1 {
+		testing.expect(t, false, "SSL_set_fd failed")
+		return
+	}
+	if offer != nil && SSL_set_session(ssl, offer) != 1 {
+		testing.expect(t, false, "the client cannot offer the first session")
+		return
 	}
 	if SSL_connect(ssl) != 1 {
 		testing.expect(t, false, "the client handshake failed")
@@ -1380,12 +1388,19 @@ resumes.
 OpenSSL's server default caches the session of every TLS 1.2 full handshake that
 gets no ticket, 20,480 to a context, so a client refusing tickets and never
 coming back fills it. RFC 7858 §3.4 asks for resumption by RFC 5077 tickets,
-which needs none of that state. The control is the ticketless client against
-OpenSSL's default mode: its session is cached and resumed, so the count of
-nothing above is the mode and not a handshake that never reached the cache.
+which needs none of that state. The ticketed cases pin resumption; they would
+cache nothing even in OpenSSL's default mode. The ticketless case pins the mode,
+and its control is the same client against OpenSSL's default: its session is
+cached and resumed, so the count of nothing is the mode and not a handshake that
+never reached the cache.
 */
 @(test)
 test_the_server_keeps_no_session_and_clients_still_resume :: proc(t: ^testing.T) {
+	// A client that gives up mid-handshake leaves the server's alert going to a
+	// closed socket, which raises SIGPIPE. The server ignores it (see main.odin);
+	// the test runner does not.
+	posix.sigignore(.SIGPIPE)
+
 	for version in ([]c.long{TLS1_2_VERSION, TLS1_3_VERSION}) {
 		cached, reused, ok := resume_twice(t, version, false, nil)
 		if !ok {
