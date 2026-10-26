@@ -1,5 +1,6 @@
 package tlsx
 
+import "core:c"
 import "core:mem"
 import "core:net"
 import "core:os"
@@ -1206,4 +1207,218 @@ test_a_drip_fed_server_hello_is_given_up_on_at_the_deadline :: proc(t: ^testing.
 		DRIP_INTERVAL,
 		time.Duration(BUDGET),
 	)
+}
+
+// ---------------------------------------------------------------------------
+// Session cache
+// ---------------------------------------------------------------------------
+
+@(private = "file")
+Resume_Server :: struct {
+	listener: net.TCP_Socket,
+	ctx:      ^Context,
+	rounds:   int,
+}
+
+// Accepts `rounds` connections one after another and writes a byte on each: a
+// TLS 1.3 server sends its tickets after the handshake, so the client has them
+// once it has read past them.
+@(private = "file")
+resume_server_worker :: proc(r: ^Resume_Server) {
+	for _ in 0 ..< r.rounds {
+		sock, _, err := net.accept_tcp(r.listener)
+		if err != nil {
+			return
+		}
+		_ = net.set_option(sock, .Receive_Timeout, 10 * time.Second)
+		_ = net.set_option(sock, .Send_Timeout, 10 * time.Second)
+		conn, terr := server_accept(r.ctx, sock)
+		if terr != .None {
+			net.close(sock)
+			continue
+		}
+		b := [1]u8{'x'}
+		_, _ = write(conn, b[:])
+		// Until the client's close_notify, so this end's close cannot race it.
+		_, _ = read(conn, b[:])
+		close(conn)
+	}
+}
+
+// One client handshake, offering `offer` for resumption when it is not nil.
+// Driven on the raw `SSL` because `client_connect` never resumes.
+@(private = "file")
+resume_client :: proc(
+	t: ^testing.T,
+	cctx: ^SSL_CTX,
+	ep: net.Endpoint,
+	offer: ^SSL_SESSION,
+) -> (
+	reused: bool,
+	got: ^SSL_SESSION,
+	ok: bool,
+) {
+	sock, derr := net.dial_tcp_from_endpoint(ep)
+	if derr != nil {
+		testing.expectf(t, false, "cannot dial: %v", derr)
+		return
+	}
+	defer net.close(sock)
+	_ = net.set_option(sock, .Receive_Timeout, 10 * time.Second)
+	_ = net.set_option(sock, .Send_Timeout, 10 * time.Second)
+	ssl := SSL_new(cctx)
+	if ssl == nil {
+		testing.expect(t, false, "SSL_new failed")
+		return
+	}
+	defer SSL_free(ssl)
+	if SSL_set_fd(ssl, socket_fd(sock)) != 1 {
+		testing.expect(t, false, "SSL_set_fd failed")
+		return
+	}
+	if offer != nil && SSL_set_session(ssl, offer) != 1 {
+		testing.expect(t, false, "the client cannot offer the first session")
+		return
+	}
+	if SSL_connect(ssl) != 1 {
+		testing.expect(t, false, "the client handshake failed")
+		return
+	}
+	b: [1]u8
+	if SSL_read(ssl, &b, 1) != 1 {
+		testing.expect(t, false, "the server's byte never arrived")
+		return
+	}
+	reused = SSL_session_reused(ssl) == 1
+	got = SSL_get1_session(ssl)
+	SSL_shutdown(ssl)
+	return reused, got, true
+}
+
+// Two handshakes against one `server_context` at `version`, the second offering
+// the first's session. A `no_ticket` client refuses tickets, as `openssl s_client
+// -no_ticket` does. `mode`, when not nil, replaces the context's cache mode.
+@(private = "file")
+resume_twice :: proc(
+	t: ^testing.T,
+	version: c.long,
+	no_ticket: bool,
+	mode: Maybe(c.long),
+) -> (
+	cached: int,
+	reused: bool,
+	ok: bool,
+) {
+	cert, key, have := ensure_certs()
+	if !have {
+		testing.expect(t, false, "no certificate available and openssl could not make one")
+		return
+	}
+	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if lerr != nil {
+		testing.expectf(t, false, "cannot listen on loopback: %v", lerr)
+		return
+	}
+	defer net.close(listener)
+	ep, berr := net.bound_endpoint(listener)
+	if berr != nil {
+		testing.expectf(t, false, "cannot read the bound port: %v", berr)
+		return
+	}
+
+	sctx, serr := server_context(cert, key)
+	if serr != .None {
+		testing.expectf(t, false, "server_context: %v", serr)
+		return
+	}
+	defer context_destroy(sctx)
+	if m, set := mode.?; set {
+		ssl_ctx_set_session_cache_mode(sctx.ptr, m)
+	}
+	cctx, cerr := client_context(false)
+	if cerr != .None {
+		testing.expectf(t, false, "client_context: %v", cerr)
+		return
+	}
+	defer context_destroy(cctx)
+	if !ssl_ctx_set_max_proto_version(cctx.ptr, version) {
+		testing.expectf(t, false, "cannot cap the client at %x", version)
+		return
+	}
+	if no_ticket {
+		SSL_CTX_set_options(cctx.ptr, SSL_OP_NO_TICKET)
+	}
+
+	srv := Resume_Server {
+		listener = listener,
+		ctx      = sctx,
+		rounds   = 2,
+	}
+	worker := thread.create_and_start_with_poly_data(&srv, resume_server_worker)
+	defer thread.destroy(worker)
+
+	_, first, fok := resume_client(t, cctx.ptr, ep, nil)
+	defer if first != nil {
+		SSL_SESSION_free(first)
+	}
+	second: ^SSL_SESSION
+	if fok {
+		reused, second, ok = resume_client(t, cctx.ptr, ep, first)
+	}
+	if second != nil {
+		SSL_SESSION_free(second)
+	}
+	if !ok {
+		// Unblock whichever accepts the worker still waits in. A connection it
+		// never reaches sits in the backlog until the listener closes.
+		for _ in 0 ..< srv.rounds {
+			if s, err := net.dial_tcp_from_endpoint(ep); err == nil {
+				net.close(s)
+			}
+		}
+	}
+	thread.join(worker)
+	return ssl_ctx_sess_number(sctx.ptr), reused, ok
+}
+
+/*
+A server context keeps no session of its own, and a client with a ticket still
+resumes.
+
+OpenSSL's server default caches the session of every TLS 1.2 full handshake that
+gets no ticket, 20,480 to a context, so a client refusing tickets and never
+coming back fills it. RFC 7858 §3.4 asks for resumption by RFC 5077 tickets,
+which needs none of that state. The ticketed cases pin resumption; they would
+cache nothing even in OpenSSL's default mode. The ticketless case pins the mode,
+and its control is the same client against OpenSSL's default: its session is
+cached and resumed, so the count of nothing is the mode and not a handshake that
+never reached the cache.
+*/
+@(test)
+test_the_server_keeps_no_session_and_clients_still_resume :: proc(t: ^testing.T) {
+	// A client that gives up mid-handshake leaves the server's alert going to a
+	// closed socket, which raises SIGPIPE. The server ignores it (see main.odin);
+	// the test runner does not.
+	posix.sigignore(.SIGPIPE)
+
+	for version in ([]c.long{TLS1_2_VERSION, TLS1_3_VERSION}) {
+		cached, reused, ok := resume_twice(t, version, false, nil)
+		if !ok {
+			return
+		}
+		testing.expectf(t, cached == 0, "%x: the server context cached %d sessions", version, cached)
+		testing.expectf(t, reused, "%x: the client did not resume its ticket", version)
+	}
+
+	cached, reused, ok := resume_twice(t, TLS1_2_VERSION, true, nil)
+	if !ok {
+		return
+	}
+	testing.expectf(t, cached == 0, "a ticketless TLS 1.2 client left %d sessions in the server context", cached)
+	testing.expect(t, !reused, "a ticketless TLS 1.2 client resumed against a context with no cache")
+
+	control, creused, cok := resume_twice(t, TLS1_2_VERSION, true, c.long(SSL_SESS_CACHE_SERVER))
+	if cok {
+		testing.expectf(t, control > 0 && creused, "OpenSSL's default cache mode held %d sessions, resumed: %v", control, creused)
+	}
 }
