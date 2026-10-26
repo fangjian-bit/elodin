@@ -105,9 +105,6 @@ end_case :: proc(r: ^Runner) {
 			fmt.print(".")
 		}
 	}
-	// stdout is block-buffered when redirected, and a stuck case would show
-	// nothing at all without this.
-	os.flush(os.stdout)
 	free_all(context.temp_allocator)
 }
 
@@ -296,6 +293,9 @@ start_server_raw :: proc(
 	// The whole environment the process starts with, `KEY=VALUE` each; nil is
 	// this process's own.
 	env: []string = nil,
+	// A command the binary runs under, such as a tracer; `process` is then that
+	// command's, not the binary's.
+	wrap: []string = nil,
 ) -> (
 	srv: Server,
 	ok: bool,
@@ -316,7 +316,8 @@ start_server_raw :: proc(
 	}
 	defer os.close(log_file)
 
-	command := make([dynamic]string, 0, 4, context.temp_allocator)
+	command := make([dynamic]string, 0, 4 + len(wrap), context.temp_allocator)
+	append(&command, ..wrap)
 	append(&command, r.binary, "--config", cfg_path)
 	if !allow_fetch {
 		append(&command, "--no-fetch")

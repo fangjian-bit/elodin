@@ -1,8 +1,12 @@
 package itest
 
 import "core:fmt"
+import "core:os"
+import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
+import "core:sys/posix"
+import "core:time"
 import "elodin:dns"
 
 /*
@@ -115,6 +119,108 @@ run_logfmt_cases :: proc(r: ^Runner) {
 		}
 	}
 	end_case(r)
+
+	log_file_case(r, upstream_port)
+}
+
+/*
+A line in `log.file` is one write(2) and nothing else.
+
+The descriptor is unbuffered, so the write is already what `tail` and a shipper
+read. A sync on top of it is a disk flush per answered query, taken under the
+log's lock. Only a tracer can see one, so the server runs under strace with
+`log.file` set and `log.queries` on, and the case counts the syncs.
+*/
+@(private = "file")
+log_file_case :: proc(r: ^Runner, upstream_port: int) {
+	NAME :: "logfmt: a line in log.file is a write, not a write and a sync"
+	QUERIES :: 20
+
+	trace_path := filepath.join({r.work_dir, "log-sync.strace"}, context.temp_allocator) or_else ""
+	log_path := filepath.join({r.work_dir, "log-sync.log"}, context.temp_allocator) or_else ""
+	_ = os.remove(log_path)
+	// A tracer that cannot attach here - absent, or ptrace refused - is no
+	// evidence either way.
+	if !runs_ok({"strace", "-o", "/dev/null", "true"}) {
+		skip_case(r, NAME, "strace is not installed or cannot trace here")
+		return
+	}
+
+	udp_port := next_port(r)
+	config := fmt.tprintf(
+		`log: {{ level: info, queries: true, file: %q }}
+listeners:
+  udp: {{ enabled: true, address: "127.0.0.1", port: %d }}
+  tcp: {{ enabled: false }}
+upstream:
+  timeout: 3s
+  servers: ["127.0.0.1:%d"]
+cache: {{ enabled: false }}
+blocking: {{ enabled: false }}
+`,
+		log_path,
+		udp_port,
+		upstream_port,
+	)
+	srv, ok := start_server_raw(
+		r,
+		config,
+		udp_port,
+		wrap = {"strace", "-f", "-qq", "-e", "trace=fsync,fdatasync,sync_file_range", "-o", trace_path},
+	)
+	if !ok {
+		skip_case(r, NAME, "server did not start")
+		return
+	}
+	defer stop_server(&srv)
+	if !wait_ready(&srv, 10 * time.Second) {
+		skip_case(r, NAME, "server did not answer under strace")
+		return
+	}
+
+	for i in 0 ..< QUERIES {
+		_ = query_udp(udp_port, build_query(fmt.tprintf("sync-%d.example.", i), u16(dns.Type.A)))
+	}
+	// strace's own child is the server. Stopped through it rather than through
+	// strace, which leaves a tracee running when it is killed itself.
+	children, _ := os.read_entire_file(
+		fmt.tprintf("/proc/%d/task/%d/children", srv.process.pid, srv.process.pid),
+		context.temp_allocator,
+	)
+	if child, cok := strconv.parse_int(strings.trim_space(string(children)), 10); cok {
+		posix.kill(posix.pid_t(child), .SIGTERM)
+	}
+	if state, werr := os.process_wait(srv.process, GRACEFUL_STOP_TIMEOUT); werr == nil && state.exited {
+		srv.running = false
+	}
+
+	start_case(r, NAME)
+	{
+		logged, _ := os.read_entire_file(log_path, context.temp_allocator)
+		trace, _ := os.read_entire_file(trace_path, context.temp_allocator)
+		// The premise: the lines went to the file, so a sync per line would
+		// have been taken.
+		check(
+			r,
+			strings.count(string(logged), "msg=query") >= QUERIES,
+			"log.file has fewer than %d query lines:\n%s",
+			QUERIES,
+			string(logged),
+		)
+		syncs := strings.count(string(trace), "sync")
+		check(r, syncs == 0, "%d syncs for %d query lines:\n%s", syncs, QUERIES, string(trace))
+	}
+	end_case(r)
+}
+
+@(private = "file")
+runs_ok :: proc(command: []string) -> bool {
+	process, perr := os.process_start(os.Process_Desc{command = command})
+	if perr != nil {
+		return false
+	}
+	state, werr := os.process_wait(process)
+	return werr == nil && state.exit_code == 0
 }
 
 /*

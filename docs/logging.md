@@ -18,6 +18,11 @@ sentence in `msg`. In Loki, `| logfmt` is all it takes:
 {job="elodin"} | logfmt | msg="stats" | unwrap cache_hits
 ```
 
+With `log.file` set, each line is one write to the file, not followed by a
+sync: `tail` and a shipper see it at once and a killed process loses none of
+it, but a host crash or power loss can lose the last lines the kernel had not
+yet written to disk.
+
 ## Stats
 
 Every five minutes, `msg=stats` carries, in order: `queries`, `blocked`,
