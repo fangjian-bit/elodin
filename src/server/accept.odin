@@ -481,12 +481,13 @@ sets are disjoint, so the total is their sum:
   - the connection table, which is a promise to hold that many client sockets;
   - the idle upstream pools, `upstream.max_idle` per configured server, routes
     included;
-  - the worker pools, since a worker doing an upstream exchange holds a socket
-    for the round trip and a socket checked out of a pool is not in it - so
-    `workers` and `upstream_workers` are in-flight upstream sockets that the
-    pools do not account for;
+  - the queries in flight, `server.max_pending`, since a query doing an upstream
+    exchange holds a socket for the round trip and a socket checked out of a
+    pool is not in it. One each is the ordinary case; a racing group holds one
+    per member for a moment, and the reserve covers what that adds;
   - the UDP readers, one socket each, which is up to `MAX_UDP_READERS` (64) when
-    an operator sets the figure rather than the eight a derivation will pick.
+    an operator sets the figure rather than the eight a derivation will pick;
+  - the event loops, an epoll descriptor and an eventfd each.
 
 `DESCRIPTOR_RESERVE` covers what is left - four listening sockets, the metrics
 socket, the log, and the list files while they load - and is a cushion rather
@@ -498,20 +499,22 @@ A ceiling on what the configuration permits, not a reading of what is held.
 DESCRIPTOR_RESERVE :: 32
 
 Descriptor_Demand :: struct {
-	max_connections:  int,
-	pooled_upstream:  int,
-	workers:          int,
-	upstream_workers: int,
-	udp_readers:      int,
+	max_connections: int,
+	pooled_upstream: int,
+	// `server.max_pending`: each query in flight may hold an upstream socket.
+	in_flight:       int,
+	udp_readers:     int,
+	// One epoll descriptor and one eventfd per loop.
+	loops:           int,
 }
 
 descriptors_wanted :: proc(d: Descriptor_Demand) -> int {
 	return(
 		d.max_connections +
 		d.pooled_upstream +
-		d.workers +
-		d.upstream_workers +
+		d.in_flight +
 		d.udp_readers +
+		2 * d.loops +
 		DESCRIPTOR_RESERVE \
 	)
 }
@@ -553,13 +556,14 @@ descriptor_limit_line :: proc(soft_limit: int, d: Descriptor_Demand) -> (line: s
 		table = "no connection table, every stream listener being off"
 	}
 	return fmt.tprintf(
-		"descriptors: the limit is %d, short of the %d this configuration can want (%s, %d pooled upstream connections, %d worker threads that hold one for a round trip, %d UDP readers, and %d over). Past it, accepts fail and the listeners wait between attempts, counted as accept_backoff=; raise RLIMIT_NOFILE (LimitNOFILE= in the systemd unit)",
+		"descriptors: the limit is %d, short of the %d this configuration can want (%s, %d pooled upstream connections, %d queries in flight that may hold one each for a round trip, %d UDP readers, %d for the event loops, and %d over). Past it, accepts fail and the listeners wait between attempts, counted as accept_backoff=; raise RLIMIT_NOFILE (LimitNOFILE= in the systemd unit)",
 		soft_limit,
 		wanted,
 		table,
 		d.pooled_upstream,
-		d.workers + d.upstream_workers,
+		d.in_flight,
 		d.udp_readers,
+		2 * d.loops,
 		DESCRIPTOR_RESERVE,
 	), true
 }

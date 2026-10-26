@@ -322,14 +322,17 @@ test_a_reload_holds_restart_only_keys_at_their_starting_values :: proc(t: ^testi
 	}
 	defer close_fixture(f)
 	old := f.s.gens.current
-	workers := old.cfg.server.workers
+	table := old.cfg.server.max_connections
 
 	// Only keys that need a restart: nothing a reload can apply has changed.
 	out := reload_from(
 		t,
 		f,
 		strings.concatenate(
-			{swap(BASE, "server:\n", fmt.tprintf("server:\n  workers: %d\n", workers + 3)), "listeners: { udp: { port: 5301 } }\n"},
+			{
+				swap(BASE, "server:\n", fmt.tprintf("server:\n  max_connections: %d\n", table + 3)),
+				"listeners: { udp: { port: 5301 } }\n",
+			},
 			context.temp_allocator,
 		),
 	)
@@ -351,12 +354,12 @@ test_a_reload_holds_restart_only_keys_at_their_starting_values :: proc(t: ^testi
 	testing.expect(t, out.applied, "the reloadable part was not applied")
 	testing.expect_value(t, f.s.gens.current.cfg.listeners.udp.port, 5300)
 	testing.expect_value(t, f.s.gens.current.cfg.blocking.cache_dir, old.cfg.blocking.cache_dir)
-	testing.expect_value(t, f.s.gens.current.cfg.server.workers, workers)
+	testing.expect_value(t, f.s.gens.current.cfg.server.max_connections, table)
 	testing.expect_value(t, len(f.s.gens.current.cfg.rewrites), 1)
 }
 
-// A pool size the starting file wrote and the new one leaves to be derived is
-// held, and so is said: only one derived both times goes unnamed.
+// A share the starting file wrote and the new one leaves to be derived is held,
+// and so is said: only one derived both times goes unnamed.
 @(test)
 test_a_restart_only_key_dropped_from_the_file_is_named :: proc(t: ^testing.T) {
 	arena: virtual.Arena
@@ -372,28 +375,30 @@ test_a_restart_only_key_dropped_from_the_file_is_named :: proc(t: ^testing.T) {
 		}
 		return cfg
 	}
-	boot := load(t, swap(BASE, "server:\n", "server:\n  workers: 4\n  upstream_workers: 97\n"), &arena)
-	cfg := load(t, swap(BASE, "server:\n", "server:\n  workers: 4\n"), &arena)
-	testing.expect(t, cfg.server.upstream_workers != 97, "the derived figure is the written one, so nothing is tested")
+	boot := load(t, swap(BASE, "server:\n", "server:\n  max_connections: 512\n  max_connections_per_prefix: 97\n"), &arena)
+	cfg := load(t, swap(BASE, "server:\n", "server:\n  max_connections: 512\n"), &arena)
+	testing.expect(t, cfg.server.max_connections_per_prefix != 97, "the derived figure is the written one, so nothing is tested")
 
 	named := keep_restart_only(&boot, &cfg, context.temp_allocator)
-	testing.expectf(t, len(named) == 1 && named[0] == "server.upstream_workers", "named %v", named)
-	testing.expect_value(t, cfg.server.upstream_workers, 97)
+	testing.expectf(t, len(named) == 1 && named[0] == "server.max_connections_per_prefix", "named %v", named)
+	testing.expect_value(t, cfg.server.max_connections_per_prefix, 97)
 
-	// Derived both times, and from the same `workers`: nothing to say.
-	first := load(t, swap(BASE, "server:\n", "server:\n  workers: 4\n"), &arena)
-	again := load(t, swap(BASE, "server:\n", "server:\n  workers: 4\n"), &arena)
+	// Derived both times, and from the same `max_connections`: nothing to say.
+	first := load(t, swap(BASE, "server:\n", "server:\n  max_connections: 512\n"), &arena)
+	again := load(t, swap(BASE, "server:\n", "server:\n  max_connections: 512\n"), &arena)
 	testing.expect_value(t, len(keep_restart_only(&first, &again, context.temp_allocator)), 0)
 
-	// A pool the file never sized, derived again from a machine whose memory
-	// limit moved since startup: held, and nothing the operator wrote to name.
+	// A bound the file never sized, loaded on a machine whose memory limit moved
+	// since startup: derived again from the starting machine, and nothing the
+	// operator wrote to name.
 	derived := load(t, BASE, &arena)
 	moved := load(t, BASE, &arena)
-	testing.expect(t, derived.server.sizing.derived_workers, "BASE names a worker count, so nothing is tested")
-	moved.server.workers = derived.server.workers + 1
+	testing.expect(t, derived.server.sizing.derived_max_pending, "BASE names max_pending, so nothing is tested")
+	moved.server.sizing.machine.memory = derived.server.sizing.machine.memory * 2 + config.QUERY_MEMORY_BYTES * 64
+	moved.server.max_pending = config.derive_max_pending(moved.server.sizing.machine)
 	named = keep_restart_only(&derived, &moved, context.temp_allocator)
-	testing.expectf(t, len(named) == 0, "named %v for a file that names no worker count", named)
-	testing.expect_value(t, moved.server.workers, derived.server.workers)
+	testing.expectf(t, len(named) == 0, "named %v for a file that names no max_pending", named)
+	testing.expect_value(t, moved.server.max_pending, derived.server.max_pending)
 
 	// UDP readers left to the machine, which shows more CPUs than at startup:
 	// held, and nothing the operator wrote to name.

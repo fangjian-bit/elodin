@@ -239,7 +239,7 @@ test_a_shed_walk_still_answers_from_the_cache :: proc(t: ^testing.T) {
 	// whether or not a slot was taken, so it reads false either way. One is the
 	// slot this test is holding itself, and a walk that took a second would
 	// have made it two.
-	testing.expect_value(t, sync.atomic_load(&v.walks[.Shared]), 1)
+	testing.expect_value(t, sync.atomic_load(&v.walks), 1)
 	free_all(context.temp_allocator)
 }
 
@@ -477,72 +477,34 @@ test_a_shed_walk_cannot_tell_an_unsigned_zone_from_a_signed_one :: proc(t: ^test
 }
 
 /*
-A question on a connection thread is held to its own bound, not the pool's.
+Every question is held to the one bound, whatever transport asked it.
 
-TCP, DoT and HTTP/1.1 answer on the connection's thread rather than on a worker
-of the shared pool, and there are `max_connections` of those against a handful of
-workers - so one number for both is wrong whichever way it is set. Sized for the
-pool it refuses ordinary stream traffic on a resolver nobody is attacking; left
-off altogether it leaves #356 open on every transport but two, since a flood that
-holds every connection thread in a walk is a flood that gets no new connection
-accepted.
-
-So the two are counted apart. Here the shared allowance is spent down to nothing
-and a question on a connection thread walks anyway.
+A query answered on a connection's fiber holds what one on a fiber of its own
+does - memory, and a place among the queries in flight - so with the allowance
+spent, a walk for either is turned away the same way (#547). Before the event
+loop a connection's thread was counted apart; there is no such thread any more.
 */
 @(test)
-test_a_connection_thread_is_held_to_its_own_bound :: proc(t: ^testing.T) {
+test_every_question_is_held_to_the_one_bound :: proc(t: ^testing.T) {
 	up := Slow_Upstream{}
-	v := make_validator(slow_query, &up, Options{max_chain_walks = 1, max_connection_walks = 1})
+	v := make_validator(slow_query, &up, Options{max_chain_walks = 1})
 	defer destroy_validator(v)
 
 	now := time.unix(FIXTURE_TIME, 0)
-	// Every slot of the shared pool taken, which is the flood at its worst.
-	testing.expect(t, take_walk_slot(v, .Shared), "the one shared slot should be free")
-	defer drop_walk_slot(v, .Shared)
-
-	// Released before the walk, so this reaches the upstream rather than
-	// waiting on it: what is on trial is whether it was allowed to ask at all.
+	// The one slot taken, which is the flood at its worst.
+	testing.expect(t, take_walk_slot(v), "the one slot should be free")
+	defer drop_walk_slot(v)
 	sync.atomic_store(&up.released, true)
 
 	budget := query_budget(v)
-	budget.pool = .Connection
 	status, _, _ := zone_trust(v, &budget, "a.b.c.example.com.", now, context.temp_allocator)
 
 	sync.mutex_lock(&up.mu)
 	calls := up.calls
 	sync.mutex_unlock(&up.mu)
-	testing.expectf(t, calls > 0, "the walk should have reached the upstream, it asked %d times", calls)
-	// The upstream answered nothing, so the walk ends there - but it ends
-	// having asked, and saying so, rather than refused for want of a slot.
-	testing.expect_value(t, status, Status.Indeterminate)
-	testing.expect(t, walk_reason(&budget) != WALKS_IN_FLIGHT, "the shared bound should not have refused it")
-	free_all(context.temp_allocator)
-}
-
-/*
-And it is a bound, not an exemption: spend that one too and the walk stops.
-*/
-@(test)
-test_a_connection_thread_is_still_bounded :: proc(t: ^testing.T) {
-	up := Slow_Upstream{}
-	v := make_validator(slow_query, &up, Options{max_chain_walks = 1, max_connection_walks = 1})
-	defer destroy_validator(v)
-
-	now := time.unix(FIXTURE_TIME, 0)
-	testing.expect(t, take_walk_slot(v, .Connection), "the one connection slot should be free")
-	defer drop_walk_slot(v, .Connection)
-
-	budget := query_budget(v)
-	budget.pool = .Connection
-	status, _, _ := zone_trust(v, &budget, "a.b.c.example.com.", now, context.temp_allocator)
+	testing.expectf(t, calls == 0, "a walk past the bound reached the upstream %d times", calls)
 	testing.expect_value(t, status, Status.Indeterminate)
 	testing.expect_value(t, walk_reason(&budget), WALKS_IN_FLIGHT)
-
-	sync.mutex_lock(&up.mu)
-	calls := up.calls
-	sync.mutex_unlock(&up.mu)
-	testing.expectf(t, calls == 0, "a shed walk should reach no upstream, it reached one %d times", calls)
 	free_all(context.temp_allocator)
 }
 

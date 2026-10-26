@@ -130,14 +130,23 @@ run = [
 # Every directory under src/fuzz but the shared harness is a target, so a new one
 # is built and replayed without being listed here. FUZZ_TARGETS narrows it to the
 # ones named, which is how the nightly job builds only the target it runs.
+#
+# The fiber switch is assembly that `odin build` assembles and links itself, which
+# it does not do for IR, so it is assembled here and linked into every target -
+# the ones that never reach `elodin:loop` leave it unreferenced. And every
+# allocation a fiber's scratch makes is a heap allocation of its own
+# (`ELODIN_SCRATCH_DEBUG`), so ASan sees a pointer kept past a reset as the
+# use-after-free it is rather than a read of reused arena.
 [tasks.fuzz]
 description = "Build every fuzz target in src/fuzz (bin/fuzz_*)"
 depends = ["prepare"]
 run = """
+arch=$(uname -m); case $arch in aarch64) arch=arm64;; x86_64) arch=amd64;; esac
 for t in ${FUZZ_TARGETS:-$(cd src/fuzz && ls -d */ | tr -d / | grep -vx harness)}; do
   rm -rf bin/fuzz-ir/$t && mkdir -p bin/fuzz-ir/$t &&
-  odin build src/fuzz/$t -collection:elodin=src -build-mode:llvm-ir -no-entry-point -sanitize:address -out:bin/fuzz-ir/$t/ $ELODIN_DEFINES &&
-  clang -fsanitize=fuzzer,address -Wno-override-module -Wno-backend-plugin -o bin/fuzz_$t bin/fuzz-ir/$t/*.ll $ELODIN_LDFLAGS -lssl -lcrypto -lm || exit 1
+  odin build src/fuzz/$t -collection:elodin=src -build-mode:llvm-ir -no-entry-point -sanitize:address -define:ELODIN_SCRATCH_DEBUG=true -out:bin/fuzz-ir/$t/ $ELODIN_DEFINES &&
+  clang -c src/loop/switch_$arch.S -o bin/fuzz-ir/$t/switch.o &&
+  clang -fsanitize=fuzzer,address -Wno-override-module -Wno-backend-plugin -o bin/fuzz_$t bin/fuzz-ir/$t/*.ll bin/fuzz-ir/$t/switch.o $ELODIN_LDFLAGS -lssl -lcrypto -lm || exit 1
 done
 """
 

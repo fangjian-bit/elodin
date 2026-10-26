@@ -726,12 +726,12 @@ serve_doh_request :: proc(
 		return send_http_error(conn, "doh", 429, "too many requests", req.keep_alive)
 	}
 
-	// HTTP/1.1, which answers on the connection's own thread rather than on a
-	// worker of the shared pool. Cache-Control mirrors the smallest TTL, or a
+	// HTTP/1.1, which answers on the connection's own fiber rather than on one
+	// of its own. Cache-Control mirrors the smallest TTL, or a
 	// denial's SOA figure, so intermediaries expire the answer at the same time
 	// the DNS data does - the bounded TTL, see `doh_max_age`.
 	max_age: u32
-	response, _, ok := handle_query(s, query, .DoH, client, context.temp_allocator, shared_worker = false, max_age = &max_age)
+	response, _, ok := handle_query(s, query, .DoH, client, context.temp_allocator, max_age = &max_age)
 	if !ok || len(response) == 0 {
 		return send_http_error(conn, "doh", 500, "no response", req.keep_alive)
 	}

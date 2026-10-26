@@ -72,11 +72,9 @@ Options :: struct {
 	// Iteration counts above this make a proof unusable rather than trusted.
 	max_nsec3_iterations: int,
 	max_cached_zones:     int,
-	// Chain walks that may be making upstream lookups at once, on a worker of
-	// the caller's shared pool and on a thread belonging to one connection.
-	// Zero takes `DEFAULT_MAX_CHAIN_WALKS`; see `Validator.walks`.
+	// Chain walks that may be making upstream lookups at once. Zero takes
+	// `DEFAULT_MAX_CHAIN_WALKS`; see `Validator.walks`.
 	max_chain_walks:      int,
-	max_connection_walks: int,
 }
 
 Validator :: struct {
@@ -146,8 +144,8 @@ Validator :: struct {
 	/*
 	Chain walks in flight, and the most there may be at once.
 
-	The walk is the one thing in this package that blocks the thread already
-	answering a client, and it blocks it once per label: `zone_trust` descends
+	The walk is the one thing in this package that waits on the network on behalf
+	of the query it is validating, and it waits once per label: `zone_trust` descends
 	from the apex asking a DS per step, and each step that misses both caches is
 	an upstream round trip taken in line. Thirty-two of those - what
 	`MAX_LOOKUPS_PER_QUERY` allows - is the better part of a second at ordinary
@@ -156,16 +154,15 @@ Validator :: struct {
 	`MAX_CACHED_NON_CUTS` says why, and #356 is the record of it.
 
 	So the bound is not on the walk but on how many of them may be doing this at
-	once - two bounds, one per `Walk_Pool`, because the shared handler pool and
-	the connection threads are sized by different things and a flood on one must
-	not spend the other's allowance. Past `max_chain_walks`, a walk runs against the caches alone and
+	once - one bound for every transport, since a walk on a connection's fiber
+	holds what one on a query's own does. Past `max_chain_walks`, a walk runs against the caches alone and
 	answers `Indeterminate` where it would have gone upstream - the same verdict,
 	and the same extended error, that an upstream which did not answer produces.
-	The flood then holds a fixed number of threads *for a walk* rather than all of
-	them: the rest may still be busy with their own upstream forward, which
-	nothing here bounds, but they come back in a round trip instead of in the
-	thirty a walk may take. That is the difference between a resolver degraded
-	and one down.
+	The flood then holds a fixed number of queries in flight *for a walk* rather
+	than all of them: the rest may still be busy with their own upstream forward,
+	which nothing here bounds, but they come back in a round trip instead of in
+	the thirty a walk may take. That is the difference between a resolver
+	degraded and one down.
 
 	A slot is taken at the first lookup that would go upstream, not on the way
 	into the walk, so a walk both caches can answer never asks for one and a
@@ -195,14 +192,13 @@ Validator :: struct {
 	one. So while every slot is held, what still answers is what both caches
 	hold, and nothing else.
 
-	That is why the bound is a reservation rather than a ceiling, and why it is
-	spent only by queries holding a worker somebody else is waiting for - see
-	`Walk_Pool`, which counts a connection's own thread apart from a shared worker. It is still the trade #356 asks for, the alternative
-	being every thread held and nothing answered at all, and it is why
-	`max_chain_walks` is an operator's number rather than only ours.
+	That is why the bound is a reservation rather than a ceiling. It is still the
+	trade #356 asks for, the alternative being every query in flight held and
+	nothing answered at all, and it is why `max_chain_walks` is an operator's
+	number rather than only ours.
 	*/
-	walks:                [Walk_Pool]int,
-	max_walks:            [Walk_Pool]int,
+	walks:                int,
+	max_walks:            int,
 	// Questions in which a walk found no slot, for the operator who wants to
 	// know why DNSSEC started failing. One per question however many of its
 	// walks were turned away - see `may_look_up`. Read through `queries_shed`.
@@ -222,26 +218,6 @@ Validator :: struct {
 	oversized:            u64,
 
 	allocator:            mem.Allocator,
-}
-
-/*
-Which set of threads a question is spending, and so which bound it is held to.
-
-Two, because a resolver has two and they are sized by different things. A
-question on the shared pool competes with every other question for a worker, and
-the pool is small; one answered on its own connection thread competes with the
-other connections, and there are `max_connections` of those. One number for both
-is wrong whichever way it is set - sized for the pool it refuses ordinary stream
-traffic, sized for the connections it bounds the pool at nothing.
-
-Counted apart rather than together for the same reason: a flood on one transport
-must not spend the other's allowance.
-*/
-Walk_Pool :: enum u8 {
-	// A worker of the server's handler pool: UDP and HTTP/2.
-	Shared,
-	// A thread belonging to one connection: TCP, DoT and HTTP/1.1.
-	Connection,
 }
 
 // One slot of `Validator.non_cuts`. An empty `name` is a free slot; a name is
@@ -454,17 +430,14 @@ Budget :: struct {
 	turned away and the traffic thrown out - the whole answer is SERVFAIL either
 	way. Holding it across the query costs no extra round trips, since
 	`MAX_LOOKUPS_PER_QUERY` bounds those whatever the slot does, and it makes the
-	slot mean what the bound is about: a handler thread inside a validation that
-	has gone upstream.
+	slot mean what the bound is about: a query inside a validation that has gone
+	upstream.
 
 	Left unset by a caller that walks on its own - the tests do - so each walk
 	there gives its slot back on the way out and nothing has to be released by
 	hand.
 	*/
 	keep_slot:     bool,
-	// Which set of threads this question is spending, and so which of
-	// `Validator.max_walks` bounds it. See `Walk_Pool`.
-	pool:          Walk_Pool,
 	// The hashing a denial proved with NSEC3 may spend, which no count of
 	// lookups or verifications bounds: see `MAX_NSEC3_ROUNDS_PER_QUERY`.
 	nsec3:         Nsec3_Budget,
@@ -868,9 +841,7 @@ make_validator :: proc(
 		)
 	}
 	v.max_cached_zones = opts.max_cached_zones if opts.max_cached_zones > 0 else DEFAULT_MAX_CACHED_ZONES
-	v.max_walks[.Shared] = opts.max_chain_walks if opts.max_chain_walks > 0 else DEFAULT_MAX_CHAIN_WALKS
-	v.max_walks[.Connection] =
-		opts.max_connection_walks if opts.max_connection_walks > 0 else DEFAULT_MAX_CHAIN_WALKS
+	v.max_walks = opts.max_chain_walks if opts.max_chain_walks > 0 else DEFAULT_MAX_CHAIN_WALKS
 	v.zones = make(map[string]^Zone_Entry, 64, allocator)
 	v.non_cuts = make([]Non_Cut, MAX_CACHED_NON_CUTS, allocator)
 	seed: [4]u8
@@ -1061,17 +1032,6 @@ validate :: proc(
 	now: time.Time,
 	allocator := context.temp_allocator,
 	/*
-	False for a question answered on a thread of its own, which is every
-	transport but UDP and HTTP/2. It picks which of the two bounds applies - see
-	`Walk_Pool` - not whether one does: a connection thread is a finite resource
-	too, and a flood that holds every one of them is `max_connections` worth of
-	chain walks and no new connection accepted.
-
-	Defaulted to the shared reading, which is the smaller allowance, so a caller
-	that has not thought about it gets the tighter guard.
-	*/
-	shared_worker := true,
-	/*
 	What the request has taken out of `allocator` so far, against
 	`dns.REQUEST_DECODE_BUDGET`, from the caller that owns it.
 
@@ -1110,7 +1070,6 @@ validate :: proc(
 	at all, so a slot can never outlive the question that took it.
 	*/
 	budget.keep_slot = true
-	budget.pool = .Shared if shared_worker else .Connection
 	budget.spent = spent
 	budget.deadline = deadline
 	defer end_walk(v, &budget)
@@ -3397,7 +3356,7 @@ verified_rrset :: proc(
 // ---------------------------------------------------------------------------
 
 /*
-Take a slot for a lookup that is about to block, or report that there is none.
+Take a slot for a lookup that is about to go upstream, or report that there is none.
 
 Exact rather than optimistic. Adding first and backing off when the answer turns
 out to be no is a line shorter, but every loser inflates the count while it does
@@ -3409,21 +3368,21 @@ rather than contention.
 See `Validator.walks`.
 */
 @(private)
-take_walk_slot :: proc(v: ^Validator, pool := Walk_Pool.Shared) -> bool {
+take_walk_slot :: proc(v: ^Validator) -> bool {
 	for {
-		held := sync.atomic_load(&v.walks[pool])
-		if held >= v.max_walks[pool] {
+		held := sync.atomic_load(&v.walks)
+		if held >= v.max_walks {
 			return false
 		}
-		if _, swapped := sync.atomic_compare_exchange_weak(&v.walks[pool], held, held + 1); swapped {
+		if _, swapped := sync.atomic_compare_exchange_weak(&v.walks, held, held + 1); swapped {
 			return true
 		}
 	}
 }
 
 @(private)
-drop_walk_slot :: proc(v: ^Validator, pool := Walk_Pool.Shared) {
-	sync.atomic_sub(&v.walks[pool], 1)
+drop_walk_slot :: proc(v: ^Validator) {
+	sync.atomic_sub(&v.walks, 1)
 }
 
 /*
@@ -3440,7 +3399,7 @@ may_look_up :: proc(v: ^Validator, budget: ^Budget) -> bool {
 	if budget.holds_walk {
 		return true
 	}
-	if take_walk_slot(v, budget.pool) {
+	if take_walk_slot(v) {
 		budget.holds_walk = true
 		return true
 	}
@@ -3495,7 +3454,7 @@ count_shed :: proc(v: ^Validator, result: Result) {
 @(private)
 end_walk :: proc(v: ^Validator, budget: ^Budget) {
 	if budget.holds_walk {
-		drop_walk_slot(v, budget.pool)
+		drop_walk_slot(v)
 		budget.holds_walk = false
 	}
 }
@@ -3503,8 +3462,8 @@ end_walk :: proc(v: ^Validator, budget: ^Budget) {
 // Walks this validator will have waiting on an upstream at once - the figure in
 // force, which is `DEFAULT_MAX_CHAIN_WALKS` when the caller named none. What a
 // server reports at start-up, so the log cannot name a number nothing is using.
-chain_walk_limit :: proc(v: ^Validator, pool := Walk_Pool.Shared) -> int {
-	return v.max_walks[pool] if v != nil else 0
+chain_walk_limit :: proc(v: ^Validator) -> int {
+	return v.max_walks if v != nil else 0
 }
 
 /*

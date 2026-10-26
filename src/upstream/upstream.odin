@@ -218,6 +218,8 @@ make_upstream :: proc(
 	idle_timeout: time.Duration,
 	allocator := context.allocator,
 	cookies := false,
+	// `max_outstanding`; zero takes `PIPELINE_MAX_OUTSTANDING`.
+	outstanding := 0,
 ) -> (
 	u: ^Upstream,
 	err: Error,
@@ -228,7 +230,7 @@ make_upstream :: proc(
 	u.max_idle = max(max_idle, 0)
 	u.idle_timeout = idle_timeout
 	u.idle = make([dynamic]Idle_Conn, 0, max(max_idle, 1), allocator)
-	u.max_outstanding = PIPELINE_MAX_OUTSTANDING
+	u.max_outstanding = outstanding if outstanding > 0 else PIPELINE_MAX_OUTSTANDING
 	u.cookies = cookies
 	init_cookie(u)
 

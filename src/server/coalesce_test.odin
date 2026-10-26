@@ -601,32 +601,27 @@ test_a_follower_is_told_whether_its_message_was_the_leaders :: proc(t: ^testing.
 	testing.expect(t, !follow(leader, nil), "no message was the same")
 }
 
-// Followers on the shared pool stop at the ceiling, and the count comes back
-// down as they leave.
+// Followers stop at the ceiling, whatever transport they arrived on, and the
+// count comes back down as they leave.
 @(test)
-test_followers_on_the_shared_pool_stop_at_the_ceiling :: proc(t: ^testing.T) {
+test_followers_stop_at_the_ceiling :: proc(t: ^testing.T) {
 	s: Server
 	lead: Flight
-	first, _ := flight_join(&s, "k", &lead, shared = true, ceiling = 2)
+	first, _ := flight_join(&s, "k", &lead, ceiling = 2)
 	testing.expect(t, first == &lead, "the first query did not lead")
 	a, b, c: Flight
-	fa, ca := flight_join(&s, "k", &a, shared = true, ceiling = 2)
-	fb, cb := flight_join(&s, "k", &b, shared = true, ceiling = 2)
-	fc, _ := flight_join(&s, "k", &c, shared = true, ceiling = 2)
+	fa, ca := flight_join(&s, "k", &a, ceiling = 2)
+	fb, cb := flight_join(&s, "k", &b, ceiling = 2)
+	fc, _ := flight_join(&s, "k", &c, ceiling = 2)
 	testing.expect(t, fa == &lead && fb == &lead, "a follower under the ceiling was turned away")
 	testing.expect(t, fc == nil, "a follower past the ceiling was let in")
-	// A connection's own thread is not the pool's to protect.
-	d: Flight
-	fd, cd := flight_join(&s, "k", &d, shared = false, ceiling = 2)
-	testing.expect(t, fd == &lead && !cd, "a follower off the shared pool was turned away or counted")
 
 	_, _, _ = flight_follow(&s, fa, 0, context.temp_allocator, ca)
 	testing.expect_value(t, s.inflight.followers, 1)
-	fe, ce := flight_join(&s, "k", &c, shared = true, ceiling = 2)
+	fe, ce := flight_join(&s, "k", &c, ceiling = 2)
 	testing.expect(t, fe == &lead, "the slot a follower left was not free again")
 	_, _, _ = flight_follow(&s, fb, 0, context.temp_allocator, cb)
 	_, _, _ = flight_follow(&s, fe, 0, context.temp_allocator, ce)
-	_, _, _ = flight_follow(&s, fd, 0, context.temp_allocator, cd)
 	testing.expect_value(t, s.inflight.followers, 0)
 	flight_land(&s, &lead)
 }

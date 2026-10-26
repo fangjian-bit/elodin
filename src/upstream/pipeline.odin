@@ -44,7 +44,7 @@ and the caller's is put back on the answer before it is returned.
 */
 
 /*
-How many queries may be outstanding on one connection at once.
+How many queries may be outstanding on one connection at once, at least.
 
 A backstop, and deliberately not a throughput limit. Past it a caller dials a
 connection for its own query and closes it again afterwards, which is a fresh
@@ -52,19 +52,33 @@ handshake per query and worse churn than the pool this replaced - so the figure
 has to sit above every number of callers the server can actually put in
 `exchange` at once, or the fix becomes the bug.
 
-That number is the handlers, not the racers: `resolve_sequential` - failover and
-round_robin, so the default - calls `exchange` on the handler thread itself, and
-only a race group hands the work to `upstream_workers`. `derive_workers` stops
-at `MAX_DERIVED_WORKERS`, 128, and brings half its count again in racers, so a
-derived configuration tops out near 192 callers per upstream. 256 clears that.
+That number is what may be in flight: every query a fiber of its own runs
+(`server.max_pending`) and every connection's (`server.max_connections`), all of
+which may be calling `exchange` on the same upstream at once. A race asks each
+member once, so it is one caller per upstream however many members it has. So
+the figure is derived from those two (`pipeline_outstanding`), and this is its
+floor - the 256 it was when the worker threads were the bound.
 
 Which leaves the bound doing what it was asked to do and nothing else: a server
 that has stopped answering cannot pile up waiters without limit, and one that
-is merely busy never reaches it. A hand-configured `server.workers` above this
-would, and would pay the churn; `Upstream.max_outstanding` is where that would
-be derived from the configuration if it ever needs to be.
+is merely busy never reaches it.
 */
 PIPELINE_MAX_OUTSTANDING :: 256
+
+/*
+The most a connection's 16-bit IDs allow with room to spare: a reply arriving
+after its caller gave up must not be taken for a later query that reused its ID
+(`pipe_take_id`), so the figure stays well short of 65,536.
+*/
+PIPELINE_OUTSTANDING_CEILING :: 1 << 15
+
+/*
+`Upstream.max_outstanding` for a server that may have `in_flight` queries and
+`connections` connections asking at once; see `PIPELINE_MAX_OUTSTANDING`.
+*/
+pipeline_outstanding :: proc(in_flight, connections: int) -> int {
+	return clamp(in_flight + connections, PIPELINE_MAX_OUTSTANDING, PIPELINE_OUTSTANDING_CEILING)
+}
 
 /*
 Callers in a row that have to run out of time on a silent connection before it
@@ -697,8 +711,8 @@ pipe_take_id :: proc(c: ^Pipe_Conn) -> (id: u16, ok: bool) {
 			return id, true
 		}
 	}
-	// Unreachable under `Upstream.max_outstanding`, which is orders of
-	// magnitude below the number of IDs.
+	// Unreachable under `Upstream.max_outstanding`, which is held to half the
+	// number of IDs; see `PIPELINE_OUTSTANDING_CEILING`.
 	return 0, false
 }
 

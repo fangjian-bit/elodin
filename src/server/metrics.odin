@@ -6,6 +6,7 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import "elodin:cache"
+import "elodin:dns"
 import "elodin:dnssec"
 import "elodin:filter"
 import "elodin:logx"
@@ -1020,6 +1021,18 @@ render_loop_metrics :: proc(b: ^strings.Builder, s: ^Server) {
 		"The most queries that may be in flight at once, server.max_pending; 0 is no limit.",
 	)
 	metrics.sample(b, "elodin_queries_inflight_max", i64(live(s).cfg.server.max_pending))
+
+	/*
+	The requests reading past their ordinary allowance, against the slots there
+	are for them (`dns.REQUEST_ORDINARY_DECODE`). Held at the maximum is answers
+	being refused as over budget - which is what a flood of answers built to
+	expand looks like, and what the SERVFAILs it causes are made of.
+	*/
+	held, limit := dns.heavy_decodes()
+	metrics.family(b, "elodin_decode_heavy_requests", .Gauge, "Requests decoding past the ordinary allowance now.")
+	metrics.sample(b, "elodin_decode_heavy_requests", i64(held))
+	metrics.family(b, "elodin_decode_heavy_requests_max", .Gauge, "Requests that may decode past the ordinary allowance at once; 0 is no limit.")
+	metrics.sample(b, "elodin_decode_heavy_requests_max", i64(limit))
 }
 
 /*

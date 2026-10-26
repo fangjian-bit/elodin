@@ -151,22 +151,26 @@ one takes a slot, and an ordinary query never comes near one.
 */
 REQUEST_ORDINARY_DECODE :: 256 * 1024
 
-// Requests past `REQUEST_ORDINARY_DECODE` that may be in flight at once; zero is
-// no limit, which is every process that never sets one - the tests, the fuzz
-// targets. Set once, at startup, by `set_heavy_decodes`.
-@(private)
-heavy_slots: int
+/*
+Requests past `REQUEST_ORDINARY_DECODE` that may be in flight at once, and how
+many are; a `limit` of zero is none, which is every process that never sets one
+- the tests, the fuzz targets. The process keeps one of these (`heavy`), set
+once at startup by `set_heavy_decodes`; a test keeps its own.
+*/
+Heavy_Slots :: struct {
+	limit: int,
+	held:  int,
+}
 
-// Requests holding a slot now.
 @(private)
-heavy_held: int
+heavy: Heavy_Slots
 
 /*
 How many requests may decode past `REQUEST_ORDINARY_DECODE` at once. Set before
 any request runs; zero lifts the limit.
 */
 set_heavy_decodes :: proc(n: int) {
-	sync.atomic_store(&heavy_slots, max(n, 0))
+	sync.atomic_store(&heavy.limit, max(n, 0))
 }
 
 /*
@@ -181,16 +185,7 @@ scratch refuse on the same byte and every slot taken is one `request_release`
 gives back.
 */
 request_charge :: proc(spent: ^int, n: int) -> bool {
-	if spent == nil {
-		return true
-	}
-	before := spent^
-	after := before + n
-	if before <= REQUEST_ORDINARY_DECODE && after > REQUEST_ORDINARY_DECODE && !take_heavy() {
-		return false
-	}
-	spent^ = after
-	return after <= REQUEST_DECODE_BUDGET
+	return charge_against(&heavy, spent, n)
 }
 
 /*
@@ -198,25 +193,44 @@ The end of a request: give back its slot if it took one. Called by whatever owns
 the total, once, when nothing will read on its behalf again.
 */
 request_release :: proc(spent: ^int) {
-	if spent != nil && spent^ > REQUEST_ORDINARY_DECODE {
-		sync.atomic_sub(&heavy_held, 1)
-	}
+	release_against(&heavy, spent)
 }
 
-// Requests holding a heavy slot now, for the metrics endpoint.
-heavy_decodes_held :: proc() -> int {
-	return sync.atomic_load(&heavy_held)
+// Requests holding a heavy slot now, and how many may, for the metrics endpoint.
+heavy_decodes :: proc() -> (held: int, limit: int) {
+	return sync.atomic_load(&heavy.held), sync.atomic_load(&heavy.limit)
 }
 
 @(private)
-take_heavy :: proc() -> bool {
-	limit := sync.atomic_load(&heavy_slots)
+charge_against :: proc(h: ^Heavy_Slots, spent: ^int, n: int) -> bool {
+	if spent == nil {
+		return true
+	}
+	before := spent^
+	after := before + n
+	if before <= REQUEST_ORDINARY_DECODE && after > REQUEST_ORDINARY_DECODE && !take_heavy(h) {
+		return false
+	}
+	spent^ = after
+	return after <= REQUEST_DECODE_BUDGET
+}
+
+@(private)
+release_against :: proc(h: ^Heavy_Slots, spent: ^int) {
+	if spent != nil && spent^ > REQUEST_ORDINARY_DECODE {
+		sync.atomic_sub(&h.held, 1)
+	}
+}
+
+@(private)
+take_heavy :: proc(h: ^Heavy_Slots) -> bool {
+	limit := sync.atomic_load(&h.limit)
 	for {
-		held := sync.atomic_load(&heavy_held)
+		held := sync.atomic_load(&h.held)
 		if limit > 0 && held >= limit {
 			return false
 		}
-		if _, ok := sync.atomic_compare_exchange_weak(&heavy_held, held, held + 1); ok {
+		if _, ok := sync.atomic_compare_exchange_weak(&h.held, held, held + 1); ok {
 			return true
 		}
 	}

@@ -170,15 +170,14 @@ Join the flight for `key`, leading it if there is none.
 
 `own` back: the caller leads, and must `flight_land` it. Another flight: the
 caller follows, and must `flight_follow` it, passing back `counted`. Nil: the
-table is full, or `shared` and the followers on the shared pool are at `ceiling`
-(zero is none), and the caller forwards on its own.
+table is full, or the followers are at `ceiling` (zero is none), and the caller
+forwards on its own.
 */
 @(private)
 flight_join :: proc(
 	s: ^Server,
 	key: string,
 	own: ^Flight,
-	shared := false,
 	ceiling := 0,
 ) -> (
 	flight: ^Flight,
@@ -193,7 +192,7 @@ flight_join :: proc(
 				free_slot = i
 			}
 		} else if f.key == key {
-			if shared && ceiling > 0 {
+			if ceiling > 0 {
 				if s.inflight.followers >= ceiling {
 					return nil, false
 				}

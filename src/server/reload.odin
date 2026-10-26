@@ -74,6 +74,9 @@ reload_config :: proc(s: ^Server, path: string) -> (out: Reload_Outcome) {
 	g.config = loaded
 	g.cfg = &g.config
 
+	for key in g.cfg.retired {
+		logx.warnf("reload: %s", config.retired_warning(key))
+	}
 	for key in keep_restart_only(s.gens.boot, g.cfg, context.temp_allocator) {
 		logx.warnf("reload: %s changed, which takes a restart; it keeps the value the process started with until then", key)
 	}
@@ -199,8 +202,8 @@ and is the one whose strings live as long as the process.
 keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.allocator) -> []string {
 	changed := make([dynamic]string, allocator)
 	// A reader count both files leave to the machine moves with the CPUs it can
-	// see, as `server.running_workers` does below, and nothing the operator
-	// wrote changed.
+	// see, and nothing the operator wrote changed. It is the loop count, which is
+	// fixed for the life of the process.
 	if boot.server.sizing.derived_udp_readers && cfg.server.sizing.derived_udp_readers {
 		cfg.listeners.udp.readers = boot.listeners.udp.readers
 	}
@@ -209,33 +212,13 @@ keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.alloca
 	hold(&changed, "listeners.dot", boot.listeners.dot, &cfg.listeners.dot)
 	hold(&changed, "listeners.doh", boot.listeners.doh, &cfg.listeners.doh)
 	hold(&changed, "metrics", boot.metrics, &cfg.metrics)
-	// Unnamed when both files leave it to the machine: a memory limit that moved
-	// since startup moves the figure, and nothing the operator wrote changed.
-	hold(
-		&changed,
-		"server.workers",
-		boot.server.workers,
-		&cfg.server.workers,
-		boot.server.sizing.derived_workers && cfg.server.sizing.derived_workers,
-	)
-	// Named unless both files leave them to be derived: one derived from
-	// `workers` both times moves when `workers` does, and that is already the
-	// key to name. One the starting file wrote and this one dropped is a change
-	// of its own, which is held like any other and so has to be said.
-	hold(
-		&changed,
-		"server.upstream_workers",
-		boot.server.upstream_workers,
-		&cfg.server.upstream_workers,
-		boot.server.sizing.derived_upstream_workers && cfg.server.sizing.derived_upstream_workers,
-	)
-	hold(
-		&changed,
-		"server.running_workers",
-		boot.server.running_workers,
-		&cfg.server.running_workers,
-		boot.server.sizing.derived_running_workers && cfg.server.sizing.derived_running_workers,
-	)
+	/*
+	Not keys, and nothing a reload changes: the heavy decode slots are set once,
+	process-wide, and the retired keys do nothing whatever the file says about
+	them - `reload_config` has already said what this file names.
+	*/
+	cfg.server.heavy_decodes = boot.server.heavy_decodes
+	cfg.retired = boot.retired
 	hold(&changed, "server.max_connections", boot.server.max_connections, &cfg.server.max_connections)
 	// Unnamed when both files leave it to be derived: it moves with
 	// `max_connections`, which is already the key to name.
@@ -253,11 +236,11 @@ keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.alloca
 	hold(&changed, "blocking.cache_dir", boot.blocking.cache_dir, &cfg.blocking.cache_dir)
 
 	/*
-	What the loader derives from those keys where the file leaves a figure unset
-	is derived again from the values that are running: a backlog of eight per
-	worker, or a chain-walk bound that reserves a quarter of the pool, is only
-	what it says it is when it is a share of the pool that exists. Where the file
-	names the figure, it is the operator's and it reloads.
+	What the loader derives where the file leaves a figure unset is derived again
+	from the machine the process started on, so that a memory limit moved since
+	does not move a figure nobody wrote; where the file names it, it is the
+	operator's and it reloads. The chain-walk bound then follows whichever
+	`max_pending` is in effect, since it is a share of it.
 
 	The record of what was derived is the starting one for the keys held above,
 	and the new file's for the figures derived here.
@@ -265,16 +248,12 @@ keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.alloca
 	derived := cfg.server.sizing
 	cfg.server.sizing = boot.server.sizing
 	cfg.server.sizing.derived_chain_walks = derived.derived_chain_walks
-	cfg.server.sizing.derived_connection_walks = derived.derived_connection_walks
 	cfg.server.sizing.derived_max_pending = derived.derived_max_pending
-	if derived.derived_chain_walks {
-		cfg.dnssec.max_chain_walks = config.derive_chain_walks(cfg.server.workers)
-	}
-	if derived.derived_connection_walks {
-		cfg.dnssec.max_connection_walks = config.derive_chain_walks(cfg.server.max_connections)
-	}
 	if derived.derived_max_pending {
-		cfg.server.max_pending = config.derive_max_pending(cfg.server.workers)
+		cfg.server.max_pending = config.derive_max_pending(boot.server.sizing.machine)
+	}
+	if derived.derived_chain_walks {
+		cfg.dnssec.max_chain_walks = config.derive_chain_walks(cfg.server.max_pending)
 	}
 	return changed[:]
 }

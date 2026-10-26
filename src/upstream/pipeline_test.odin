@@ -2368,3 +2368,17 @@ test_a_truncated_pipelined_reply_is_not_a_hang_up :: proc(t: ^testing.T) {
 	testing.expect(t, sync.atomic_load(&m.conns) >= 1, "the upstream never connected")
 	free_all(context.temp_allocator)
 }
+
+/*
+A connection carries as many queries as the server can have asking at once, so
+a busy server never reaches the per-query dial past it: the in-flight bound and
+the connection table together, never below the floor the worker threads set, and
+never near the 16-bit ID space.
+*/
+@(test)
+test_pipeline_outstanding_covers_everything_that_can_ask :: proc(t: ^testing.T) {
+	testing.expect_value(t, pipeline_outstanding(3000, 512), 3512)
+	testing.expect_value(t, pipeline_outstanding(64, 8), PIPELINE_MAX_OUTSTANDING)
+	testing.expect_value(t, pipeline_outstanding(100_000, 512), PIPELINE_OUTSTANDING_CEILING)
+	testing.expect(t, PIPELINE_OUTSTANDING_CEILING < 1 << 16, "the ceiling leaves no IDs to spare")
+}

@@ -269,20 +269,6 @@ handle_query :: proc(
 	client: string,
 	allocator := context.allocator,
 	/*
-	Whether this call is running on a worker of the shared pool.
-
-	True for UDP and for HTTP/2, which hand their work to `handler_pool`; false
-	for TCP, DoT and HTTP/1.1, which answer on the connection's own thread and
-	are bounded by `max_connections` instead. The only thing that reads it is
-	the DNSSEC chain-walk bound, which exists to keep pool workers free and has
-	no business turning away a query that holds a thread nobody is waiting for.
-	See `dnssec.Validator.walks`.
-
-	Defaulted to the pooled reading so that a caller which has not thought about
-	it gets the guard; the four that have say so.
-	*/
-	shared_worker := true,
-	/*
 	Where a DoH caller wants the `Cache-Control: max-age` for the answer: see
 	`doh_max_age`. Worked out here, off the bytes about to leave, because this
 	is where the request's arena and its decode counter live - so reading the
@@ -432,7 +418,6 @@ handle_query :: proc(
 			started,
 			&spent,
 			allocator,
-			shared_worker,
 			ede = &ede,
 		)
 	}
@@ -1108,9 +1093,6 @@ resolve_query :: proc(
 	// `handle_query`, which owns that arena. See `dns.REQUEST_DECODE_BUDGET`.
 	spent: ^int,
 	allocator: mem.Allocator,
-	// See `handle_query`: whether a worker of the shared pool is what this is
-	// holding.
-	shared_worker: bool,
 	/*
 	Non-nil when this call *is* a detached refresh of an expired entry, rather
 	than a client's own query.
@@ -1201,7 +1183,6 @@ resolve_query :: proc(
 				started,
 				spent,
 				allocator,
-				shared_worker,
 			)
 		}
 		if !counted {
@@ -1922,7 +1903,7 @@ resolve_query :: proc(
 	flight: ^Flight
 	if unanswered == nil {
 		ceiling := follower_ceiling(s)
-		joined, counted := flight_join(s, key, &own_flight, shared_worker, ceiling)
+		joined, counted := flight_join(s, key, &own_flight, ceiling)
 		if joined == &own_flight {
 			flight = joined
 			flight.forwarded = forwarded
@@ -2551,7 +2532,6 @@ resolve_query :: proc(
 			resp,
 			time.now(),
 			allocator,
-			shared_worker = shared_worker,
 			spent = spent,
 			deadline = &deadline,
 		)
@@ -4395,7 +4375,6 @@ chase_rewrite_alias :: proc(
 	started: time.Time,
 	spent: ^int,
 	allocator: mem.Allocator,
-	shared_worker: bool,
 ) -> (
 	response: []u8,
 	// Whether the target's lookup counted this query under its own outcome, as
@@ -4448,7 +4427,6 @@ chase_rewrite_alias :: proc(
 				started,
 				spent,
 				allocator,
-				shared_worker,
 				ede = &code,
 			)
 			// A refusal counts nowhere in that family, the RD gate's included,

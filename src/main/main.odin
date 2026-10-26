@@ -10,6 +10,7 @@ import "core:thread"
 import "core:time"
 import "elodin:cache"
 import "elodin:config"
+import "elodin:dns"
 import "elodin:filter"
 import "elodin:logx"
 import "elodin:loop"
@@ -163,8 +164,9 @@ wait_for_tick :: proc(deadline: time.Tick, rebuild: ^server.Rebuild) -> Wait_Out
 /*
 One line saying how large this instance is and why.
 
-Worth printing on every start, not only when something was derived: a worker
-count that came from the machine is one an operator has never seen in a file, so
+Worth printing on every start, not only when something was derived: a loop
+count or an in-flight bound that came from the machine is one an operator has
+never seen in a file, so
 leaving it out of the log would make the first question about memory or
 throughput unanswerable from anything but the source. `--check` prints the same
 line, and derives it the same way, so it answers the question on the machine the
@@ -180,50 +182,29 @@ usable_cpus :: proc(cpus: int) -> string {
 	return fmt.tprintf("%d usable CPUs", cpus)
 }
 
+/*
+What the figures in the sizing line came from: the loops from the CPUs and the
+in-flight bound from the memory, each named only when it was derived, and "from
+the configuration" when neither was. The heavy decode slots always come from the
+memory, but they are not a key, so they credit no machine on their own.
+*/
 @(private)
 sizing_origin :: proc(s: config.Server_Config) -> string {
+	m := s.sizing.machine
+	cpus, memory: string
+	if s.sizing.derived_udp_readers {
+		cpus = usable_cpus(m.cpus) if m.cpus > 0 else "one loop, as this machine's CPUs could not be counted"
+	}
+	if s.sizing.derived_max_pending {
+		memory = fmt.tprintf("%#.1M", m.memory) if m.memory > 0 else "the default max_pending, as this machine's memory could not be measured"
+	}
 	switch {
-	case s.sizing.derived_workers:
-		m := s.sizing.machine
-		// `workers` reads only the memory; the CPUs are named when they
-		// decided `running_workers`, and not for a limit the file set.
-		// A derived limit the CPUs could not set is no limit, which is said.
-		running := s.sizing.derived_running_workers
-		if !running {
-			m.cpus = 0
-		}
-		switch {
-		case m.cpus > 0 && m.memory > 0:
-			return fmt.tprintf("derived from %s and %#.1M", usable_cpus(m.cpus), m.memory)
-		case m.cpus > 0:
-			return fmt.tprintf("derived from %s", usable_cpus(m.cpus))
-		case m.memory > 0 && running:
-			return fmt.tprintf(
-				"derived from %#.1M of memory; running_workers is the whole pool, this machine's CPUs could not be counted",
-				m.memory,
-			)
-		case m.memory > 0:
-			return fmt.tprintf("derived from %#.1M of memory", m.memory)
-		case running:
-			return "derived from defaults; this machine could not be measured"
-		case:
-			return "derived from defaults; this machine's memory could not be measured"
-		}
-	/*
-	The running limit is the machine's to say however the pool was sized, so it
-	is named on its own; half of a number the file named is still that number's
-	doing, and naming the machine for it would credit it with a choice an
-	operator made.
-	*/
-	case s.sizing.derived_running_workers:
-		running :=
-			fmt.tprintf("running_workers derived from %s", usable_cpus(s.sizing.machine.cpus)) if s.sizing.machine.cpus > 0 else "running_workers is the whole pool; this machine's CPUs could not be counted"
-		if s.sizing.derived_upstream_workers {
-			return fmt.tprintf("%s, upstream_workers from the configured workers", running)
-		}
-		return running
-	case s.sizing.derived_upstream_workers:
-		return "upstream_workers derived from the configured workers"
+	case cpus != "" && memory != "":
+		return fmt.tprintf("derived from %s and %s", cpus, memory)
+	case cpus != "":
+		return fmt.tprintf("derived from %s", cpus)
+	case memory != "":
+		return fmt.tprintf("derived from %s", memory)
 	}
 	return "from the configuration"
 }
@@ -248,26 +229,26 @@ udp_readers_origin :: proc(s: config.Server_Config) -> string {
 }
 
 /*
-`chain_walks` rides along with the worker counts because it is derived from
-them and spent out of the same pool: it is how many of those workers may be
-waiting on a DS or DNSKEY lookup at once, the rest being reserved for what needs
-no chain walk. Printed only where validation is on, and printed at all because
-this is the one place `--check` can show a number an operator is otherwise told
-to raise without being told what it is. See `config.derive_chain_walks`.
+`chain_walks` rides along with `max_pending` because it is derived from it and
+spent out of it: it is how many of the queries in flight may be waiting on a DS
+or DNSKEY lookup at once, the rest being reserved for what needs no chain walk.
+Printed only where validation is on, and printed at all because this is the one
+place `--check` can show a number an operator is otherwise told to raise without
+being told what it is. See `config.derive_chain_walks`.
+
+`loops` is `listeners.udp.readers`, which names it under that key: one event loop
+per reader, each a thread. `heavy_decodes` is how many requests may decode past
+the ordinary allowance at once (`dns.REQUEST_ORDINARY_DECODE`), which is not a
+key and is said here so it can be read.
 */
 @(private)
-sizing_line :: proc(s: config.Server_Config, chain_walks := 0, connection_walks := 0) -> string {
-	// Both, because they are two settings and an operator capping the upstream
-	// volume a flood can provoke has to set both - so seeing only one here
-	// would send them away thinking the other did not exist.
-	walks :=
-		fmt.tprintf(" chain_walks=%d connection_walks=%d", chain_walks, connection_walks) if chain_walks > 0 else ""
+sizing_line :: proc(s: config.Server_Config, loops: int, chain_walks := 0) -> string {
+	walks := fmt.tprintf(" chain_walks=%d", chain_walks) if chain_walks > 0 else ""
 	return fmt.tprintf(
-		"workers=%d running_workers=%d upstream_workers=%d max_pending=%d%s (%s)",
-		s.workers,
-		s.running_workers,
-		s.upstream_workers,
+		"loops=%d max_pending=%d heavy_decodes=%d%s (%s)",
+		loops,
 		s.max_pending,
+		s.heavy_decodes,
 		walks,
 		sizing_origin(s),
 	)
@@ -513,8 +494,8 @@ main :: proc() {
 			"  %s",
 			sizing_line(
 				cfg.server,
+				max(cfg.listeners.udp.readers, 1),
 				cfg.dnssec.max_chain_walks if cfg.dnssec.enabled else 0,
-				cfg.dnssec.max_connection_walks if cfg.dnssec.enabled else 0,
 			),
 		)
 		fmt.printfln("  %s", allow_from_line(cfg.server))
@@ -600,6 +581,9 @@ main :: proc() {
 		if text, say := connection_memory_warning(&cfg); say {
 			fmt.printfln("  warning: %s", text)
 		}
+		for key in cfg.retired {
+			fmt.printfln("  warning: %s", config.retired_warning(key))
+		}
 		return
 	}
 
@@ -607,14 +591,19 @@ main :: proc() {
 	logx.eventf(
 		.Info,
 		"sizing",
-		"workers=%d running_workers=%d upstream_workers=%d max_pending=%d origin=%s",
-		cfg.server.workers,
-		cfg.server.running_workers,
-		cfg.server.upstream_workers,
+		"loops=%d max_pending=%d heavy_decodes=%d origin=%s",
+		max(cfg.listeners.udp.readers, 1),
 		cfg.server.max_pending,
+		cfg.server.heavy_decodes,
 		logx.quote(sizing_origin(cfg.server)),
 	)
+	for key in cfg.retired {
+		logx.warnf("%s", config.retired_warning(key))
+	}
 	log_config_warnings(&cfg)
+	// Before anything decodes on behalf of a request, and once: the slots are
+	// process-wide and a reload does not move them.
+	dns.set_heavy_decodes(cfg.server.heavy_decodes)
 	run(&cfg, opts, service)
 }
 

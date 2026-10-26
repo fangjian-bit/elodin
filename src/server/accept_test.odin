@@ -117,13 +117,13 @@ test_the_accept_failure_words_send_a_shortage_to_the_descriptor_limit :: proc(t:
 @(test)
 test_descriptors_wanted_counts_everything_that_holds_one :: proc(t: ^testing.T) {
 	d := Descriptor_Demand {
-		max_connections  = 512,
-		pooled_upstream  = 16,
-		workers          = 128,
-		upstream_workers = 64,
-		udp_readers      = 4,
+		max_connections = 512,
+		pooled_upstream = 16,
+		in_flight       = 1024,
+		udp_readers     = 4,
+		loops           = 4,
 	}
-	testing.expect_value(t, descriptors_wanted(d), 512 + 16 + 128 + 64 + 4 + DESCRIPTOR_RESERVE)
+	testing.expect_value(t, descriptors_wanted(d), 512 + 16 + 1024 + 4 + 2 * 4 + DESCRIPTOR_RESERVE)
 
 	// The readers are a term of their own because an operator may set 64 of
 	// them, which would otherwise eat a reserve sized for eight.
@@ -137,7 +137,7 @@ test_the_descriptor_line_is_silent_unless_the_limit_is_short :: proc(t: ^testing
 	d := Descriptor_Demand {
 		max_connections = 512,
 		pooled_upstream = 16,
-		workers         = 128,
+		in_flight       = 1024,
 	}
 	wanted := descriptors_wanted(d)
 
