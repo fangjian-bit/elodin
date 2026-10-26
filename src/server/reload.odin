@@ -247,12 +247,16 @@ keep_restart_only :: proc(boot, cfg: ^config.Config, allocator := context.alloca
 	derived := cfg.server.sizing
 	cfg.server.sizing = boot.server.sizing
 	cfg.server.sizing.derived_chain_walks = derived.derived_chain_walks
+	cfg.server.sizing.derived_connection_walks = derived.derived_connection_walks
 	cfg.server.sizing.derived_max_pending = derived.derived_max_pending
 	if derived.derived_max_pending {
 		cfg.server.max_pending = config.derive_max_pending(boot.server.sizing.machine)
 	}
 	if derived.derived_chain_walks {
-		cfg.dnssec.max_chain_walks = config.derive_chain_walks(config.queries_in_flight(cfg.server))
+		cfg.dnssec.max_chain_walks = config.derive_chain_walks(cfg.server.max_pending)
+	}
+	if derived.derived_connection_walks {
+		cfg.dnssec.max_connection_walks = config.derive_chain_walks(cfg.server.max_connections)
 	}
 	return changed[:]
 }

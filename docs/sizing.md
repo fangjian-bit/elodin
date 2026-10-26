@@ -8,27 +8,29 @@ loops            = listeners.udp.readers = usable_cpus, at most 8
 max_pending      = (usable memory / 8) / 320 KiB, between 64 and 4096
                    (409 on a 1 GiB machine; 1024 where memory cannot be read)
 heavy_decodes    = (usable memory / 32) / 8 MiB, between 2 and 128 (not a key)
-chain_walks      = max_pending + max_connections, less a reserved quarter
+chain_walks      = max_pending less a reserved quarter
+connection_walks = max_connections less a reserved quarter
 ```
 
 - "Usable" is what this process can have: the CPU affinity mask, and a cgroup CPU
   or memory limit where there is one (`CPUQuota=`/`MemoryMax=` in a unit, or a
   container's limits).
 - A number in the configuration always wins: `listeners.udp.readers`,
-  `server.max_pending` and `dnssec.max_chain_walks` can each be set on its own.
+  `server.max_pending`, `dnssec.max_chain_walks` and `dnssec.max_connection_walks`
+  can each be set on its own.
 - What it settled on is logged after startup and printed by `--check`:
 
 ```console
 $ elodin --check
 /etc/elodin/elodin.yaml is valid: 2 upstreams, 0 zone routes, 4 blocklists, 0 rewrites
-  loops=2 max_pending=3164 heavy_decodes=30 chain_walks=2757 (derived from 2 usable CPUs and 7.7 GiB)
+  loops=2 max_pending=3164 heavy_decodes=30 chain_walks=2373 connection_walks=384 (derived from 2 usable CPUs and 7.7 GiB)
   answering queries from 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, ::1/128, fc00::/7, fe80::/10; every other source is refused
   udp: 2 readers, asking for 1MiB of receive buffer each (derived from 2 usable CPUs)
   connections: at most 512 at once across TCP, DoT and DoH, of which one client prefix (/24, /64) may hold 256; connections past a prefix's share are refused and counted as conn_refused=
 ```
 
-`server.workers`, `server.running_workers`, `server.upstream_workers` and
-`dnssec.max_connection_walks` are no longer used. A file that names them still
+`server.workers`, `server.running_workers` and `server.upstream_workers` are no
+longer used. A file that names them still
 loads, and each is named in a `warn` at startup, at every reload and under
 `--check`; 0.26.0 refuses them. Remove them.
 

@@ -462,10 +462,14 @@ dnssec:
   # where it would have gone upstream, which is what an upstream that did not
   # answer already produces.
   #
-  # 0 is server.max_pending plus server.max_connections - every query that can
-  # be in flight, a connection's included - less a reserved quarter: the point is to keep
+  # 0 is server.max_pending less a reserved quarter of it: the point is to keep
   # that quarter out of the walk, so it comes back in a round trip rather than
   # in the thirty a walk may take, not to cap what this resolver validates.
+  #
+  # This is the bound for UDP, DoH/2 and cache refreshes, the queries counted in
+  # max_pending. TCP, DoT and DoH/1.1 answer on their connection, outside
+  # max_pending, and get max_connection_walks below, counted apart so a flood on
+  # one transport cannot spend the other's allowance.
   #
   # While it binds, every cold name is SERVFAIL — including names in unsigned
   # zones, since a zone cannot be known to be unsigned without the DS lookup
@@ -475,6 +479,13 @@ dnssec:
   # and raise this if the load turns out to be yours. Lower it to cap the
   # upstream volume a flood can provoke, which the reservation does not.
   # max_chain_walks: 0
+
+  # The same for TCP, DoT and DoH/1.1. 0 is server.max_connections less a
+  # reserved quarter — 384 at the default 512. Set this rather than cutting
+  # max_connections when what you want is less upstream volume: max_connections
+  # decides how many clients may connect at all, which is a price legitimate
+  # traffic pays for nothing.
+  # max_connection_walks: 0
 
 cookies:
   # Clients that send a DNS cookie get one back (RFC 7873). It costs one hash

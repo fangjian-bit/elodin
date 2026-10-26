@@ -242,8 +242,8 @@ the ordinary allowance at once (`dns.REQUEST_ORDINARY_DECODE`), which is not a
 key and is said here so it can be read.
 */
 @(private)
-sizing_line :: proc(s: config.Server_Config, loops: int, chain_walks := 0) -> string {
-	walks := fmt.tprintf(" chain_walks=%d", chain_walks) if chain_walks > 0 else ""
+sizing_line :: proc(s: config.Server_Config, loops: int, chain_walks := 0, connection_walks := 0) -> string {
+	walks := fmt.tprintf(" chain_walks=%d connection_walks=%d", chain_walks, connection_walks) if chain_walks > 0 else ""
 	return fmt.tprintf(
 		"loops=%d max_pending=%d heavy_decodes=%d%s (%s)",
 		loops,
@@ -496,6 +496,7 @@ main :: proc() {
 				cfg.server,
 				max(cfg.listeners.udp.readers, 1),
 				cfg.dnssec.max_chain_walks if cfg.dnssec.enabled else 0,
+				cfg.dnssec.max_connection_walks if cfg.dnssec.enabled else 0,
 			),
 		)
 		fmt.printfln("  %s", allow_from_line(cfg.server))

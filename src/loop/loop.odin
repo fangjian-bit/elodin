@@ -71,8 +71,13 @@ Loop :: struct {
 	machine was that day.
 	*/
 	clock:               proc "contextless" () -> Tick,
-	// For the metrics endpoint and tests; written only by the loop's own thread.
-	parks:               u64,
+	/*
+	Whether `cancel_all` has reached this loop. Loop thread only. A fiber that
+	starts after it starts cancelled: `stop` and `cancel_all` take the lock apart
+	from a `spawn` on another thread, so one that passed its `stopping` check
+	before the stop can post its start after the cancel has been drained.
+	*/
+	cancelled_all:       bool,
 	// When the loop last had anything to do, for `trim_idle`.
 	last_busy:           Tick,
 }
@@ -392,6 +397,7 @@ spawn :: proc(l: ^Loop, fn: proc(data: rawptr), data: rawptr) -> (h: Handle, ok:
 	h = Handle{f, incarnation}
 	if tl_loop == l {
 		live_insert(l, f)
+		f.cancelled = l.cancelled_all
 		append(&l.ready, f)
 	} else {
 		post(l, Post{kind = .Start, fiber = f})
@@ -466,12 +472,14 @@ drain_posts :: proc(l: ^Loop) {
 		switch p.kind {
 		case .Start:
 			live_insert(l, p.fiber)
+			p.fiber.cancelled = l.cancelled_all
 			append(&l.ready, p.fiber)
 		case .Wake:
 			wake_local(p.fiber, p.value, .Ready)
 		case .Cancel:
 			cancel_local(l, p.fiber, p.value)
 		case .Cancel_All:
+			l.cancelled_all = true
 			for f := l.live; f != nil; f = f.next {
 				cancel_local(l, f, f.incarnation)
 			}
@@ -653,7 +661,6 @@ park :: proc(deadline: Tick, cancellable := true) -> Wake_Reason {
 	}
 	f.state = .Parked
 	f.cancellable = cancellable
-	l.parks += 1
 	switch_to_scheduler(f)
 	// Running again. Whatever woke us, nothing else that signed up for this park
 	// may: the token moves on, and the timer, if it did not fire, comes out.

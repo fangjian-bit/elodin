@@ -91,8 +91,9 @@ go to the upstream once. The first forwards and the rest wait for it:
 - **A cached refusal** (a DNSSEC failure, or a CNAME into a blocked name) refuses
   the waiters without asking. Exceptions: a list reload during the wait that
   lifted the listing serves the answer; an entry evicted meanwhile makes them ask.
-- **Cap.** A query arriving when a quarter of `server.max_pending` plus
-  `server.max_connections` is already waiting asks for itself.
+- **Cap.** A query counted in `server.max_pending` arriving when a quarter of it
+  is already waiting asks for itself. Queries on a connection are not counted:
+  `server.max_connections` bounds them.
 - **Logging.** Queries given the first one's outcome, or refused from its cached
   refusal, count in `elodin_answers_coalesced_total`; those that asked do not.
   The query log shows `outcome=cached detail=coalesced` for a shared answer,

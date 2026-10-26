@@ -271,6 +271,18 @@ handle_query :: proc(
 	client: string,
 	allocator := context.allocator,
 	/*
+	Which queries this one is among: `.Shared` for those counted against
+	`server.max_pending` - UDP and HTTP/2, which `submit_query` starts on fibers
+	of their own - and `.Connection` for TCP, DoT and HTTP/1.1, which answer on
+	the connection's fiber and are bounded by `max_connections` instead. Read by
+	the DNSSEC chain-walk bound and the follower ceiling, each of which keeps a
+	reserve per population; see `dnssec.Walk_Pool`.
+
+	Defaulted to the counted reading so that a caller which has not thought
+	about it gets the tighter guard; the two that answer on a connection say so.
+	*/
+	pool := dnssec.Walk_Pool.Shared,
+	/*
 	Where a DoH caller wants the `Cache-Control: max-age` for the answer: see
 	`doh_max_age`. Worked out here, off the bytes about to leave, because this
 	is where the request's arena and its decode counter live - so reading the
@@ -421,6 +433,7 @@ handle_query :: proc(
 			&spent,
 			allocator,
 			ede = &ede,
+			pool = pool,
 		)
 	}
 	if ok {
@@ -1114,6 +1127,8 @@ resolve_query :: proc(
 	it; see `ceiling_ede`.
 	*/
 	ede: ^u16 = nil,
+	// See `handle_query`. A refresh is counted in `max_pending`, which is the default.
+	pool := dnssec.Walk_Pool.Shared,
 ) -> (
 	response: []u8,
 	outcome: Outcome,
@@ -1185,6 +1200,7 @@ resolve_query :: proc(
 				started,
 				spent,
 				allocator,
+				pool,
 			)
 		}
 		if !counted {
@@ -1905,7 +1921,7 @@ resolve_query :: proc(
 	flight: ^Flight
 	if unanswered == nil {
 		ceiling := follower_ceiling(s)
-		joined, counted := flight_join(s, key, &own_flight, ceiling)
+		joined, counted := flight_join(s, key, &own_flight, pool == .Shared, ceiling)
 		if joined == &own_flight {
 			flight = joined
 			flight.forwarded = forwarded
@@ -2534,6 +2550,7 @@ resolve_query :: proc(
 			resp,
 			time.now(),
 			allocator,
+			pool = pool,
 			spent = spent,
 			deadline = &deadline,
 		)
@@ -4377,6 +4394,7 @@ chase_rewrite_alias :: proc(
 	started: time.Time,
 	spent: ^int,
 	allocator: mem.Allocator,
+	pool: dnssec.Walk_Pool,
 ) -> (
 	response: []u8,
 	// Whether the target's lookup counted this query under its own outcome, as
@@ -4430,6 +4448,7 @@ chase_rewrite_alias :: proc(
 				spent,
 				allocator,
 				ede = &code,
+				pool = pool,
 			)
 			// A refusal counts nowhere in that family, the RD gate's included,
 			// and nor does a special-use name, so the chain either leaves as the

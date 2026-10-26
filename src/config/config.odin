@@ -366,8 +366,8 @@ Dnssec_Config :: struct {
 	included, since a zone cannot be known to be unsigned without the DS lookup
 	that shows it.
 
-	One bound for every transport: a walk on a connection's fiber holds the same
-	memory and makes the same upstream queries as one on a query's own.
+	For the queries counted in `server.max_pending` - UDP, DoH over HTTP/2 and
+	cache refreshes; the connections have `max_connection_walks`.
 
 	Zero, the default, is `server.max_pending` less a reserved quarter of it, so
 	that quarter cannot be held inside a walk - it turns over in a round trip
@@ -381,6 +381,26 @@ Dnssec_Config :: struct {
 	does not.
 	*/
 	max_chain_walks:      int,
+	/*
+	The same, for the queries answered on their connection's fiber: TCP, DoT and
+	DoH over HTTP/1.1.
+
+	A bound of its own because those queries are not counted in
+	`server.max_pending` - a connection answers one at a time, so
+	`max_connections` bounds them - and a share of either figure is wrong for the
+	other: a share of `max_pending` lets the connections take every walk, and a
+	share of both together leaves the queries in flight no reserve. Zero derives
+	it from `server.max_connections` the way `max_chain_walks` is derived from
+	`max_pending`: 384 against the default 512 connections.
+
+	It exists because `server.max_connections` is the wrong lever for the job an
+	operator would reach for it to do. Lowering `max_chain_walks` caps the
+	upstream volume a flood can provoke over UDP and HTTP/2; without this, the
+	only way to cap the same thing on the stream transports would be to cut how
+	many clients may connect at all, which is a price for legitimate traffic
+	that has nothing to do with DNSSEC.
+	*/
+	max_connection_walks: int,
 	/*
 	Zones whose keys - or whose lack of them - may be remembered at once.
 
@@ -1066,7 +1086,6 @@ Retired_Key :: enum u8 {
 	Workers,
 	Upstream_Workers,
 	Running_Workers,
-	Max_Connection_Walks,
 }
 
 Retired_Keys :: bit_set[Retired_Key]
@@ -1091,9 +1110,6 @@ retired_warning :: proc(key: Retired_Key, allocator := context.temp_allocator) -
 	case .Running_Workers:
 		name = "server.running_workers"
 		instead = "listeners.udp.readers is how many event loops, and so how many cores, the server uses"
-	case .Max_Connection_Walks:
-		name = "dnssec.max_connection_walks"
-		instead = "dnssec.max_chain_walks is the one bound on chain walks for every transport"
 	}
 	return fmt.aprintf(
 		"%s is no longer used and is ignored: %s. Remove it; from release %s it is refused",
@@ -1223,6 +1239,7 @@ default_config :: proc() -> Config {
 		max_nsec3_iterations = 100,
 		// Derived from `server.max_pending` at load; see the field.
 		max_chain_walks      = 0,
+		max_connection_walks = 0,
 		// Zero takes `dnssec.DEFAULT_MAX_CACHED_ZONES`; see the field.
 		max_cached_zones     = 0,
 	}

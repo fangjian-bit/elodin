@@ -87,7 +87,10 @@ handshake errno) are saved and restored with it (`loop.register_local`).
 `mise run verify` runs the type check, unit and integration tests. Leak checking
 and fuzz regression run in CI; `mise run bench` measures rather than asserts.
 
-**Unit tests** (`mise run test`) run per package, so a failure names one. They
+**Unit tests** (`mise run test`) run per package, so a failure names one. One
+test on its own is `odin test src/<pkg> -collection:elodin=src
+-define:ODIN_TEST_NAMES=<pkg>.<test>`, after `mise run prepare` has assembled
+the fiber switch into `bin/elodin_switch.o`, which every build links. They
 cover:
 
 - the message codec: round trips for every modelled RDATA type, compression,

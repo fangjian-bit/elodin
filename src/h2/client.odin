@@ -174,7 +174,7 @@ client_make :: proc(io: IO, allocator := context.allocator) -> ^Client {
 	// otherwise have already written a HEADERS frame as the connection's first
 	// bytes, corrupting the preface.
 	if !client_send_preface(c) {
-		c.closed = true
+		sync.atomic_store(&c.closed, true)
 	}
 	return c
 }

@@ -336,8 +336,7 @@ run_one_loop_cases :: proc(r: ^Runner, cert_ok: bool) {
 
 	/*
 	What is in flight is not a thread count. One loop, and `max_pending` left to
-	the machine, carries a burst of 500 misses at once - more than the 128 worker
-	threads the server used to be capped at, all on one thread.
+	the machine, carries a burst of 500 misses at once, all on one thread.
 
 	Read off the upstream rather than a clock: a mock of its own holds every
 	reply until all 500 questions are waiting on it, which only a server with all

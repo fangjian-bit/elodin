@@ -777,6 +777,51 @@ test_cancel_all_reaches_a_fiber_waiting_on_a_descriptor :: proc(t: ^testing.T) {
 }
 
 /*
+A fiber whose start reaches the loop after `cancel_all` starts cancelled. A
+`spawn` from another thread checks `stopping` and posts its start under two
+holds of the lock, so at shutdown one can land behind the cancel; uncancelled, it
+would hold the loop for as long as its wait - an upstream reader's is the life of
+its connection, which is released only after the loops have stopped.
+*/
+@(test)
+test_a_fiber_started_after_cancel_all_starts_cancelled :: proc(t: ^testing.T) {
+	a, b, paired := socket_pair(t)
+	if !paired {
+		return
+	}
+	defer linux.close(a)
+	defer linux.close(b)
+	r, started := start(t)
+	if !started {
+		return
+	}
+	Shared :: struct {
+		fd:     linux.Fd,
+		result: Wait_Result,
+		done:   sync.Sema,
+	}
+	s := Shared {
+		fd = a,
+	}
+	cancel_all(r.l)
+	_, spawned := spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		s.result = wait_fd(s.fd, {.In}, time.tick_add(time.tick_now(), time.Hour))
+		sync.sema_post(&s.done)
+	}, &s)
+	testing.expect(t, spawned, "the fiber was not started")
+	woke := sync.sema_wait_with_timeout(&s.done, WAIT)
+	if !woke {
+		// Let the waiter go, so the loop can stop and the test end.
+		_, _ = linux.write(b, transmute([]u8)string("ping"))
+		_ = sync.sema_wait_with_timeout(&s.done, WAIT)
+	}
+	testing.expect(t, woke, "a fiber started after cancel_all waited out its deadline")
+	testing.expect_value(t, s.result, Wait_Result.Cancelled)
+	finish(r)
+}
+
+/*
 A wait with no deadline off a loop waits, rather than failing at once: `ppoll`
 with no timeout, which `core:sys/linux`'s `poll` cannot express on arm64.
 */

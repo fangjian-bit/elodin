@@ -58,9 +58,9 @@ the default connection table fit inside the `LimitNOFILE=8192` the shipped unit
 sets. 4096 against a 20 ms upstream is two hundred thousand cache misses a
 second, more than eight loops answer.
 
-Where memory could not be measured, `DEFAULT_MAX_PENDING`, which is what the
-worker pools allowed before #547: a figure many machines ran with, and too small
-to hurt any of them.
+Where memory could not be measured, `DEFAULT_MAX_PENDING`: a figure small
+enough to fit any machine elodin runs on and large enough to ride out a slow
+upstream.
 */
 MIN_DERIVED_PENDING :: 64
 MAX_DERIVED_PENDING :: 4096
@@ -70,12 +70,11 @@ DEFAULT_MAX_PENDING :: 1024
 The share of memory requests decoding past their ordinary allowance may hold,
 at `dns.REQUEST_DECODE_BUDGET` each, and the bounds of the derived figure.
 
-A thirty-second, the share the worker threads were held to before (#493): the
-heavy slots are what a flood of steered answers reaches for, so they get the
-share that flood used to reach. Never fewer than two, so a request that honestly
-needs the whole budget - the longest chain walk measured - is not refused for
-want of company; never more than 128, the most workers there ever were. Where
-memory could not be measured, 16.
+A thirty-second (#493): the heavy slots are what a flood of steered answers
+reaches for, so a flood holding all of them holds that share and no more. Never
+fewer than two, so a request that honestly needs the whole budget - the longest
+chain walk measured - is not refused for want of company; never more than 128.
+Where memory could not be measured, 16.
 */
 HEAVY_DECODE_SHARE :: 32
 MIN_DERIVED_HEAVY_DECODES :: 2
@@ -153,18 +152,19 @@ derived number that nobody can see is one an operator cannot argue with.
 */
 Sizing :: struct {
 	machine:             Machine,
-	derived_chain_walks: bool,
-	derived_udp_readers: bool,
-	derived_max_pending: bool,
+	derived_chain_walks:      bool,
+	derived_connection_walks: bool,
+	derived_udp_readers:      bool,
+	derived_max_pending:      bool,
 	// `server.max_connections_per_prefix`, from `max_connections`.
-	derived_per_prefix:  bool,
+	derived_per_prefix:       bool,
 }
 
 /*
 The most UDP readers the machine will be taken to want, and the fewest.
 
-Readers are sized by parallelism rather than by load, and since #547 a reader is
-an event loop: one thread that reads its socket, answers what it read and serves
+Readers are sized by parallelism rather than by load, and a reader is an event
+loop (#547): one thread that reads its socket, answers what it read and serves
 its share of the connections. It is on a core whenever it has work, so one past
 the core count adds contention rather than throughput. Hence one per usable CPU
 rather than a multiple of it.
@@ -260,20 +260,8 @@ RESERVED_HANDLERS_SHARE :: 4
 MIN_RESERVED_HANDLERS :: 2
 
 /*
-The most queries that can be in flight at once: `max_pending` on fibers of their
-own, and one on each connection, which `max_pending` does not count (see
-`server/queries.odin`). The chain-walk bound and the follower ceiling are shares
-of this rather than of `max_pending` alone: a query on a TCP connection holds a
-walk or a follower's place as a UDP one does, and shares of a figure that left
-them out would let the connections take every walk the datagrams have.
-*/
-queries_in_flight :: proc(s: Server_Config) -> int {
-	return max(s.max_pending, 0) + max(s.max_connections, 0)
-}
-
-/*
 Chain-of-trust walks that may be waiting on an upstream at once, for a bound of
-`in_flight` queries (`queries_in_flight`): everything but the reservation above. At least one whatever
+`in_flight` queries: everything but the reservation above. At least one whatever
 the arithmetic says, since the bound is on walks at once rather than on walks.
 */
 derive_chain_walks :: proc(in_flight: int) -> int {

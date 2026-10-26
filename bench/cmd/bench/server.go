@@ -198,73 +198,7 @@ func (h *harness) elodinConfig(o serverOpts, p ports, logPath string) ([]string,
 		}
 	}
 
-	cfg := fmt.Sprintf(`log:
-  level: %s
-  queries: %t
-  file: %s
-
-server:
-  max_connections: %d
-  # The whole table to one prefix, for the same reason the limiter is off below:
-  # every client here is 127.0.0.1, so all of them are one client to a per-prefix
-  # share, and the shipped default of half the table would refuse the second half
-  # of the 500-connection TCP row rather than measure it. A real deployment keeps
-  # the share; see bench/results/2026-09-03-connection-table-share.md.
-  max_connections_per_prefix: %d
-  max_pending: %d
-  client_timeout: %s
-  # The load generator is one address sending as fast as it can, which is
-  # exactly the shape response rate limiting exists to stop. Measuring the
-  # server's ceiling means taking that limit off; a real deployment keeps it.
-  rate_limit:
-    enabled: false
-
-listeners:
-  udp:
-    enabled: true
-    address: "127.0.0.1"
-    port: %d
-    readers: %d
-  tcp:
-    enabled: true
-    address: "127.0.0.1"
-    port: %d
-  dot:
-    enabled: true
-    address: "127.0.0.1"
-    port: %d
-    cert_file: %s
-    key_file: %s
-  doh:
-    enabled: true
-    address: "127.0.0.1"
-    port: %d
-    path: /dns-query
-    cert_file: %s
-    key_file: %s
-
-upstream:
-  strategy: failover
-  timeout: 5s
-  attempts: %d
-  bootstrap: [127.0.0.1]
-  servers:
-    - name: mock
-      type: udp
-      address: %s
-      port: %s
-
-cache:
-  enabled: %t
-  max_entries: %d
-
-dnssec:
-  enabled: %t
-
-rewrites:
-  - domain: rewritten.bench.test
-    answer: 192.0.2.10
-`,
+	cfg := fmt.Sprintf(elodinTemplate,
 		o.logLevel, o.logQueries, logPath,
 		o.maxConnections, o.maxConnections, o.maxPending, o.clientTimeout,
 		p.dns, o.loops, p.dns, p.dot,
@@ -341,66 +275,7 @@ func (h *harness) unboundConfig(o serverOpts, p ports, logPath string) ([]string
 	cert := filepath.Join(h.dir, o.certKind+"-cert.pem")
 	key := filepath.Join(h.dir, o.certKind+"-key.pem")
 
-	cfg := fmt.Sprintf(`server:
-  verbosity: 0
-  num-threads: %d
-  so-reuseport: yes
-  interface: 127.0.0.1@%d
-  interface: 127.0.0.1@%d
-  interface: 127.0.0.1@%d
-  port: %d
-  tls-port: %d
-  https-port: %d
-  http-endpoint: "/dns-query"
-  tls-service-key: %s
-  tls-service-pem: %s
-  do-ip6: no
-  access-control: 127.0.0.0/8 allow
-  # The mock is on loopback, which Unbound refuses to forward to by default.
-  do-not-query-localhost: no
-  # Unbound answers test. itself (RFC 6761 section 6.2), NXDOMAIN for every
-  # name; the mock's zone is under it, so it has to be forwarded instead.
-  local-zone: "test." nodefault
-  # DNSSEC off, as for elodin: the mock's zone has no chain to the root.
-  module-config: "iterator"
-  qname-minimisation: no
-  # No rate limiting, for the reason elodin's is off: every client is one
-  # address asking as fast as it can.
-  ratelimit: 0
-  ip-ratelimit: 0
-  # Room for elodin's 10,000 cached answers several times over, so the cache
-  # is never what separates the two.
-  msg-cache-size: 32m
-  rrset-cache-size: 64m
-%s  num-queries-per-thread: %d
-  outgoing-range: %d
-  outgoing-num-tcp: 64
-  incoming-num-tcp: %d
-  tcp-idle-timeout: %d
-  # Unbound times out an upstream it has no round-trip figure for after 376 ms
-  # and retransmits, which against the long-delay mock would turn one query
-  # into four. elodin waits upstream.timeout (5s) for one attempt; so does this.
-  unknown-server-time-limit: 5000
-  # Unbound drops the reply to a client that has waited past this (1,900 ms by
-  # default) on the view that it has retried by now; the generator does not
-  # retry, and the in-flight rows hold queries for three seconds.
-  discard-timeout: 0
-  infra-cache-min-rtt: 5000
-  username: ""
-  chroot: ""
-  directory: %s
-  pidfile: ""
-  use-syslog: no
-  logfile: %s
-  log-queries: %s
-
-remote-control:
-  control-enable: no
-
-forward-zone:
-  name: "."
-  forward-addr: %s@%s
-`,
+	cfg := fmt.Sprintf(unboundTemplate,
 		threads, p.dns, p.dot, p.doh, p.dns, p.dot, p.doh, key, cert,
 		maxTTL, inflight, 2*inflight, perThreadTCP, o.clientTimeout.Milliseconds(),
 		h.dir, logPath, logQueries, p.upHost, p.upPort)
@@ -489,3 +364,135 @@ func (s *server) rss() int64 {
 	}
 	return v
 }
+
+// elodinTemplate is the configuration elodinConfig fills in, kept out of the
+// function so the function reads as what varies.
+const elodinTemplate = `log:
+  level: %s
+  queries: %t
+  file: %s
+
+server:
+  max_connections: %d
+  # The whole table to one prefix, for the same reason the limiter is off below:
+  # every client here is 127.0.0.1, so all of them are one client to a per-prefix
+  # share, and the shipped default of half the table would refuse the second half
+  # of the 500-connection TCP row rather than measure it. A real deployment keeps
+  # the share; see bench/results/2026-09-03-connection-table-share.md.
+  max_connections_per_prefix: %d
+  max_pending: %d
+  client_timeout: %s
+  # The load generator is one address sending as fast as it can, which is
+  # exactly the shape response rate limiting exists to stop. Measuring the
+  # server's ceiling means taking that limit off; a real deployment keeps it.
+  rate_limit:
+    enabled: false
+
+listeners:
+  udp:
+    enabled: true
+    address: "127.0.0.1"
+    port: %d
+    readers: %d
+  tcp:
+    enabled: true
+    address: "127.0.0.1"
+    port: %d
+  dot:
+    enabled: true
+    address: "127.0.0.1"
+    port: %d
+    cert_file: %s
+    key_file: %s
+  doh:
+    enabled: true
+    address: "127.0.0.1"
+    port: %d
+    path: /dns-query
+    cert_file: %s
+    key_file: %s
+
+upstream:
+  strategy: failover
+  timeout: 5s
+  attempts: %d
+  bootstrap: [127.0.0.1]
+  servers:
+    - name: mock
+      type: udp
+      address: %s
+      port: %s
+
+cache:
+  enabled: %t
+  max_entries: %d
+
+dnssec:
+  enabled: %t
+
+rewrites:
+  - domain: rewritten.bench.test
+    answer: 192.0.2.10
+`
+
+// unboundTemplate is the unbound.conf unboundConfig fills in; see there.
+const unboundTemplate = `server:
+  verbosity: 0
+  num-threads: %d
+  so-reuseport: yes
+  interface: 127.0.0.1@%d
+  interface: 127.0.0.1@%d
+  interface: 127.0.0.1@%d
+  port: %d
+  tls-port: %d
+  https-port: %d
+  http-endpoint: "/dns-query"
+  tls-service-key: %s
+  tls-service-pem: %s
+  do-ip6: no
+  access-control: 127.0.0.0/8 allow
+  # The mock is on loopback, which Unbound refuses to forward to by default.
+  do-not-query-localhost: no
+  # Unbound answers test. itself (RFC 6761 section 6.2), NXDOMAIN for every
+  # name; the mock's zone is under it, so it has to be forwarded instead.
+  local-zone: "test." nodefault
+  # DNSSEC off, as for elodin: the mock's zone has no chain to the root.
+  module-config: "iterator"
+  qname-minimisation: no
+  # No rate limiting, for the reason elodin's is off: every client is one
+  # address asking as fast as it can.
+  ratelimit: 0
+  ip-ratelimit: 0
+  # Room for elodin's 10,000 cached answers several times over, so the cache
+  # is never what separates the two.
+  msg-cache-size: 32m
+  rrset-cache-size: 64m
+%s  num-queries-per-thread: %d
+  outgoing-range: %d
+  outgoing-num-tcp: 64
+  incoming-num-tcp: %d
+  tcp-idle-timeout: %d
+  # Unbound times out an upstream it has no round-trip figure for after 376 ms
+  # and retransmits, which against the long-delay mock would turn one query
+  # into four. elodin waits upstream.timeout (5s) for one attempt; so does this.
+  unknown-server-time-limit: 5000
+  # Unbound drops the reply to a client that has waited past this (1,900 ms by
+  # default) on the view that it has retried by now; the generator does not
+  # retry, and the in-flight rows hold queries for three seconds.
+  discard-timeout: 0
+  infra-cache-min-rtt: 5000
+  username: ""
+  chroot: ""
+  directory: %s
+  pidfile: ""
+  use-syslog: no
+  logfile: %s
+  log-queries: %s
+
+remote-control:
+  control-enable: no
+
+forward-zone:
+  name: "."
+  forward-addr: %s@%s
+`

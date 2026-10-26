@@ -3,7 +3,6 @@ package server
 import "core:mem"
 import "core:sync"
 import "core:time"
-import "elodin:config"
 import "elodin:loop"
 
 /*
@@ -120,9 +119,8 @@ Stored_Verdict :: enum u8 {
 }
 
 /*
-How many followers may wait on leaders at once: a quarter of what can be in
-flight (`config.queries_in_flight`: `max_pending` and one per connection), the
-share `refresh_ceiling` takes of `max_pending` for the stale refreshes.
+How many followers counted in `server.max_pending` may wait on leaders at once:
+a quarter of it, the share `refresh_ceiling` gives the stale refreshes.
 
 A follower holds its place in flight for as long as the leader takes, up to its
 `flight_patience`, about four of its longest group's timeouts - and a leader
@@ -130,17 +128,18 @@ validating a slow chain holds one of `dnssec.max_chain_walks` - so without a
 ceiling, one flood of a single cold signed name would park everything in flight
 behind one walk, which is the exhaustion that bound exists to prevent (issue
 #356). Past the ceiling a query forwards on its own and meets that bound like
-any other. Every follower is counted, a connection's included, so the share is
-of the connections as well: of `max_pending` alone, a client holding connections
-could fill it and leave every datagram for a hot name to forward on its own. No
-bound - a `Server` built as a literal - is no ceiling.
+any other. Queries answered on a connection's fiber are not counted:
+`max_connections` bounds them, one at a time per connection, and a share of
+`max_pending` that they could fill would leave the datagrams for a hot name to
+forward on their own. No bound - a `Server` built as a literal - is no ceiling.
 */
 @(private)
 follower_ceiling :: proc(s: ^Server) -> int {
-	if live(s).cfg.server.max_pending <= 0 {
+	limit := live(s).cfg.server.max_pending
+	if limit <= 0 {
 		return 0
 	}
-	return max(config.queries_in_flight(live(s).cfg.server) / 4, 1)
+	return max(limit / 4, 1)
 }
 
 /*
@@ -173,14 +172,16 @@ Join the flight for `key`, leading it if there is none.
 
 `own` back: the caller leads, and must `flight_land` it. Another flight: the
 caller follows, and must `flight_follow` it, passing back `counted`. Nil: the
-table is full, or the followers are at `ceiling` (zero is none), and the caller
-forwards on its own.
+table is full, or `counted_query` and the followers counted in `max_pending` are
+at `ceiling` (zero is none), and the caller forwards on its own.
 */
 @(private)
 flight_join :: proc(
 	s: ^Server,
 	key: string,
 	own: ^Flight,
+	// Whether the caller is a query counted against `max_pending`; see `follower_ceiling`.
+	counted_query := false,
 	ceiling := 0,
 ) -> (
 	flight: ^Flight,
@@ -195,7 +196,7 @@ flight_join :: proc(
 				free_slot = i
 			}
 		} else if f.key == key {
-			if ceiling > 0 {
+			if counted_query && ceiling > 0 {
 				if s.inflight.followers >= ceiling {
 					return nil, false
 				}

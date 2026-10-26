@@ -3,7 +3,6 @@ package server
 import "core:mem"
 import "core:strings"
 import "core:time"
-import "elodin:config"
 import "elodin:dns"
 import "elodin:dnssec"
 import "elodin:logx"
@@ -136,12 +135,21 @@ start_validator :: proc(s: ^Server, l: ^Live) -> bool {
 	resolver that will not start, or one quietly running at a number nobody
 	chose, is worse than one that says what it is doing.
 	*/
-	in_flight := config.queries_in_flight(l.cfg.server)
-	if !l.cfg.server.sizing.derived_chain_walks && l.cfg.dnssec.max_chain_walks >= in_flight {
+	if !l.cfg.server.sizing.derived_chain_walks && l.cfg.dnssec.max_chain_walks >= l.cfg.server.max_pending {
 		logx.warnf(
-			"dnssec: max_chain_walks %d leaves none of the %d queries server.max_pending and server.max_connections allow in flight reserved, so a flood of fresh names can hold them all; see issue #356",
+			"dnssec: max_chain_walks %d leaves none of the %d queries server.max_pending allows in flight reserved, so a flood of fresh names can hold them all; see issue #356",
 			l.cfg.dnssec.max_chain_walks,
-			in_flight,
+			l.cfg.server.max_pending,
+		)
+	}
+	// The same for the connections, and said the same way: a bound that allows as
+	// many walks as there may be connections is that bound switched off.
+	if !l.cfg.server.sizing.derived_connection_walks &&
+	   l.cfg.dnssec.max_connection_walks >= l.cfg.server.max_connections {
+		logx.warnf(
+			"dnssec: max_connection_walks %d leaves none of the %d connections reserved, so a flood of fresh names can hold them all; see issue #356",
+			l.cfg.dnssec.max_connection_walks,
+			l.cfg.server.max_connections,
 		)
 	}
 
@@ -177,6 +185,7 @@ start_validator :: proc(s: ^Server, l: ^Live) -> bool {
 			anchors = anchors,
 			max_nsec3_iterations = l.cfg.dnssec.max_nsec3_iterations,
 			max_chain_walks = l.cfg.dnssec.max_chain_walks,
+			max_connection_walks = l.cfg.dnssec.max_connection_walks,
 			// The one dial on how much memory validation may hold. Zero here
 			// takes the validator's own default, as everywhere else.
 			max_cached_zones     = l.cfg.dnssec.max_cached_zones,
@@ -191,9 +200,10 @@ start_validator :: proc(s: ^Server, l: ^Live) -> bool {
 	// default, and a log line naming a number nothing is using is worse than no
 	// line at all.
 	logx.infof(
-		"dnssec: validating against %d trust anchor(s), at most %d chain walks upstream at once",
+		"dnssec: validating against %d trust anchor(s), at most %d chain walks upstream at once for queries in flight and %d for queries on connections",
 		len(anchors) if len(anchors) > 0 else len(dnssec.root_anchors()),
-		dnssec.chain_walk_limit(l.validator),
+		dnssec.chain_walk_limit(l.validator, .Shared),
+		dnssec.chain_walk_limit(l.validator, .Connection),
 	)
 	return true
 }

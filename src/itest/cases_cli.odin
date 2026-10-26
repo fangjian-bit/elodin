@@ -355,9 +355,12 @@ server: {{ user: root }}
 		)
 		res := new_check(r, path, "check-retired-keys")
 		check_eq_int(r, res.exit_code, 0, "exit code for a file naming the retired keys")
-		for key in ([]string{"server.workers", "server.upstream_workers", "server.running_workers", "dnssec.max_connection_walks"}) {
+		for key in ([]string{"server.workers", "server.upstream_workers", "server.running_workers"}) {
 			check(r, strings.contains(res.output, fmt.tprintf("warning: %s is no longer used", key)), "%s was not named: %q", key, res.output)
 		}
+		// Still a setting: the connections keep a walk bound of their own.
+		check(r, !strings.contains(res.output, "max_connection_walks is no longer used"), "max_connection_walks was called retired: %q", res.output)
+		check(r, strings.contains(res.output, "connection_walks=24"), "the configured connection walk bound was not printed: %q", res.output)
 	}
 	end_case(r)
 

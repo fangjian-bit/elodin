@@ -1851,7 +1851,7 @@ load_dnssec :: proc(l: ^Loader, cfg: ^Config) {
 	opt_bool(l, n, "enabled", &cfg.dnssec.enabled, "dnssec")
 	opt_int(l, n, "max_nsec3_iterations", &cfg.dnssec.max_nsec3_iterations, "dnssec")
 	opt_int(l, n, "max_chain_walks", &cfg.dnssec.max_chain_walks, "dnssec")
-	retired_int(l, cfg, n, "max_connection_walks", .Max_Connection_Walks, "dnssec")
+	opt_int(l, n, "max_connection_walks", &cfg.dnssec.max_connection_walks, "dnssec")
 	opt_int(l, n, "max_cached_zones", &cfg.dnssec.max_cached_zones, "dnssec")
 
 	if a := yaml.get(n, "trust_anchors"); !yaml.is_null(a) {
@@ -2945,8 +2945,14 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 	it currently is. See `derive_chain_walks`.
 	*/
 	if cfg.dnssec.max_chain_walks == 0 {
-		cfg.dnssec.max_chain_walks = derive_chain_walks(queries_in_flight(cfg.server))
+		cfg.dnssec.max_chain_walks = derive_chain_walks(cfg.server.max_pending)
 		cfg.server.sizing.derived_chain_walks = true
+	}
+	// The connections answer their queries outside `max_pending`, so their bound
+	// comes from `max_connections`. See `Dnssec_Config.max_connection_walks`.
+	if cfg.dnssec.max_connection_walks == 0 {
+		cfg.dnssec.max_connection_walks = derive_chain_walks(cfg.server.max_connections)
+		cfg.server.sizing.derived_connection_walks = true
 	}
 	/*
 	The table itself, refused rather than clamped.
@@ -3010,6 +3016,12 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 	// rather than reading as one more way of asking for the default.
 	if cfg.dnssec.max_chain_walks < 0 {
 		errorf(l, "dnssec.max_chain_walks must not be negative; 0 derives it from server.max_pending")
+	}
+	if cfg.dnssec.max_connection_walks < 0 {
+		errorf(
+			l,
+			"dnssec.max_connection_walks must not be negative; 0 derives it from server.max_connections",
+		)
 	}
 	// And the same for the cache bound: zero is the default, negative is not a
 	// cache without a bound but a number nobody meant.

@@ -576,7 +576,7 @@ dnssec_verdicts_changed :: proc(a, b: config.Dnssec_Config) -> bool {
 		return false
 	}
 	x := a
-	x.max_chain_walks, x.max_cached_zones = b.max_chain_walks, b.max_cached_zones
+	x.max_chain_walks, x.max_connection_walks, x.max_cached_zones = b.max_chain_walks, b.max_connection_walks, b.max_cached_zones
 	return differs(x, b)
 }
 

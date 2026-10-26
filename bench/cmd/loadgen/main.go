@@ -406,7 +406,10 @@ func dialDoT(c config) (client, error) {
 	// connection accepted by the kernel and never handshake on it, and an
 	// unbounded dial would wait on that forever.
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", c.server, &tls.Config{
-		InsecureSkipVerify: true,
+		// The server under test presents the harness's own self-signed
+		// certificate; verifying it would measure nothing.
+		InsecureSkipVerify: true, // nosemgrep
+		MinVersion:         tls.VersionTLS12,
 		NextProtos:         []string{"dot"},
 	})
 	if err != nil {

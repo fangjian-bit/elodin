@@ -76,8 +76,10 @@ test_chain_walks_are_derived_at_load :: proc(t: ^testing.T) {
 	testing.expect(t, err == nil, "expected a clean load")
 	// From the bound on queries in flight, derived at load rather than at
 	// start-up, so `--check` and the run that follows it name the same number.
-	// Of the connections too: a query on one holds a walk as a datagram does.
-	testing.expect_value(t, cfg.dnssec.max_chain_walks, derive_chain_walks(16 + 512))
+	testing.expect_value(t, cfg.dnssec.max_chain_walks, derive_chain_walks(16))
+	// And the connections' own, from theirs.
+	testing.expect_value(t, cfg.dnssec.max_connection_walks, derive_chain_walks(cfg.server.max_connections))
+	testing.expect(t, cfg.server.sizing.derived_connection_walks, "a derived connection bound was not marked so")
 	testing.expect(t, cfg.server.sizing.derived_chain_walks, "a derived bound was not marked so")
 
 	// A number in the file wins, as everywhere else in this file.
@@ -115,7 +117,9 @@ test_retired_keys_are_accepted_and_recorded :: proc(t: ^testing.T) {
 		context.temp_allocator,
 	)
 	testing.expect(t, err == nil, "a file naming the retired keys was refused")
-	testing.expect_value(t, cfg.retired, Retired_Keys{.Workers, .Upstream_Workers, .Running_Workers, .Max_Connection_Walks})
+	testing.expect_value(t, cfg.retired, Retired_Keys{.Workers, .Upstream_Workers, .Running_Workers})
+	// Not retired: the connections keep a walk bound of their own.
+	testing.expect_value(t, cfg.dnssec.max_connection_walks, 24)
 
 	plain, perr := load_string("upstream:\n  servers: [1.1.1.1]\n", context.temp_allocator)
 	testing.expect(t, perr == nil, "expected a clean load")
@@ -130,7 +134,6 @@ test_retired_keys_are_accepted_and_recorded :: proc(t: ^testing.T) {
 		testing.expectf(t, strings.contains(line, RETIRED_KEYS_REFUSED_IN), "%v: %q names no release", key, line)
 	}
 	testing.expect(t, strings.contains(retired_warning(.Workers), "server.workers"))
-	testing.expect(t, strings.contains(retired_warning(.Max_Connection_Walks), "dnssec.max_connection_walks"))
 	free_all(context.temp_allocator)
 }
 
@@ -323,7 +326,7 @@ test_configured_max_pending_wins :: proc(t: ^testing.T) {
 	testing.expect(t, err == nil, "expected a clean load")
 	testing.expect_value(t, cfg.server.max_pending, 40)
 	testing.expect(t, !cfg.server.sizing.derived_max_pending, "a configured bound is not a derived one")
-	testing.expect_value(t, cfg.dnssec.max_chain_walks, derive_chain_walks(40 + 512))
+	testing.expect_value(t, cfg.dnssec.max_chain_walks, derive_chain_walks(40))
 
 	_, nerr := load_string("upstream:\n  servers: [1.1.1.1]\nserver:\n  max_pending: -1\n", context.temp_allocator)
 	testing.expect(t, nerr != nil, "a negative max_pending should be refused")

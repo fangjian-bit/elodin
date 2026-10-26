@@ -731,7 +731,8 @@ serve_doh_request :: proc(
 	// denial's SOA figure, so intermediaries expire the answer at the same time
 	// the DNS data does - the bounded TTL, see `doh_max_age`.
 	max_age: u32
-	response, _, ok := handle_query(s, query, .DoH, client, context.temp_allocator, max_age = &max_age)
+	// Answered on the connection's fiber, outside `max_pending`; see `handle_query`'s `pool`.
+	response, _, ok := handle_query(s, query, .DoH, client, context.temp_allocator, pool = .Connection, max_age = &max_age)
 	if !ok || len(response) == 0 {
 		return send_http_error(conn, "doh", 500, "no response", req.keep_alive)
 	}

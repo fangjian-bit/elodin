@@ -58,7 +58,7 @@ That number is what may be in flight: every query a fiber of its own runs
 which may be calling `exchange` on the same upstream at once. A race asks each
 member once, so it is one caller per upstream however many members it has. So
 the figure is derived from those two (`pipeline_outstanding`), and this is its
-floor - the 256 it was when the worker threads were the bound.
+floor.
 
 Which leaves the bound doing what it was asked to do and nothing else: a server
 that has stopped answering cannot pile up waiters without limit, and one that

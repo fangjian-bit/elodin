@@ -167,6 +167,28 @@ get_h2_conn :: proc(
 	// its deadline still makes one bounded attempt.
 	stream, proto, derr := negotiate_https(u, max(time.diff(time.now(), deadline), time.Millisecond))
 
+	/*
+	An h2 connection is built here, before `u.mu` is taken again: building it
+	writes the connection preface, and a write may park, which no fiber may do
+	holding a plain lock - the next fiber of its loop to reach for `u.mu` would
+	block the loop thread under the writer that holds it.
+	*/
+	hc: ^H2_Conn
+	if derr == .None && proto == .H2 {
+		// Overrides the connect/handshake timeout `open_stream` applied: the
+		// reader now lives for as long as the connection does, and normal
+		// idle time between queries must not look like a read failure.
+		_ = net.set_option(stream.socket, .Receive_Timeout, H2_POLL_INTERVAL)
+		if stream.tls != nil {
+			// A TLS connection stops taking its deadlines from the socket once the
+			// handshake is done - it waits outside the lock rather than in the
+			// kernel, so that a reader between queries does not hold the lock a
+			// writer needs - and has to be told separately.
+			tlsx.set_timeouts(stream.tls, H2_POLL_INTERVAL, timeout)
+		}
+		hc = make_h2_conn(u, stream)
+	}
+
 	sync.mutex_lock(&u.mu)
 	u.connecting = false
 	if derr != .None {
@@ -196,19 +218,7 @@ get_h2_conn :: proc(
 		return nil, false, .None
 	}
 
-	// Overrides the connect/handshake timeout `open_stream` applied: the
-	// reader now lives for as long as the connection does, and normal
-	// idle time between queries must not look like a read failure.
-	_ = net.set_option(stream.socket, .Receive_Timeout, H2_POLL_INTERVAL)
-	if stream.tls != nil {
-		// A TLS connection stops taking its deadlines from the socket once the
-		// handshake is done - it waits outside the lock rather than in the
-		// kernel, so that a reader between queries does not hold the lock a
-		// writer needs - and has to be told separately.
-		tlsx.set_timeouts(stream.tls, H2_POLL_INTERVAL, timeout)
-	}
-
-	hc := start_h2_conn(u, stream)
+	start_h2_reader(u, hc)
 	u.h2 = hc
 
 	h2.client_ref(hc.client)
@@ -229,26 +239,40 @@ counted in `u.h2_readers` until its last touch of `u`, which `teardown_h2` waits
 for.
 */
 @(private)
+/*
+Both halves at once, the caller holding `u.mu`: for a caller off a loop - the
+tests - where a preface write that waits blocks only its own thread. A fiber
+builds the connection before taking the lock instead; see `get_h2_conn`.
+*/
 start_h2_conn :: proc(u: ^Upstream, stream: Stream) -> ^H2_Conn {
+	hc := make_h2_conn(u, stream)
+	start_h2_reader(u, hc)
+	return hc
+}
+
+// The connection and its client, which writes the preface. Not under `u.mu`.
+make_h2_conn :: proc(u: ^Upstream, stream: Stream) -> ^H2_Conn {
 	hc := new(H2_Conn, u.allocator)
 	hc.stream = stream
 	hc.allocator = u.allocator
 	hc.refs = 2
 	hc.upstream = u
 	hc.client = h2.client_make(h2.IO{user = hc, read = h2_io_read, write = h2_io_write}, u.allocator)
+	return hc
+}
+
+// Under `u.mu`, which `h2_readers` is counted under. Starting a fiber does not park.
+start_h2_reader :: proc(u: ^Upstream, hc: ^H2_Conn) {
 	u.h2_readers += 1
 	if !loop.go(h2_reader, hc) {
 		// Nothing to run a reader on: nothing would ever read this connection's
 		// answers, so it goes out already closed, the next caller dials
-		// afresh, and the reader's share is let go here instead.
+		// afresh, and the reader's share is let go here instead. Nobody else
+		// has the client yet, so its flag needs no lock of its own.
 		u.h2_readers -= 1
-		loop.lock(&hc.client.mu)
 		sync.atomic_store(&hc.client.closed, true)
-		loop.unlock(&hc.client.mu)
 		release_h2_conn(hc)
-		return hc
 	}
-	return hc
 }
 
 /*
