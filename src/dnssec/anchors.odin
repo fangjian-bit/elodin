@@ -148,7 +148,9 @@ parse_trust_anchor :: proc(text: string, allocator := context.allocator) -> (anc
 
 	joined := strings.concatenate(fields[start + 3:], context.temp_allocator)
 	digest, digest_ok := decode_hex(joined, allocator)
+	// `decode_hex` frees its own failure; the refusals below free what it kept.
 	if !digest_ok || len(digest) == 0 {
+		delete(digest, allocator)
 		return {}, false
 	}
 	/*
@@ -160,6 +162,7 @@ local crypto policy will compute. Reading it here would
 	question that has nothing to do with the policy.
 	*/
 	if len(digest) != digest_size(u8(digest_type)) && digest_size(u8(digest_type)) != 0 {
+		delete(digest, allocator)
 		return {}, false
 	}
 
