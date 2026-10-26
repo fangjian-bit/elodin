@@ -1312,7 +1312,11 @@ resume_twice :: proc(
 		return
 	}
 	defer net.close(listener)
-	ep, _ := net.bound_endpoint(listener)
+	ep, berr := net.bound_endpoint(listener)
+	if berr != nil {
+		testing.expectf(t, false, "cannot read the bound port: %v", berr)
+		return
+	}
 
 	sctx, serr := server_context(cert, key)
 	if serr != .None {
@@ -1329,7 +1333,10 @@ resume_twice :: proc(
 		return
 	}
 	defer context_destroy(cctx)
-	ssl_ctx_set_max_proto_version(cctx.ptr, version)
+	if !ssl_ctx_set_max_proto_version(cctx.ptr, version) {
+		testing.expectf(t, false, "cannot cap the client at %x", version)
+		return
+	}
 	if no_ticket {
 		SSL_CTX_set_options(cctx.ptr, SSL_OP_NO_TICKET)
 	}
@@ -1354,9 +1361,12 @@ resume_twice :: proc(
 		SSL_SESSION_free(second)
 	}
 	if !ok {
-		// Unblock the worker's second accept.
-		if s, err := net.dial_tcp_from_endpoint(ep); err == nil {
-			net.close(s)
+		// Unblock whichever accepts the worker still waits in. A connection it
+		// never reaches sits in the backlog until the listener closes.
+		for _ in 0 ..< srv.rounds {
+			if s, err := net.dial_tcp_from_endpoint(ep); err == nil {
+				net.close(s)
+			}
 		}
 	}
 	thread.join(worker)
@@ -1385,14 +1395,15 @@ test_the_server_keeps_no_session_and_clients_still_resume :: proc(t: ^testing.T)
 		testing.expectf(t, reused, "%x: the client did not resume its ticket", version)
 	}
 
-	cached, _, ok := resume_twice(t, TLS1_2_VERSION, true, nil)
+	cached, reused, ok := resume_twice(t, TLS1_2_VERSION, true, nil)
 	if !ok {
 		return
 	}
 	testing.expectf(t, cached == 0, "a ticketless TLS 1.2 client left %d sessions in the server context", cached)
+	testing.expect(t, !reused, "a ticketless TLS 1.2 client resumed against a context with no cache")
 
-	control, reused, cok := resume_twice(t, TLS1_2_VERSION, true, c.long(SSL_SESS_CACHE_SERVER))
+	control, creused, cok := resume_twice(t, TLS1_2_VERSION, true, c.long(SSL_SESS_CACHE_SERVER))
 	if cok {
-		testing.expectf(t, control > 0 && reused, "OpenSSL's default cache mode held %d sessions, resumed: %v", control, reused)
+		testing.expectf(t, control > 0 && creused, "OpenSSL's default cache mode held %d sessions, resumed: %v", control, creused)
 	}
 }
