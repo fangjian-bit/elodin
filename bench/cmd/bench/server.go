@@ -168,7 +168,7 @@ func (h *harness) start(o serverOpts) (*server, error) {
 	}
 	s.pid = s.cmd.Process.Pid
 
-	if err := waitReady(s.dnsAddr, 10*time.Second); err != nil {
+	if err := waitReady(s.dnsAddr, 15*time.Second); err != nil {
 		s.stop()
 		said, _ := os.ReadFile(stderr.Name())
 		return nil, fmt.Errorf("%s (%s) did not come up: %w\n%s", o.name, o.kind, err, strings.TrimSpace(string(said)))
@@ -358,6 +358,9 @@ func (h *harness) unboundConfig(o serverOpts, p ports, logPath string) ([]string
   access-control: 127.0.0.0/8 allow
   # The mock is on loopback, which Unbound refuses to forward to by default.
   do-not-query-localhost: no
+  # Unbound answers test. itself (RFC 6761 section 6.2), NXDOMAIN for every
+  # name; the mock's zone is under it, so it has to be forwarded instead.
+  local-zone: "test." nodefault
   # DNSSEC off, as for elodin: the mock's zone has no chain to the root.
   module-config: "iterator"
   qname-minimisation: no
@@ -378,6 +381,10 @@ func (h *harness) unboundConfig(o serverOpts, p ports, logPath string) ([]string
   # and retransmits, which against the long-delay mock would turn one query
   # into four. elodin waits upstream.timeout (5s) for one attempt; so does this.
   unknown-server-time-limit: 5000
+  # Unbound drops the reply to a client that has waited past this (1,900 ms by
+  # default) on the view that it has retried by now; the generator does not
+  # retry, and the in-flight rows hold queries for three seconds.
+  discard-timeout: 0
   infra-cache-min-rtt: 5000
   username: ""
   chroot: ""
@@ -418,7 +425,10 @@ func waitReady(addr string, within time.Duration) error {
 			continue
 		}
 		q := dnswire.Query(1, "ready.bench.test", dnswire.TypeA, 0)
-		_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+		// Long enough for the slowest mock a row starts (three seconds): a
+		// server that coalesces answers a later probe from the first one's
+		// question, but one that does not answers only the probe that asked.
+		_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 		if _, err := conn.Write(q); err != nil {
 			last = err
 			conn.Close()

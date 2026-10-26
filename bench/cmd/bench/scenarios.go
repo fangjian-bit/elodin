@@ -386,6 +386,12 @@ func (h *harness) misses() (section, error) {
 	return section{title: "Cache misses against the upstream delay", body: sb.String()}, nil
 }
 
+// unboundHeld is the most connections Unbound is asked to hold. It allocates a
+// 64 KiB buffer for every TCP handler it is configured with, and the rows give
+// it three times its even share per thread, so 20,000 is several GiB before a
+// connection is opened.
+const unboundHeld = 5000
+
 // connections is what an idle connection costs the server: N clients connect,
 // ask one question each, and stay connected while the server's resident memory
 // is read. The thread model spent a thread on each; the event loop spends a
@@ -399,7 +405,7 @@ func (h *harness) connections() (section, error) {
 	for _, kind := range h.kinds {
 		for _, t := range []string{"tcp", "dot", "doh2"} {
 			for _, n := range []int{1000, 5000, 20000} {
-				if n > *held {
+				if n > *held || (kind == "unbound" && n > unboundHeld) {
 					continue
 				}
 				s, err := h.start(serverOpts{

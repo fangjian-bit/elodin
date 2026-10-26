@@ -111,6 +111,9 @@ func main() {
 		report, err = h.runAll(*only)
 	}
 	if err != nil {
+		// log.Fatalf skips the deferred teardown, which would leave the mocks
+		// running and holding their ports.
+		h.teardown()
 		log.Fatalf("bench: %v", err)
 	}
 
