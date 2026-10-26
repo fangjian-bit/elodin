@@ -126,12 +126,12 @@ that; `cookies.upstream: false` is the test, and the fix if it is.
   pools up to `max_idle` idle connections.
 - Idle connections are swept every 30 seconds: pooled HTTP/1.1 connections and
   the shared h2 or pipelined connection are closed once unused for
-  `idle_timeout`, and one the peer has closed goes at the next sweep. One with
-  a query still on it is left to finish.
-- `idle_timeout` is a ceiling. An upstream that hangs up after an idle gap has
-  its connections reaped at three quarters of that gap from then on, never below
-  two seconds; the learned figure only comes down, and is forgotten after an
-  hour.
+  `idle_timeout`, and a shared one the peer has closed goes at the next sweep.
+  One with a query still on it is left to finish.
+- `idle_timeout` is a ceiling. A `tcp://` or `tls://` upstream that hangs up
+  after an idle gap has its pipelined connection reaped at three quarters of
+  that gap from then on, never below two seconds; the learned figure only comes
+  down, and is forgotten after an hour.
 - A TLS handshake the peer resets partway through is retried once, inside the
   same `timeout`. Only a reset is retried.
 

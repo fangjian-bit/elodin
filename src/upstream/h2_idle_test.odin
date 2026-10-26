@@ -143,6 +143,28 @@ test_close_idle_retires_an_h2_conn_idle_past_the_timeout :: proc(t: ^testing.T) 
 	sync.mutex_lock(&f.u.mu)
 	testing.expect_value(t, len(f.u.h2_readers), 0)
 	sync.mutex_unlock(&f.u.mu)
+
+	// The connection a healthy peer saw ends in GOAWAY(NO_ERROR), RFC 9113
+	// section 6.8, not only in a FIN.
+	peer, _, aerr := net.accept_tcp(f.listener)
+	if !testing.expectf(t, aerr == nil, "cannot accept: %v", aerr) {
+		return
+	}
+	defer net.close(peer)
+	_ = net.set_option(peer, .Receive_Timeout, 3 * time.Second)
+	seen: [dynamic]u8
+	defer delete(seen)
+	buf: [4096]u8
+	for {
+		n, rerr := net.recv_tcp(peer, buf[:])
+		if rerr != nil || n == 0 {
+			break
+		}
+		append(&seen, ..buf[:n])
+	}
+	goaway := []u8{0, 0, 8, u8(h2.Frame_Type.Goaway), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	ends := len(seen) >= len(goaway) && string(seen[len(seen) - len(goaway):]) == string(goaway)
+	testing.expectf(t, ends, "the connection did not end in GOAWAY(NO_ERROR): % x", seen[max(len(seen) - len(goaway), 0):])
 }
 
 @(test)

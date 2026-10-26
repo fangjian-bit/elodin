@@ -818,7 +818,7 @@ client_rst_stream :: proc(c: ^Client, stream_id: u32, code: Error_Code) -> bool 
 	return client_write_all(c, out[:])
 }
 
-@(private)
+// Nothing is sent on a connection already closed.
 client_goaway :: proc(c: ^Client, code: Error_Code) {
 	out := make([dynamic]u8, 0, 17, context.temp_allocator)
 	write_frame_header(&out, 8, .Goaway, 0, 0)
