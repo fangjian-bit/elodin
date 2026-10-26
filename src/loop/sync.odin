@@ -209,8 +209,12 @@ lock_scope :: proc(m: ^Mutex) {
 A condition variable for a fiber or a thread, used with either kind of lock.
 
 As with `sync.Cond`, a wake may be spurious and every caller waits in a loop that
-re-checks its condition. Cancelling a fiber ends its wait, which the caller reads
-as the wait having timed out.
+re-checks its condition.
+
+Not cancellable, as `Mutex` is not: every caller waits in such a loop, bounded by
+a deadline of its own or by the fiber that will signal it, so a cancelled wait
+that returned at once would only be made again - a spin that never parks, holding
+the loop thread and with it the fiber that would have signalled.
 */
 Cond :: struct {
 	mu:      sync.Mutex,
@@ -235,7 +239,7 @@ cond_wait_loop :: proc(c: ^Cond, m: ^Mutex) {
 	_ = cond_wait_until(c, nil, m, {})
 }
 
-// False when `d` passed, or the fiber was cancelled, before a signal arrived.
+// False when `d` passed before a signal arrived.
 cond_wait_with_timeout_sync :: proc(c: ^Cond, m: ^sync.Mutex, d: time.Duration) -> bool {
 	if d <= 0 {
 		return false
@@ -269,7 +273,7 @@ cond_wait_until :: proc(c: ^Cond, sm: ^sync.Mutex, lm: ^Mutex, deadline: Tick) -
 	} else {
 		unlock(lm)
 	}
-	woken := waiter_block(&w, &c.mu, deadline, true)
+	woken := waiter_block(&w, &c.mu, deadline, false)
 	if !woken {
 		list_remove(&c.waiters, &w)
 	}

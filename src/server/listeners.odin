@@ -166,6 +166,7 @@ start_listeners :: proc(s: ^Server, l: ^Listeners) -> bool {
 				max_connections = cfg.server.max_connections if streams else 0,
 				pooled_upstream = config.pooled_upstream_connections(cfg.upstream),
 				in_flight = cfg.server.max_pending,
+				racers = cfg.server.max_pending if races(cfg.upstream) else 0,
 				udp_readers = cfg.listeners.udp.readers if cfg.listeners.udp.enabled else 0,
 				loops = len(s.loops),
 			},
@@ -1361,12 +1362,14 @@ start_stream_listener :: proc(
 	ctx.listeners = l
 	ctx.proto = proto
 	/*
-	One accept loop per listener, on the first loop. Accepting is a system call
-	and a few checks per connection, and the connections it accepts are spread
-	over every loop from there - see `next_loop` - which is where their TLS
-	handshakes and their queries run.
+	One accept loop per listener, each listener on a loop of its own in turn, so
+	that a UDP flood landing on one loop's reader holds up the accepts of at most
+	one listener. Accepting is a system call and a few checks per connection,
+	and the connections it accepts are spread over every loop from there - see
+	`next_loop` - which is where their TLS handshakes and their queries run.
 	*/
-	if conn_spawn(&l.conns, ctx, accept_loop, counted = false, on = server_loop(s, 0)) != .Started {
+	at := server_loop(s, len(l.stream_loop_ctx))
+	if conn_spawn(&l.conns, ctx, accept_loop, counted = false, on = at) != .Started {
 		logx.errorf("listeners.%s: cannot start the accept loop", name)
 		// Nothing was ever handed it, so it is ours to release.
 		free(ctx)

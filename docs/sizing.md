@@ -140,7 +140,9 @@ figures are on [the same page](public-resolver.md#handshake-floods).
 
 Every query in flight may hold an upstream socket, so the descriptors elodin can
 want are `max_connections`, `max_pending`, the idle upstream pools, the UDP
-readers and two per loop, plus a reserve. Startup warns when `RLIMIT_NOFILE` is
+readers and two per loop, plus a reserve - and, where a group uses `strategy:
+race`, `max_pending` again for the race queries still waiting after their
+question was answered ([upstreams](upstreams.md)). Startup warns when `RLIMIT_NOFILE` is
 short of that (`LimitNOFILE=` in the systemd unit, 8192 as shipped).
 
 ## Refused and failed connections

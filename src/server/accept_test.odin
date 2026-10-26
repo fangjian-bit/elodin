@@ -120,10 +120,11 @@ test_descriptors_wanted_counts_everything_that_holds_one :: proc(t: ^testing.T) 
 		max_connections = 512,
 		pooled_upstream = 16,
 		in_flight       = 1024,
+		racers          = 1024,
 		udp_readers     = 4,
 		loops           = 4,
 	}
-	testing.expect_value(t, descriptors_wanted(d), 512 + 16 + 1024 + 4 + 2 * 4 + DESCRIPTOR_RESERVE)
+	testing.expect_value(t, descriptors_wanted(d), 512 + 16 + 1024 + 1024 + 4 + 2 * 4 + DESCRIPTOR_RESERVE)
 
 	// The readers are a term of their own because an operator may set 64 of
 	// them, which would otherwise eat a reserve sized for eight.

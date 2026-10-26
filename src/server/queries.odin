@@ -35,9 +35,9 @@ Start `fn(data)` on a fiber of the calling fiber's loop, counted against `limit`
 in flight. A limit of zero or less is none. `fn` calls `query_done` as the last
 thing it does, whatever happens.
 
-Decided and counted in one step, for the reason `pool.try_submit` gave before
-it: the readers and connections asking are on several loops at once, so a
-check followed by a spawn is a gap every one of them can pass through together.
+Decided and counted in one step: the readers and connections asking are on
+several loops at once, so a check followed by a spawn is a gap every one of them
+can pass through together.
 
 On the caller's own loop because the query will answer on the caller's socket or
 stream, which lives there; off a loop - a test driving the resolver from a

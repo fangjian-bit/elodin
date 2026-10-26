@@ -802,3 +802,119 @@ test_a_wait_off_a_loop_with_no_deadline_waits :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, wait_fd(a, {.In}, {}), Wait_Result.Ready)
 }
+
+/*
+A fiber that never waits - a UDP reader under a flood, yielding every batch -
+does not keep the loop from its descriptors: a fiber parked on one that is
+already readable still wakes while the other keeps the ready list full.
+*/
+@(test)
+test_a_fiber_that_keeps_yielding_does_not_starve_a_descriptor :: proc(t: ^testing.T) {
+	a, b, paired := socket_pair(t)
+	if !paired {
+		return
+	}
+	defer linux.close(a)
+	defer linux.close(b)
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		p:       Probe,
+		fd:      linux.Fd,
+		woke:    bool,
+		give_up: bool,
+		parked:  Sema,
+		// Posted once the spinner is running, so the write below lands while
+		// the loop is spinning and not in an epoll wait the spawn woke.
+		running: Sema,
+	}
+	s := Shared {
+		fd = a,
+	}
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		sema_post(&s.parked)
+		s.p.result = wait_fd(s.fd, {.In}, {})
+		sync.atomic_store(&s.woke, true)
+		sync.sema_post(&s.p.done)
+	}, &s)
+	testing.expect(t, sema_wait_with_timeout(&s.parked, WAIT))
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		sema_post(&s.running)
+		for !sync.atomic_load(&s.woke) && !sync.atomic_load(&s.give_up) {
+			yield()
+		}
+	}, &s)
+	testing.expect(t, sema_wait_with_timeout(&s.running, WAIT))
+	_, _ = linux.write(b, transmute([]u8)string("ping"))
+	woke := sync.sema_wait_with_timeout(&s.p.done, WAIT)
+	if !woke {
+		// Let the spinner go, so the loop can stop and the test end.
+		sync.atomic_store(&s.give_up, true)
+		cancel_all(r.l)
+		_ = sync.sema_wait_with_timeout(&s.p.done, WAIT)
+	}
+	testing.expect(t, woke, "the descriptor's waiter never woke while another fiber yielded")
+	testing.expect_value(t, s.p.result, Wait_Result.Ready)
+}
+
+/*
+A cancelled fiber waiting on a cond in the usual loop - `for !ready { cond_wait }`
+- parks until it is signalled, rather than having every wait return at once and
+spinning its loop: the fiber that would signal it is on the same loop, and a spin
+that never parks never lets it run.
+*/
+@(test)
+test_a_cancelled_fiber_still_parks_on_a_cond :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		p:       Probe,
+		mu:      sync.Mutex,
+		cond:    Cond,
+		ready:   bool,
+		give_up: bool,
+		parked:  Sema,
+		waiting: Sema,
+	}
+	s: Shared
+	h, ok := spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		sema_post(&s.parked)
+		_ = sleep(time.Hour)
+		sema_post(&s.waiting)
+		sync.mutex_lock(&s.mu)
+		for !s.ready && !sync.atomic_load(&s.give_up) {
+			cond_wait(&s.cond, &s.mu)
+		}
+		s.p.value = int(s.ready)
+		sync.mutex_unlock(&s.mu)
+		sync.sema_post(&s.p.done)
+	}, &s)
+	testing.expect(t, ok)
+	testing.expect(t, sema_wait_with_timeout(&s.parked, WAIT))
+	cancel(h)
+	testing.expect(t, sema_wait_with_timeout(&s.waiting, WAIT))
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		sync.mutex_lock(&s.mu)
+		s.ready = true
+		cond_signal(&s.cond)
+		sync.mutex_unlock(&s.mu)
+	}, &s)
+	woke := sync.sema_wait_with_timeout(&s.p.done, WAIT)
+	if !woke {
+		// Let the spinner go, so the loop can stop and the test end.
+		sync.atomic_store(&s.give_up, true)
+		_ = sync.sema_wait_with_timeout(&s.p.done, WAIT)
+	}
+	testing.expect(t, woke, "the cancelled waiter never saw the signal")
+	testing.expect_value(t, s.p.value, 1)
+}

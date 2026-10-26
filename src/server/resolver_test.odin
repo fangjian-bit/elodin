@@ -837,7 +837,7 @@ test_a_stale_answer_does_not_wait_out_the_upstream_budget :: proc(t: ^testing.T)
 	s.group = group
 
 	/*
-	Declared last so that it is torn down first: `pool.destroy` joins the
+	Declared last so that it is torn down first: `stop_test_loop` waits out the
 	refresh, which is still inside its two-second upstream budget when this
 	returns and which writes to the cache and the group when it comes out.
 	*/
@@ -974,8 +974,8 @@ test_one_refresh_covers_every_client_waiting_on_a_name :: proc(t: ^testing.T) {
 	than reading one, and a runner slow enough to lose that race would report a
 	missing refresh as a failure of the single-flight this case is about.
 
-	`pool.destroy` joins the worker, so the job has returned and its one attempt
-	is on the socket or was never going to be. That is a fact about this
+	`stop_test_loop` waits out the loop, so the refresh has returned and its one
+	attempt is on the socket or was never going to be. That is a fact about this
 	process rather than a delay long enough to hope.
 	*/
 	stop_test_loop(&workers)

@@ -337,14 +337,31 @@ replies rather than failing.
 build_upstreams :: proc(s: ^Server, l: ^Live) -> bool {
 	cfg := l.cfg
 	outstanding := upstream.pipeline_outstanding(cfg.server.max_pending, cfg.server.max_connections)
-	group, gerr := upstream.make_group(cfg.upstream, cookies = cfg.cookies.upstream, outstanding = outstanding)
+	/*
+	Race losers outlive their queries, so they are not counted in `max_pending`
+	and need a bound of their own; the same figure, since it is what the
+	descriptor estimate allows them (`Descriptor_Demand.racers`). One budget for
+	every group, so routes do not each get another.
+	*/
+	sync.atomic_store(&s.racers.limit, cfg.server.max_pending)
+	group, gerr := upstream.make_group(
+		cfg.upstream,
+		cookies = cfg.cookies.upstream,
+		outstanding = outstanding,
+		racers = &s.racers,
+	)
 	if gerr != .None {
 		logx.errorf("no usable upstream servers")
 		return false
 	}
 	routes := make([]Zone_Route, len(cfg.upstream.zones))
 	for zone, i in cfg.upstream.zones {
-		zg, zerr := upstream.make_group(zone.upstream, cookies = cfg.cookies.upstream, outstanding = outstanding)
+		zg, zerr := upstream.make_group(
+			zone.upstream,
+			cookies = cfg.cookies.upstream,
+			outstanding = outstanding,
+			racers = &s.racers,
+		)
 		if zerr != .None {
 			logx.errorf("upstream.zones[%d]: no usable servers for %s", i, zone.domains[0])
 			// The routes built so far and the slice under them, which this

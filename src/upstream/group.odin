@@ -32,6 +32,47 @@ Group :: struct {
 	it; see `busy`.
 	*/
 	racing:     int,
+	// The budget every racer this group starts is counted in; nil is none.
+	racers:     ^Racer_Budget,
+}
+
+/*
+Racers in flight across every group that shares it, and how many there may be.
+
+A race's losers run on to their own timeout after the query has its answer (see
+`Race_State`), each holding a socket while the query that started them is no
+longer counted against `server.max_pending`. This is their bound. Past it a
+race starts as many legs as there is room for, and with no room at all asks its
+members in turn instead (`resolve_sequential`).
+*/
+Racer_Budget :: struct {
+	in_flight: int,
+	// Zero or less is none.
+	limit:     int,
+}
+
+@(private)
+take_racer :: proc(b: ^Racer_Budget) -> bool {
+	if b == nil {
+		return true
+	}
+	for {
+		n := sync.atomic_load(&b.in_flight)
+		limit := sync.atomic_load(&b.limit)
+		if limit > 0 && n >= limit {
+			return false
+		}
+		if _, taken := sync.atomic_compare_exchange_weak(&b.in_flight, n, n + 1); taken {
+			return true
+		}
+	}
+}
+
+@(private)
+release_racer :: proc(b: ^Racer_Budget) {
+	if b != nil {
+		sync.atomic_sub(&b.in_flight, 1)
+	}
 }
 
 make_group :: proc(
@@ -41,11 +82,14 @@ make_group :: proc(
 	cookies := false,
 	// Queries one pipelined connection may carry at once; see `pipeline_outstanding`.
 	outstanding := 0,
+	// What the group's racers are counted in; see `Racer_Budget`.
+	racers: ^Racer_Budget = nil,
 ) -> (
 	g: ^Group,
 	err: Error,
 ) {
 	g = new(Group, allocator)
+	g.racers = racers
 	g.strategy = cfg.strategy
 	g.timeout = cfg.timeout
 	g.attempts = max(cfg.attempts, 1)
@@ -1008,6 +1052,8 @@ race_worker :: proc(data: rawptr) {
 	// destroy the group the moment this reaches zero.
 	group := st.group
 	race_state_release(st)
+	// The budget outlives every group; the group may not outlive the next line.
+	release_racer(group.racers)
 	sync.atomic_sub(&group.racing, 1)
 }
 
@@ -1057,6 +1103,9 @@ resolve_race :: proc(
 
 	submitted := 0
 	for u, i in candidates {
+		if !take_racer(g.racers) {
+			break
+		}
 		st.jobs[i] = Race_Job {
 			upstream = u,
 			state    = st,
@@ -1077,6 +1126,7 @@ resolve_race :: proc(
 			st.refs -= 1
 			st.outstanding -= 1
 			sync.mutex_unlock(&st.mu)
+			release_racer(g.racers)
 			sync.atomic_sub(&g.racing, 1)
 			continue
 		}

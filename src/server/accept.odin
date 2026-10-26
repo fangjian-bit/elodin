@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:net"
 import "core:sync"
 import "core:time"
+import "elodin:config"
 import "elodin:logx"
 import "elodin:metrics"
 
@@ -503,9 +504,24 @@ Descriptor_Demand :: struct {
 	pooled_upstream: int,
 	// `server.max_pending`: each query in flight may hold an upstream socket.
 	in_flight:       int,
+	// Race legs, which outlive their queries; see `upstream.Racer_Budget`.
+	racers:          int,
 	udp_readers:     int,
 	// One epoll descriptor and one eventfd per loop.
 	loops:           int,
+}
+
+// Whether the default group or any route races, and so has losers to hold sockets.
+races :: proc(cfg: config.Upstream_Config) -> bool {
+	if cfg.strategy == .Race {
+		return true
+	}
+	for zone in cfg.zones {
+		if zone.upstream.strategy == .Race {
+			return true
+		}
+	}
+	return false
 }
 
 descriptors_wanted :: proc(d: Descriptor_Demand) -> int {
@@ -513,6 +529,7 @@ descriptors_wanted :: proc(d: Descriptor_Demand) -> int {
 		d.max_connections +
 		d.pooled_upstream +
 		d.in_flight +
+		d.racers +
 		d.udp_readers +
 		2 * d.loops +
 		DESCRIPTOR_RESERVE \

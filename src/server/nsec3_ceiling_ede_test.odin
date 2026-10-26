@@ -226,7 +226,7 @@ test_an_answer_insecure_over_the_iteration_ceiling_carries_ede_27 :: proc(t: ^te
 	/*
 	And once the entry has expired, through both ways `cache.stale_timeout`
 	answers: the refresh arriving in time, and the expired bytes when it does
-	not. Declared last so it is torn down first: `pool.destroy` joins a refresh
+	not. Declared last so it is torn down first: `stop_test_loop` waits out a refresh
 	still waiting on the silent upstream.
 	*/
 	cfg.cache.serve_stale = true

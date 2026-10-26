@@ -26,7 +26,12 @@ upstream:
 | `round_robin` | the same, but the starting position advances on every query      |
 | `race`        | query every healthy server at once, take the first usable answer |
 
-`race` multiplies upstream traffic by the number of servers.
+`race` multiplies upstream traffic by the number of servers. The servers that
+lose a race are left to answer or time out, so a server that keeps timing out is
+still counted as failing and paused ([the cooldown](#failures-and-the-cooldown)). Those waiting losers count against a
+process-wide budget of `server.max_pending` race queries: past it a race asks as
+many servers at once as there is room for, and with no room asks them in turn,
+as `failover` does.
 
 `bootstrap` resolves upstream hostnames. elodin does not use the system resolver
 for them, since on a machine where elodin *is* the system resolver that would

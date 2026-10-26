@@ -194,14 +194,20 @@ run :: proc(l: ^Loop) {
 	for {
 		run_ready(l)
 		drain_posts(l)
-		if len(l.ready) > 0 {
-			continue
-		}
-		if stop_reached(l) {
+		/*
+		Fibers still ready - one that yielded, or one woken this round - run next
+		round, but epoll is asked first, without waiting: a fiber that yields for
+		ever, as a UDP reader under a flood does, would otherwise keep every
+		descriptor and timer on this loop from being looked at.
+		*/
+		busy := len(l.ready) > 0
+		if !busy && stop_reached(l) {
 			return
 		}
 		timeout := i32(-1)
-		if len(l.timers) > 0 {
+		if busy {
+			timeout = 0
+		} else if len(l.timers) > 0 {
 			left := time.tick_diff(l.clock(), l.timers[0].deadline)
 			// Rounded up, so a timer due in 0.4 ms is not polled for in a loop of
 			// zero-length waits until it is due.
@@ -222,12 +228,12 @@ run :: proc(l: ^Loop) {
 		}
 		expire_timers(l, l.clock())
 		/*
-		Busy is a descriptor or another thread having had something for this
-		loop. A timer coming due is not: the listeners wake on one every
+		Busy is a fiber still ready, or a descriptor or another thread having had
+		something for this loop. A timer coming due is not: the listeners wake on one every
 		`LISTENER_POLL` to look for a stop, and a loop that counted those as work
 		would never be idle enough to trim.
 		*/
-		if n > 0 {
+		if n > 0 || busy {
 			l.last_busy = l.clock()
 		} else if time.tick_diff(l.last_busy, l.clock()) >= TRIM_AFTER {
 			trim_idle(l)
@@ -370,11 +376,18 @@ spawn :: proc(l: ^Loop, fn: proc(data: rawptr), data: rawptr) -> (h: Handle, ok:
 	}
 	f.fn = fn
 	f.data = data
-	f.incarnation += 1
 	f.cancelled = false
 	f.wake_reason = .None
-	f.state = .New
-	h = Handle{f, f.incarnation}
+	/*
+	Published in this order, the state last: from another thread this struct is
+	being reused while the loop may be acting on a `cancel` posted for its last
+	use, and `cancel_local` reads the state first. Seeing `.New`, it is sure to
+	see the new incarnation too, and leaves the new fiber alone.
+	*/
+	incarnation := f.incarnation + 1
+	sync.atomic_store(&f.incarnation, incarnation)
+	sync.atomic_store(&f.state, Fiber_State.New)
+	h = Handle{f, incarnation}
 	if tl_loop == l {
 		live_insert(l, f)
 		append(&l.ready, f)
@@ -388,7 +401,8 @@ spawn :: proc(l: ^Loop, fn: proc(data: rawptr), data: rawptr) -> (h: Handle, ok:
 Cancel the fiber `h` names, if it is still that fiber. From any thread.
 
 The fiber's current wait, and every wait it makes after this, returns
-`.Cancelled` - except a mutex being acquired, which is not given up halfway. What
+`.Cancelled` - except a mutex being acquired, which is not given up halfway, and
+a cond wait, which its caller would only make again (see `Cond`). What
 cancellation means beyond that is the fiber's: it sees its reads fail and its
 waits end, and unwinds the way it would for a timeout.
 */
@@ -406,7 +420,9 @@ cancel :: proc(h: Handle) {
 
 @(private)
 cancel_local :: proc(l: ^Loop, f: ^Fiber, incarnation: u64) {
-	if f.incarnation != incarnation || f.state == .Free || f.state == .Done {
+	// The state before the incarnation; `spawn` says why.
+	state := sync.atomic_load(&f.state)
+	if state == .Free || state == .Done || sync.atomic_load(&f.incarnation) != incarnation {
 		return
 	}
 	f.cancelled = true
@@ -611,7 +627,8 @@ Park the running fiber until something wakes it or `deadline` passes. The zero
 deadline is none.
 
 `cancellable` is whether `cancel` ends this park: true for every wait on the
-outside world, false for acquiring a `Mutex`, which is never abandoned halfway.
+outside world, false for acquiring a `Mutex`, which is never abandoned halfway,
+and for a `Cond`, whose callers would only wait again.
 A fiber already cancelled does not park at all.
 
 A wake is a hint and never a promise: every caller re-checks what it was waiting

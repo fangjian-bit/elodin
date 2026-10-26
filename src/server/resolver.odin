@@ -231,6 +231,8 @@ Server :: struct {
 	pending:      int,
 	// Where the next accepted connection goes; see `next_loop`.
 	next_loop:    uint,
+	// Race legs in flight in every group, against `max_pending`; see `build_upstreams`.
+	racers:       upstream.Racer_Budget,
 	/*
 	The expired entries being refreshed right now, one slot per cache key.
 
