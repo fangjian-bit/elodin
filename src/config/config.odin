@@ -1073,7 +1073,7 @@ Retired_Keys :: bit_set[Retired_Key]
 
 // The release in which the retired keys become unknown ones, and are refused:
 // the one after the release that retires them, 0.10.0.
-RETIRED_KEYS_REFUSED_IN :: "0.11.0"
+RETIRED_KEYS_REFUSED_IN :: "0.26.0"
 
 /*
 What a retired key was, and what decides what it decided now. One place, so

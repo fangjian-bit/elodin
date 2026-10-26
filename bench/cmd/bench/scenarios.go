@@ -399,6 +399,9 @@ func (h *harness) connections() (section, error) {
 	for _, kind := range h.kinds {
 		for _, t := range []string{"tcp", "dot", "doh2"} {
 			for _, n := range []int{1000, 5000, 20000} {
+				if n > *held {
+					continue
+				}
 				s, err := h.start(serverOpts{
 					name: "conns", kind: kind, cache: true,
 					maxConnections: n + 64, clientTimeout: 120 * time.Second,

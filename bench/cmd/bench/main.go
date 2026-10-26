@@ -32,6 +32,7 @@ var (
 	binary      = flag.String("binary", "", "elodin binary (default: ../bin/elodin); point it at a thread-model release for before/after rows")
 	unboundBin  = flag.String("unbound", "unbound", "Unbound binary for the comparison rows, looked up on PATH")
 	servers     = flag.String("servers", "elodin,unbound", "servers the comparison sections run against, comma-separated: elodin, unbound")
+	held        = flag.Int("held", 20000, "most connections the connections section holds open; lower it for a thread-model release, which spends a thread on each")
 	only        = flag.String("only", "", "run only scenarios whose name contains this")
 	duration    = flag.Duration("duration", 10*time.Second, "measured length of each run")
 	warmup      = flag.Duration("warmup", 2*time.Second, "unmeasured length before each run")

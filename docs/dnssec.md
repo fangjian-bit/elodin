@@ -166,7 +166,7 @@ dnssec: max_chain_walks <n> leaves none of the <n> queries server.max_pending al
 ```
 
 `dnssec.max_connection_walks` is no longer used: a file that names it loads, with
-a warning, until 0.11.0 refuses it.
+a warning, until 0.26.0 refuses it.
 
 ## max_cached_zones
 

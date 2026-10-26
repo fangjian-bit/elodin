@@ -30,7 +30,7 @@ $ elodin --check
 `server.workers`, `server.running_workers`, `server.upstream_workers` and
 `dnssec.max_connection_walks` are no longer used. A file that names them still
 loads, and each is named in a `warn` at startup, at every reload and under
-`--check`; 0.11.0 refuses them. Remove them.
+`--check`; 0.26.0 refuses them. Remove them.
 
 ## Event loops
 
