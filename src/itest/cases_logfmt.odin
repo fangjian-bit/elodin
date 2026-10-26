@@ -187,8 +187,9 @@ blocking: {{ enabled: false }}
 		udp_port,
 		env = env[:],
 		// --kill-on-exit: `stop_server` kills strace, and a tracee outlives its
-		// tracer otherwise, still bound to the port.
-		wrap = {"strace", "--kill-on-exit", "-f", "-qq", "-e", "trace=fsync,fdatasync,sync_file_range", "-o", trace_path},
+		// tracer otherwise, still bound to the port. --seccomp-bpf: the server
+		// stops only at the traced calls, not at every syscall of every thread.
+		wrap = {"strace", "--kill-on-exit", "--seccomp-bpf", "-f", "-qq", "-e", "trace=fsync,fdatasync,sync_file_range", "-o", trace_path},
 	)
 	if !ok {
 		// start_server_raw has failed the run already.
@@ -230,18 +231,14 @@ blocking: {{ enabled: false }}
 		// have been taken and seen.
 		check(r, !srv.running, "the server did not exit on SIGTERM under strace; log:\n%s", read_log(&srv))
 		check(r, strings.contains(string(trace), "SIGTERM"), "strace did not trace the server:\n%s", string(trace))
-		check(
-			r,
-			strings.count(string(logged), "msg=query") >= QUERIES,
-			"log.file has fewer than %d query lines:\n%s",
-			QUERIES,
-			string(logged),
-		)
+		// By name: wait_ready's version.bind probe is a query line too.
+		lines := strings.count(string(logged), "qname=sync-")
+		check(r, lines == QUERIES, "log.file has %d of the %d query lines:\n%s", lines, QUERIES, string(logged))
 		// One per call: "fsync(" and "fdatasync(" end in "sync(", and a call
 		// another thread interrupted adds a "<... fsync resumed>" line that
 		// does not, so it is not counted twice.
 		syncs := strings.count(string(trace), "sync(") + strings.count(string(trace), "sync_file_range(")
-		check(r, syncs == 0, "%d syncs for %d query lines:\n%s", syncs, QUERIES, string(trace))
+		check(r, syncs == 0, "%d syncs for %d query lines:\n%s", syncs, lines, string(trace))
 	}
 	end_case(r)
 }
