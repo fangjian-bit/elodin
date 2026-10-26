@@ -61,6 +61,12 @@ Loop :: struct {
 	signalled:           bool,
 	stopping:            bool,
 	ctx:                 runtime.Context,
+	/*
+	The allocator the loop was made with, which everything it allocates comes
+	from and `destroy` frees through. Apart from `ctx`, which `run` replaces on
+	the loop thread, because `spawn` reads it from any thread.
+	*/
+	allocator:           runtime.Allocator,
 	local_addresses:     [len(locals)]rawptr,
 	thread_stack_bottom: rawptr,
 	thread_stack_size:   uint,
@@ -125,9 +131,17 @@ make_loop :: proc(allocator := context.allocator) -> (l: ^Loop, ok: bool) {
 	l.clock = time.tick_now
 	l.ctx = context
 	// Everything the loop allocates, and every fiber's own allocations, come from
-	// the allocator it was made with; `destroy` frees through it.
+	// the allocator it was made with; `destroy` frees through it. The lists too,
+	// which would otherwise take whatever allocator the first append ran under.
+	l.allocator = allocator
 	l.ctx.allocator = allocator
 	l.fds = make(map[linux.Fd]^Fd_Watch, allocator)
+	l.ready = make([dynamic]^Fiber, allocator)
+	l.running = make([dynamic]^Fiber, allocator)
+	l.timers = make([dynamic]^Fiber, allocator)
+	l.spare_watches = make([dynamic]^Fd_Watch, allocator)
+	l.posted = make([dynamic]Post, allocator)
+	l.draining = make([dynamic]Post, allocator)
 	ev := linux.EPoll_Event {
 		events = {.IN},
 		data = {fd = wakefd},
@@ -135,6 +149,7 @@ make_loop :: proc(allocator := context.allocator) -> (l: ^Loop, ok: bool) {
 	if linux.epoll_ctl(epfd, .ADD, wakefd, &ev) != .NONE {
 		linux.close(wakefd)
 		linux.close(epfd)
+		delete(l.fds)
 		free(l, allocator)
 		return nil, false
 	}
@@ -153,7 +168,7 @@ destroy :: proc(l: ^Loop) {
 	if l == nil {
 		return
 	}
-	context.allocator = l.ctx.allocator
+	context.allocator = l.allocator
 	for list in ([]^Fiber{l.free_warm, l.free_cold}) {
 		for f := list; f != nil; {
 			next := f.next
@@ -195,6 +210,7 @@ run :: proc(l: ^Loop) {
 	tl_loop = l
 	defer tl_loop = nil
 	l.ctx = context
+	l.ctx.allocator = l.allocator
 	for i in 0 ..< locals_count {
 		l.local_addresses[i] = locals[i].address()
 	}
@@ -366,7 +382,7 @@ spawn :: proc(l: ^Loop, fn: proc(data: rawptr), data: rawptr) -> (h: Handle, ok:
 			f = l.free_cold
 			l.free_cold = f.next
 		case:
-			f = new(Fiber, l.ctx.allocator)
+			f = new(Fiber, l.allocator)
 			f.loop = l
 			f.heap_index = -1
 		}

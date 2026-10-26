@@ -55,10 +55,10 @@ has to sit above every number of callers the server can actually put in
 
 That number is what may be in flight: every query a fiber of its own runs
 (`server.max_pending`) and every connection's (`server.max_connections`), all of
-which may be calling `exchange` on the same upstream at once. A race asks each
-member once, so it is one caller per upstream however many members it has. So
-the figure is derived from those two (`pipeline_outstanding`), and this is its
-floor.
+which may be calling `exchange` on the same upstream at once, and under a race
+the losers still running after their queries have gone, up to `max_pending`
+more. So the figure is derived from those (`pipeline_outstanding`), and this is
+its floor.
 
 Which leaves the bound doing what it was asked to do and nothing else: a server
 that has stopped answering cannot pile up waiters without limit, and one that
@@ -172,7 +172,15 @@ Pipe_Waiter :: struct {
 	it is for and not every caller on the connection - thousands of them, at
 	`pipeline_outstanding` - each to take the lock and park again.
 	*/
-	cond:  loop.Cond,
+	cond:   loop.Cond,
+	/*
+	Whether this waiter is parked on `cond` in `pipe_wait`, under `Pipe_Conn.mu`.
+	A waiter still writing its query is in `waiters` too, but nobody is on its
+	`cond` to hear a hand-on, and its write may fail and leave without reading;
+	`pipe_hand_on` passes it over, and it looks at `reading` itself when it
+	arrives in `pipe_wait`.
+	*/
+	parked: bool,
 }
 
 @(private)
@@ -389,16 +397,16 @@ pipe_kill :: proc(c: ^Pipe_Conn, err: Error) {
 }
 
 /*
-Under `c.mu`, once a reader has stopped reading: wake one other waiter, so that
-if the reader goes - its reply came, or its time ran out - somebody takes the
-reading on. One rather than all: the rest are not needed for it, and whoever is
-woken and finds the reading taken again parks again. `self` is skipped; it is
-awake.
+Under `c.mu`, as a reader leaves: wake one parked waiter, so that somebody takes
+the reading on. One rather than all: the rest are not needed for it, and whoever
+is woken and finds the reading taken again parks again. `self` is skipped; it is
+awake. A waiter not yet parked is skipped too (see `Pipe_Waiter.parked`); with
+none parked nobody needs waking, since each takes the reading on arrival.
 */
 @(private)
 pipe_hand_on :: proc(c: ^Pipe_Conn, self: ^Pipe_Waiter) {
 	for _, w in c.waiters {
-		if w != self {
+		if w != self && w.parked {
 			loop.cond_signal(&w.cond)
 			return
 		}
@@ -843,7 +851,9 @@ pipe_wait :: proc(c: ^Pipe_Conn, w: ^Pipe_Waiter, id: u16, deadline: time.Tick) 
 			return .Timeout
 		}
 		if c.reading {
+			w.parked = true
 			loop.cond_wait_with_timeout(&w.cond, &c.mu, remaining)
+			w.parked = false
 			continue
 		}
 		/*
@@ -868,7 +878,8 @@ pipe_wait :: proc(c: ^Pipe_Conn, w: ^Pipe_Waiter, id: u16, deadline: time.Tick) 
 		if rerr != .None && rerr != .Timeout {
 			pipe_kill(c, rerr)
 		}
-		pipe_hand_on(c, w)
+		// Round again: this caller takes the reading back unless it leaves, and
+		// the defer above hands it on when it does.
 	}
 }
 

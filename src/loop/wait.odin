@@ -69,8 +69,8 @@ wait_fd :: proc(fd: linux.Fd, events: Events, deadline: Tick) -> Wait_Result {
 		if n := len(l.spare_watches); n > 0 {
 			w = pop(&l.spare_watches)
 		} else {
-			w = new(Fd_Watch, l.ctx.allocator)
-			w.waiters = make([dynamic]Fd_Waiter, 0, 2, l.ctx.allocator)
+			w = new(Fd_Watch, l.allocator)
+			w.waiters = make([dynamic]Fd_Waiter, 0, 2, l.allocator)
 		}
 		l.fds[fd] = w
 	}

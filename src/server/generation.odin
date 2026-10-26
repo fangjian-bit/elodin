@@ -336,7 +336,14 @@ replies rather than failing.
 @(private)
 build_upstreams :: proc(s: ^Server, l: ^Live) -> bool {
 	cfg := l.cfg
-	outstanding := upstream.pipeline_outstanding(cfg.server.max_pending, cfg.server.max_connections)
+	/*
+	A race's losers run on after their query has gone and its place in
+	`max_pending` has been taken by another, so where any group races, its
+	racers - up to `max_pending` more, the budget below - may be asking an
+	upstream beside the queries that are.
+	*/
+	in_flight := cfg.server.max_pending * (2 if races(cfg.upstream) else 1)
+	outstanding := upstream.pipeline_outstanding(in_flight, cfg.server.max_connections)
 	/*
 	Race losers outlive their queries, so they are not counted in `max_pending`
 	and need a bound of their own; the same figure, since it is what the
