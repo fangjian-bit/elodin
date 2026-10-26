@@ -224,16 +224,12 @@ Wrap a negotiated stream in an h2 client and start its reader thread. Under
 The connection has two owners, `u.h2` and the reader, and whichever lets go
 last frees it (`release_h2_conn`). The reader's handle is kept on `u` instead,
 since a reader that frees the connection cannot join itself; finished ones are
-reaped here, as each new connection starts, and `teardown_h2` joins the rest.
+reaped here, as each new connection starts, and at every `close_idle`, and
+`teardown_h2` joins the rest.
 */
 @(private)
 start_h2_conn :: proc(u: ^Upstream, stream: Stream) -> ^H2_Conn {
-	for i := len(u.h2_readers) - 1; i >= 0; i -= 1 {
-		if thread.is_done(u.h2_readers[i]) {
-			thread.destroy(u.h2_readers[i])
-			unordered_remove(&u.h2_readers, i)
-		}
-	}
+	reap_h2_readers_locked(u)
 	hc := new(H2_Conn, u.allocator)
 	hc.stream = stream
 	hc.allocator = u.allocator
@@ -254,6 +250,46 @@ start_h2_conn :: proc(u: ^Upstream, stream: Stream) -> ^H2_Conn {
 	return hc
 }
 
+// Under `u.mu`. Only finished readers, so the join returns at once.
+@(private)
+reap_h2_readers_locked :: proc(u: ^Upstream) {
+	for i := len(u.h2_readers) - 1; i >= 0; i -= 1 {
+		if thread.is_done(u.h2_readers[i]) {
+			thread.destroy(u.h2_readers[i])
+			unordered_remove(&u.h2_readers, i)
+		}
+	}
+}
+
+/*
+The h2 half of `close_idle`, under `u.mu`: take `u.h2` off the upstream if the
+peer has closed it, or nobody has used it for `idle_timeout`, or whatever its
+age if `all`, for the caller to retire once the lock is let go.
+
+A connection somebody holds is left alone even when `all`, as a busy pipe is:
+retiring it would cut short the requests on it, and a retired generation is
+groomed again at the next tick. A closed one is taken whatever holds it, since
+nothing more can be asked on it. No caller can take a reference between the
+check and the take, because `get_h2_conn` hands the connection out under
+`u.mu` too.
+*/
+@(private)
+take_idle_h2_locked :: proc(u: ^Upstream, all: bool) -> (stale: ^H2_Conn) {
+	reap_h2_readers_locked(u)
+	if u.h2 == nil {
+		return nil
+	}
+	if !h2.client_closed(u.h2.client) {
+		idle, busy := h2.client_idle_for(u.h2.client)
+		if busy || (!all && idle < u.idle_timeout) {
+			return nil
+		}
+	}
+	stale = u.h2
+	u.h2 = nil
+	return
+}
+
 @(private)
 h2_reader :: proc(hc: ^H2_Conn) {
 	h2.client_serve(hc.client)
@@ -269,11 +305,13 @@ next poll: nothing joins it, so replacements are only as far apart as a dial,
 and a reader sitting out its poll would hold a thread and a socket for each.
 Shutdown, not close, because close would race a thread that might still be
 reading from the descriptor; this caller's share keeps it open until then.
-A TLS session sends its close_notify first, for the reason `send_close_notify`
-gives.
+A connection still open says GOAWAY first, as RFC 9113 section 6.8 asks of an
+endpoint closing one, and a TLS session then sends its close_notify, for the
+reason `send_close_notify` gives.
 */
 @(private)
 retire_h2_conn :: proc(hc: ^H2_Conn) {
+	h2.client_goaway(hc.client, .No_Error)
 	sync.atomic_store(&hc.stopping, true)
 	tlsx.send_close_notify(hc.stream.tls)
 	_ = net.shutdown(hc.stream.socket, .Both)

@@ -124,10 +124,15 @@ that; `cookies.upstream: false` is the test, and the fix if it is.
 - `https://` picks HTTP/2 or HTTP/1.1 by ALPN, preferring h2, and remembers the
   choice from the first connection. h2 multiplexes onto one connection; HTTP/1.1
   pools up to `max_idle` idle connections.
-- `idle_timeout` is a ceiling. An upstream that hangs up after an idle gap has
-  its connections reaped at three quarters of that gap from then on, never below
-  two seconds; the learned figure only comes down, and is forgotten after an
-  hour.
+- Idle connections are swept every 30 seconds: pooled HTTP/1.1 connections and
+  the shared h2 or pipelined connection are closed at the first sweep after
+  they have gone unused for `idle_timeout`, so they can live up to 30 seconds
+  longer, and a shared one the peer has closed goes at the next sweep. One with
+  a query still on it is left to finish.
+- `idle_timeout` is a ceiling. A `tcp://` or `tls://` upstream that hangs up
+  after an idle gap has its pipelined connection reaped at three quarters of
+  that gap from then on, never below two seconds; the learned figure only comes
+  down, and is forgotten after an hour.
 - A TLS handshake the peer resets partway through is retried once, inside the
   same `timeout`. Only a reset is retried.
 

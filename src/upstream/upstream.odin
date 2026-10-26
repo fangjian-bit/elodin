@@ -875,24 +875,35 @@ close_conn :: proc(conn: Idle_Conn) {
 // Drop idle connections, either the expired ones or every one of them.
 close_idle :: proc(u: ^Upstream, all := false) -> (closed: int) {
 	sync.mutex_lock(&u.mu)
-	defer sync.mutex_unlock(&u.mu)
-
 	pipe_relearn_idle_locked(u)
 	closed += close_pipe(u, all)
 
 	now := time.now()
-	kept := make([dynamic]Idle_Conn, 0, len(u.idle), context.temp_allocator)
+	stale := make([dynamic]Idle_Conn, 0, len(u.idle), context.temp_allocator)
+	kept := 0
 	for conn in u.idle {
 		if all || time.diff(conn.since, now) >= u.idle_timeout {
-			close_conn(conn)
-			closed += 1
+			append(&stale, conn)
 		} else {
-			append(&kept, conn)
+			u.idle[kept] = conn
+			kept += 1
 		}
 	}
-	clear(&u.idle)
-	for conn in kept {
-		append(&u.idle, conn)
+	resize(&u.idle, kept)
+
+	stale_h2 := take_idle_h2_locked(u, all)
+	sync.mutex_unlock(&u.mu)
+	// Closed once the lock is let go, as `get_h2_conn` retires the h2
+	// connection it replaces: a TLS close writes a close_notify, nothing in
+	// closing needs `u.mu`, and every query on this upstream waits on it to
+	// get a connection.
+	for conn in stale {
+		close_conn(conn)
+	}
+	closed += len(stale)
+	if stale_h2 != nil {
+		retire_h2_conn(stale_h2)
+		closed += 1
 	}
 	return
 }

@@ -34,6 +34,10 @@ Client :: struct {
 	slot_cond: sync.Cond,
 	refs:      int,
 	closed:    bool,
+	// When a reference was last let go of, which is when a request on the
+	// connection last ended; see `client_idle_for`. Monotonic, so a step of
+	// the wall clock neither keeps an idle connection nor retires a fresh one.
+	released:  time.Tick,
 
 	next_stream_id:      u32,
 	peer_max_frame:      int,
@@ -143,6 +147,7 @@ client_make :: proc(io: IO, allocator := context.allocator) -> ^Client {
 	c.io = io
 	c.allocator = allocator
 	c.refs = 1
+	c.released = time.tick_now()
 	c.next_stream_id = 1
 	c.peer_max_frame = DEFAULT_MAX_FRAME
 	c.peer_initial_window = DEFAULT_WINDOW
@@ -175,6 +180,7 @@ client_ref :: proc(c: ^Client) {
 client_unref :: proc(c: ^Client) {
 	sync.mutex_lock(&c.mu)
 	c.refs -= 1
+	c.released = time.tick_now()
 	last := c.refs == 0
 	sync.mutex_unlock(&c.mu)
 	if !last {
@@ -201,6 +207,18 @@ client_closed :: proc(c: ^Client) -> bool {
 	sync.mutex_lock(&c.mu)
 	defer sync.mutex_unlock(&c.mu)
 	return c.closed
+}
+
+/*
+How long the connection has gone unused, and whether anybody besides its owner -
+the reference `client_make` returns - holds it now. Every request holds one for
+its length, and so does a caller between taking the connection and making the
+request, so a connection is only idle once all of them have let go.
+*/
+client_idle_for :: proc(c: ^Client) -> (idle: time.Duration, busy: bool) {
+	sync.mutex_lock(&c.mu)
+	defer sync.mutex_unlock(&c.mu)
+	return time.tick_since(c.released), c.refs > 1
 }
 
 /*
@@ -800,7 +818,7 @@ client_rst_stream :: proc(c: ^Client, stream_id: u32, code: Error_Code) -> bool 
 	return client_write_all(c, out[:])
 }
 
-@(private)
+// Nothing is sent on a connection already closed.
 client_goaway :: proc(c: ^Client, code: Error_Code) {
 	out := make([dynamic]u8, 0, 17, context.temp_allocator)
 	write_frame_header(&out, 8, .Goaway, 0, 0)
