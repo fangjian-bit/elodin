@@ -35,8 +35,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
-      - name: Install OpenSSL headers
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      # strace: the log.file case counts the server's syncs with it.
+      - name: Install OpenSSL headers and strace
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev strace
       - uses: jdx/mise-action@v5
         with:
           install: true
@@ -62,8 +63,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install OpenSSL headers
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      # strace: the log.file case runs its server traced, with the leak check off.
+      - name: Install OpenSSL headers and strace
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev strace
       - uses: jdx/mise-action@v5
         with:
           install: true

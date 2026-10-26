@@ -169,12 +169,12 @@ write_line :: proc(level: Level, msg: string, fields: string) {
 	sync.mutex_lock(&state.mu)
 	defer sync.mutex_unlock(&state.mu)
 
-	// Flush every line. Buffered output would mean an operator tailing the log,
-	// or anything watching it, sees events long after they happened - and loses
-	// them entirely if the process is killed.
+	// One write(2) per line, and no flush after it. An `os.File` is unbuffered,
+	// so the write is already what `tail` and a shipper read, and survives the
+	// process being killed; `os.flush` on one is fsync(2), a disk sync per
+	// answered query under this lock.
 	target := state.file if state.to_file && state.file != nil else os.stderr
 	os.write_string(target, line)
-	os.flush(target)
 }
 
 @(private)

@@ -1,8 +1,12 @@
 package itest
 
 import "core:fmt"
+import "core:os"
+import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
+import "core:sys/posix"
+import "core:time"
 import "elodin:dns"
 
 /*
@@ -115,6 +119,138 @@ run_logfmt_cases :: proc(r: ^Runner) {
 		}
 	}
 	end_case(r)
+
+	log_file_case(r, upstream_port)
+}
+
+/*
+A line in `log.file` is one write(2) and nothing else.
+
+The descriptor is unbuffered, so the write is already what `tail` and a shipper
+read. A sync on top of it is a disk flush per answered query, taken under the
+log's lock. Only a tracer can see one, so the server runs under strace with
+`log.file` set and `log.queries` on, and the case counts the syncs.
+*/
+@(private = "file")
+log_file_case :: proc(r: ^Runner, upstream_port: int) {
+	NAME :: "logfmt: a line in log.file is a write, not a write and a sync"
+	QUERIES :: 20
+
+	trace_path := filepath.join({r.work_dir, "log-sync.strace"}, context.temp_allocator) or_else ""
+	log_path := filepath.join({r.work_dir, "log-sync.log"}, context.temp_allocator) or_else ""
+	_ = os.remove(log_path)
+	// A tracer that cannot attach here - absent, ptrace refused, or older than
+	// 6.6 and so without --kill-on-exit - is no evidence either way.
+	if !runs_ok({"strace", "--kill-on-exit", "-o", "/dev/null", "true"}) {
+		skip_case(r, NAME, "strace 6.6 or later is not installed or cannot trace here")
+		return
+	}
+
+	// LeakSanitizer cannot run under a tracer: on exit it writes a fatal-error
+	// report instead of a leak check, and `mise run leakcheck` fails on any
+	// report. The leak check is off for this one traced process, and only that.
+	inherited, eerr := os.environ(context.temp_allocator)
+	if eerr != nil {
+		fail(r, "%s: cannot read the environment: %v", NAME, eerr)
+		return
+	}
+	env := make([dynamic]string, 0, len(inherited) + 1, context.temp_allocator)
+	asan_options := ""
+	for kv in inherited {
+		if strings.has_prefix(kv, "ASAN_OPTIONS=") {
+			asan_options = kv[len("ASAN_OPTIONS="):]
+		} else {
+			append(&env, kv)
+		}
+	}
+	append(&env, fmt.tprintf("ASAN_OPTIONS=%s:detect_leaks=0", asan_options))
+
+	udp_port := next_port(r)
+	config := fmt.tprintf(
+		`log: {{ level: info, queries: true, file: %q }}
+listeners:
+  udp: {{ enabled: true, address: "127.0.0.1", port: %d }}
+  tcp: {{ enabled: false }}
+upstream:
+  timeout: 3s
+  servers: ["127.0.0.1:%d"]
+cache: {{ enabled: false }}
+blocking: {{ enabled: false }}
+`,
+		log_path,
+		udp_port,
+		upstream_port,
+	)
+	srv, ok := start_server_raw(
+		r,
+		config,
+		udp_port,
+		env = env[:],
+		// --kill-on-exit: `stop_server` kills strace, and a tracee outlives its
+		// tracer otherwise, still bound to the port. --seccomp-bpf: the server
+		// stops only at the traced calls, not at every syscall of every thread.
+		wrap = {"strace", "--kill-on-exit", "--seccomp-bpf", "-f", "-qq", "-e", "trace=fsync,fdatasync,sync_file_range", "-o", trace_path},
+	)
+	if !ok {
+		// start_server_raw has failed the run already.
+		return
+	}
+	defer stop_server(&srv)
+	// strace is known to work here, so a server that does not answer under it
+	// is a failure, not a skip.
+	if !wait_ready(&srv, 10 * time.Second) {
+		fail(r, "server on port %d never became ready under strace; log:\n%s", udp_port, read_log(&srv))
+		return
+	}
+
+	for i in 0 ..< QUERIES {
+		_ = query_udp(udp_port, build_query(fmt.tprintf("sync-%d.example.", i), u16(dns.Type.A)), context.temp_allocator)
+	}
+	// strace's own child is the server. Stopped through it rather than through
+	// strace, so the server takes its own shutdown path while traced.
+	children, _ := os.read_entire_file(
+		fmt.tprintf("/proc/%d/task/%d/children", srv.process.pid, srv.process.pid),
+		context.temp_allocator,
+	)
+	child, cok := strconv.parse_int(strings.trim_space(string(children)), 10)
+	if !cok {
+		fail(r, "%s: cannot find the server under strace pid %d: %q", NAME, srv.process.pid, string(children))
+		return
+	}
+	posix.kill(posix.pid_t(child), .SIGTERM)
+	if state, werr := os.process_wait(srv.process, GRACEFUL_STOP_TIMEOUT); werr == nil && state.exited {
+		srv.running = false
+	}
+
+	start_case(r, NAME)
+	{
+		logged, _ := os.read_entire_file(log_path, context.temp_allocator)
+		trace, _ := os.read_entire_file(trace_path, context.temp_allocator)
+		// The premise: the server ran to its end under the tracer, which saw
+		// the SIGTERM, and the lines went to the file, so a sync per line would
+		// have been taken and seen.
+		check(r, !srv.running, "the server did not exit on SIGTERM under strace; log:\n%s", read_log(&srv))
+		check(r, strings.contains(string(trace), "SIGTERM"), "strace did not trace the server:\n%s", string(trace))
+		// By name: wait_ready's version.bind probe is a query line too.
+		lines := strings.count(string(logged), "qname=sync-")
+		check(r, lines == QUERIES, "log.file has %d of the %d query lines:\n%s", lines, QUERIES, string(logged))
+		// One per call: "fsync(" and "fdatasync(" end in "sync(", and a call
+		// another thread interrupted adds a "<... fsync resumed>" line that
+		// does not, so it is not counted twice.
+		syncs := strings.count(string(trace), "sync(") + strings.count(string(trace), "sync_file_range(")
+		check(r, syncs == 0, "%d syncs for %d query lines:\n%s", syncs, lines, string(trace))
+	}
+	end_case(r)
+}
+
+@(private = "file")
+runs_ok :: proc(command: []string) -> bool {
+	process, perr := os.process_start(os.Process_Desc{command = command})
+	if perr != nil {
+		return false
+	}
+	state, werr := os.process_wait(process)
+	return werr == nil && state.exit_code == 0
 }
 
 /*
