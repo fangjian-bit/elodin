@@ -177,6 +177,28 @@ jobs:
           sudo ss -lntup 'sport = :53' || true
           systemctl list-sockets --all --no-pager | grep -E ':53\b' || true
 
+      # Some arm64 images run their own DNS proxy, "dns-resolver" on
+      # 127.0.0.100:53, which keeps elodin off 0.0.0.0:53 and fails the install
+      # with Address_In_Use. It belongs to the image, not to the hosts the
+      # postinst is written for, so it is stopped here and started again after
+      # the removal. systemd-resolved is left alone: clearing it is the
+      # postinst's job and what this job tests.
+      - name: Stop the image's other port-53 holders
+        run: |
+          : > /tmp/port53-units
+          for pid in $(sudo ss -Hlntup 'sport = :53' | grep -v '"systemd-resolve"' | grep -oP 'pid=\K[0-9]+' | sort -u); do
+            unit=$(ps -o unit= -p "$pid" | tr -d ' ')
+            ps -o pid=,unit=,args= -p "$pid"
+            # Only a system service: stopping a scope would take its session.
+            if [[ "$unit" != *.service ]]; then
+              echo "pid $pid holds port 53 outside a service (unit: ${unit:-none})" >&2
+              exit 1
+            fi
+            sudo systemctl stop "$unit"
+            echo "$unit" >> /tmp/port53-units
+          done
+          ! sudo ss -Hlntup 'sport = :53' | grep -v '"systemd-resolve"'
+
       - name: Install it
         run: |
           echo 'elodin elodin/takeover-dns boolean true' | sudo debconf-set-selections
@@ -214,6 +236,9 @@ jobs:
         if: always()
         run: |
           sudo apt-get remove -y elodin
+          if [ -s /tmp/port53-units ]; then
+            xargs -r sudo systemctl start < /tmp/port53-units
+          fi
           test "$(systemctl is-active systemd-resolved)" = active
           {
             stat -c '%F' /etc/resolv.conf
