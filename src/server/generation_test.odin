@@ -13,6 +13,7 @@ import "elodin:cache"
 import "elodin:config"
 import "elodin:dns"
 import "elodin:filter"
+import "elodin:upstream"
 
 /*
 A server booted from one configuration, reloadable from a file of its own.
@@ -704,6 +705,41 @@ test_a_reload_that_cannot_be_built_releases_what_it_built :: proc(t: ^testing.T)
 	testing.expect(t, !out.applied, "a configuration whose validator could not be built was applied")
 	testing.expect(t, f.s.gens.current == old, "the running generation was replaced")
 	testing.expect(t, f.s.gens.retired == nil, "the running generation was retired")
+}
+
+@(test)
+test_a_reload_of_max_pending_moves_the_racer_and_pipeline_bounds :: proc(t: ^testing.T) {
+	/*
+	Both are shares of `max_pending`, which reloads: the racers' budget and what
+	one pipelined connection may carry. A reload that changes it and nothing in
+	`upstream` still moves both, and one that is refused moves neither.
+	*/
+	boot := swap(BASE, "server:\n", "server:\n  max_pending: 100\n")
+	f, ok := boot_fixture(t, "max-pending", boot)
+	if !ok {
+		return
+	}
+	defer close_fixture(f)
+	testing.expect_value(t, sync.atomic_load(&f.s.racers.limit), 100)
+
+	raised := swap(boot, "max_pending: 100", "max_pending: 3000")
+	broken := swap(
+		swap(raised, "127.0.0.1:1", "127.0.0.1:2"),
+		"dnssec: { enabled: false }",
+		"dnssec: { enabled: true, trust_anchors: [\". IN DS 20326 1 1 0000000000000000000000000000000000000000\"] }",
+	)
+	out := reload_from(t, f, broken)
+	testing.expect(t, !out.applied, "a configuration whose validator could not be built was applied")
+	testing.expect_value(t, sync.atomic_load(&f.s.racers.limit), 100)
+
+	out = reload_from(t, f, raised)
+	testing.expect(t, out.applied, "the reload was not applied")
+	testing.expect_value(t, sync.atomic_load(&f.s.racers.limit), 3000)
+	cur := f.s.gens.current
+	want := upstream.pipeline_outstanding(3000, cur.cfg.server.max_connections)
+	for u in cur.group.servers {
+		testing.expect_value(t, u.max_outstanding, want)
+	}
 }
 
 @(test)

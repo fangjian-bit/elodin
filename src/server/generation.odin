@@ -344,13 +344,7 @@ build_upstreams :: proc(s: ^Server, l: ^Live) -> bool {
 	*/
 	in_flight := cfg.server.max_pending * (2 if races(cfg.upstream) else 1)
 	outstanding := upstream.pipeline_outstanding(in_flight, cfg.server.max_connections)
-	/*
-	Race losers outlive their queries, so they are not counted in `max_pending`
-	and need a bound of their own; the same figure, since it is what the
-	descriptor estimate allows them (`Descriptor_Demand.racers`). One budget for
-	every group, so routes do not each get another.
-	*/
-	sync.atomic_store(&s.racers.limit, cfg.server.max_pending)
+	// The budget's figure is set by `build_live` once the whole generation is built.
 	group, gerr := upstream.make_group(
 		cfg.upstream,
 		cookies = cfg.cookies.upstream,
@@ -445,9 +439,12 @@ build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built, carried: Parts,
 		built, carried = {}, {}
 	}
 
+	// `max_pending` too: each connection's `max_outstanding` is derived from it
+	// when its group is built (see `build_upstreams`).
 	if prev == nil ||
 	   differs(prev.cfg.upstream, cfg.upstream) ||
-	   prev.cfg.cookies.upstream != cfg.cookies.upstream {
+	   prev.cfg.cookies.upstream != cfg.cookies.upstream ||
+	   prev.cfg.server.max_pending != cfg.server.max_pending {
 		// The hostnames too, before the new groups resolve theirs: an address
 		// the old bootstrap servers gave is otherwise dialled for up to
 		// `BOOTSTRAP_TTL` after a reload that replaced them.
@@ -530,6 +527,14 @@ build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built, carried: Parts,
 			l.policy += 1
 		}
 	}
+	/*
+	Race losers outlive their queries, so they are not counted in `max_pending`
+	and need a bound of their own; the same figure, since it is what the
+	descriptor estimate allows them (`Descriptor_Demand.racers`). One budget for
+	every group, so routes do not each get another. Set here, where nothing can
+	fail any more, so a reload refused above leaves it at the figure in effect.
+	*/
+	sync.atomic_store(&s.racers.limit, cfg.server.max_pending)
 	return built, carried, true
 }
 

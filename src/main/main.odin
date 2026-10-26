@@ -850,6 +850,8 @@ run :: proc(cfg: ^config.Config, opts: Options, service: privdrop.Identity) {
 		server.stop_metrics(&listeners)
 		server.drain_queries(&s)
 		stop_loops(loops, loop_threads)
+		// Freed with them: nothing after this may find a loop to start work on.
+		s.loops = nil
 		server.destroy_listeners(&listeners)
 		// Last: a draining query can be a DoH request still building a profile,
 		// and this is what it signs with.

@@ -294,6 +294,81 @@ test_one_reader_is_a_whole_listener :: proc(t: ^testing.T) {
 	testing.expect_value(t, sync.atomic_load(&l.udp[0].received), u64(1))
 }
 
+@(private = "file")
+Reader_Probe :: struct {
+	server:    ^Server,
+	listeners: ^Listeners,
+	received:  u64,
+	dropped:   u64,
+}
+
+@(private = "file")
+reader_counts_reached :: proc(data: rawptr) -> bool {
+	p := cast(^Reader_Probe)data
+	return(
+		sync.atomic_load(&p.listeners.udp[0].received) >= p.received &&
+		sync.atomic_load(&p.server.stats.dropped) >= p.dropped \
+	)
+}
+
+/*
+A query the loop will not start - no stack to be had - costs that datagram and
+not the reader. The loop is told to stop, which refuses every start the same
+way an `mmap` that fails does, while the listener itself is not stopping: the
+reader drops the first datagram and is still there to read the second.
+*/
+@(test)
+test_a_refused_start_drops_the_datagram_and_keeps_the_reader :: proc(t: ^testing.T) {
+	cfg: config.Config
+	fixture(&cfg, 1)
+	tl: Test_Loop
+	if !testing.expect(t, start_test_loop(&tl), "no loop") {
+		return
+	}
+	s := Server {
+		cfg   = &cfg,
+		loops = tl.loops[:],
+	}
+	l: Listeners
+	if !start_listeners(&s, &l) {
+		stop_test_loop(&tl)
+		testing.expect(t, false, "could not start the UDP listener")
+		return
+	}
+	defer {
+		stop_listeners(&l)
+		stop_test_loop(&tl)
+		destroy_listeners(&l)
+	}
+	// Every start from here on is refused; the reader, already running, runs on.
+	loop.stop(tl.loops[0])
+
+	client, cerr := net.make_unbound_udp_socket(.IP4)
+	if !testing.expectf(t, cerr == nil, "no client socket: %v", cerr) {
+		return
+	}
+	defer net.close(client)
+	query: [dns.HEADER_SIZE]u8
+	probe := Reader_Probe {
+		server    = &s,
+		listeners = &l,
+	}
+	for i in 1 ..= 2 {
+		_, _ = net.send_udp(client, query[:], l.udp_bound)
+		probe.received, probe.dropped = u64(i), u64(i)
+		if !testing.expectf(
+			t,
+			wait_for(reader_counts_reached, &probe, 5 * time.Second),
+			"datagram %d: received %d, dropped %d",
+			i,
+			sync.atomic_load(&l.udp[0].received),
+			sync.atomic_load(&s.stats.dropped),
+		) {
+			return
+		}
+	}
+}
+
 /*
 What the startup line says, in the three cases it has to tell apart.
 
@@ -500,4 +575,62 @@ test_a_reader_lets_its_queries_run_between_batches :: proc(t: ^testing.T) {
 	// answering any would have had to drop some.
 	testing.expectf(t, last > LIMIT, "only %d of %d datagrams reached the reader; the case needs more than %d", last, SENT, LIMIT)
 	testing.expect_value(t, sync.atomic_load(&s.stats.dropped), 0)
+}
+
+/*
+A UDP socket closes when nothing will read or answer on it any more: at once
+when its reader stops with no query of its own in flight, and otherwise when the
+last such query lets go - not after every client connection has drained, which
+left the port bound and unread, and not before, which would hand the number to
+the next socket opened while an answer was still to be written to it.
+
+Whether the port is still held is read the way a client would meet it: a plain
+bind to it, which a socket still open there refuses.
+*/
+@(test)
+test_a_udp_socket_closes_with_its_last_user :: proc(t: ^testing.T) {
+	cfg: config.Config
+	fixture(&cfg, 1)
+	tl: Test_Loop
+	if !testing.expect(t, start_test_loop(&tl), "no loop") {
+		return
+	}
+	s := Server {
+		cfg   = &cfg,
+		loops = tl.loops[:],
+	}
+	l: Listeners
+	if !start_listeners(&s, &l) {
+		stop_test_loop(&tl)
+		testing.expect(t, false, "could not start the UDP listener")
+		return
+	}
+	stopped := false
+	defer {
+		if !stopped {
+			stop_listeners(&l)
+		}
+		stop_test_loop(&tl)
+		destroy_listeners(&l)
+	}
+	held :: proc(at: net.Endpoint) -> bool {
+		probe, err := net.make_bound_udp_socket(at.address, at.port)
+		if err != nil {
+			return true
+		}
+		net.close(probe)
+		return false
+	}
+	testing.expect(t, held(l.udp_bound), "the port is not held while the reader runs")
+
+	// A query in flight, as `udp_loop` counts one.
+	sync.atomic_add(&l.udp[0].holds, 1)
+	stop_listeners(&l)
+	stopped = true
+	testing.expect(t, held(l.udp_bound), "the socket closed under a query still to answer on it")
+
+	// The query answers and lets go: the socket goes with it.
+	release_udp_reader(&l.udp[0])
+	testing.expect_value(t, sync.atomic_load(&l.udp[0].holds), 0)
+	testing.expect(t, !held(l.udp_bound), "the socket is still open with nobody left to use it")
 }

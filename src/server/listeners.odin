@@ -209,12 +209,13 @@ start_listeners :: proc(s: ^Server, l: ^Listeners) -> bool {
 stop_listeners :: proc(l: ^Listeners) {
 	sync.atomic_store(&l.stop, true)
 	// The read and accept loops first, and their sockets only once nothing is
-	// waiting on them; see `conn_manager_stop_permanent`. The UDP sockets stay
-	// open until `destroy_listeners`: every query a reader admitted answers on
-	// its reader's socket, and those run on through the drain that follows this.
-	// Closed now, the number goes to the next socket opened - an upstream
-	// query's, most likely - and an answer meant for a client is written there.
+	// waiting on them; see `conn_manager_stop_permanent`. A UDP socket closes
+	// when the last query its reader admitted has answered on it, which may be
+	// now or during the drain that follows; see `Udp_Reader.holds`.
 	conn_manager_stop_permanent(&l.conns)
+	for &reader in l.udp {
+		release_udp_reader(&reader)
+	}
 	if l.tcp_open {
 		net.close(l.tcp_socket)
 	}
@@ -271,7 +272,11 @@ on that reader's socket. The caller drains the queries between the two.
 */
 destroy_listeners :: proc(l: ^Listeners) {
 	for &reader in l.udp {
-		net.close(reader.socket)
+		// Closed already unless `stop_listeners` never ran, as when startup
+		// failed after the bind; the queries are drained by now either way.
+		if sync.atomic_load(&reader.holds) > 0 {
+			net.close(reader.socket)
+		}
 		if reader.ctx != nil {
 			free(reader.ctx)
 			reader.ctx = nil
@@ -319,6 +324,30 @@ Udp_Reader :: struct {
 	// The context handed to the loop. Released by `destroy_listeners`, not by
 	// the loop, for the reason the field comment on `stream_loop_ctx` gives.
 	ctx:      ^Udp_Context,
+	/*
+	Who still uses `socket`: the reader itself, until `stop_listeners` lets go of
+	it, and one for each query it started, until that query has answered. The
+	one that takes it to zero closes the socket (`release_udp_reader`).
+
+	So the socket closes as soon as nothing will read or answer on it - at
+	shutdown, once the reader has stopped and its last query has answered,
+	rather than after every client connection has drained, which left the port
+	bound and unread for up to `client_timeout` and clients waiting out their
+	own timeouts where a closed port would have refused them at once. And never
+	before: a query answers on the socket its datagram came in on, and a number
+	closed under it goes to the next socket opened.
+	*/
+	holds:    int,
+}
+
+/*
+Let go of one use of `r.socket`, closing it with the last. See `Udp_Reader.holds`.
+*/
+@(private)
+release_udp_reader :: proc(r: ^Udp_Reader) {
+	if sync.atomic_sub(&r.holds, 1) == 1 {
+		net.close(r.socket)
+	}
 }
 
 @(private)
@@ -459,6 +488,8 @@ start_udp :: proc(s: ^Server, l: ^Listeners) -> bool {
 	for socket, i in sockets {
 		l.udp[i].socket = socket
 		l.udp[i].inode = metrics.socket_inode(int(socket))
+		// The reader's own; see `Udp_Reader.holds`.
+		l.udp[i].holds = 1
 	}
 
 	for i in 0 ..< len(l.udp) {
@@ -769,7 +800,13 @@ udp_loop :: proc(data: rawptr) {
 		job.data = make([]u8, n)
 		copy(job.data, buf[:n])
 
-		switch submit_query(ctx.server, udp_job, job, limit) {
+		// The query's use of the socket, given back once it has answered on it.
+		sync.atomic_add(&ctx.reader.holds, 1)
+		result := submit_query(ctx.server, udp_job, job, limit)
+		if result != .Accepted {
+			release_udp_reader(ctx.reader)
+		}
+		switch result {
 		case .Accepted:
 		case .Full:
 			// The bound was reached between the check above and here, by another
@@ -781,7 +818,17 @@ udp_loop :: proc(data: rawptr) {
 		case .Stopped:
 			delete(job.data)
 			free(job)
-			break reading
+			/*
+			Not the server stopping unless `stop` says so: the readers are gone
+			before the loops stop, so what refused this start is a stack that
+			could not be mapped - memory, or the process's mapping count. That
+			datagram is dropped as a shed one is, and the reader reads on;
+			leaving here would take the loop off UDP until the next restart.
+			*/
+			if sync.atomic_load(&l.stop) {
+				break reading
+			}
+			sync.atomic_add(&ctx.server.stats.dropped, 1)
 		}
 	}
 	// `ctx` is not released here: queries started above still hold it, and they
@@ -1269,10 +1316,13 @@ is_unicast :: proc(a: net.Address) -> bool {
 udp_job :: proc(data: rawptr) {
 	job := cast(^Udp_Job)data
 	s := job.ctx.server
+	reader := job.ctx.reader
 	defer {
 		delete(job.data)
 		free(job)
 		free_all(context.temp_allocator)
+		// After the send, which is the last use of the socket.
+		release_udp_reader(reader)
 		query_done(s)
 	}
 
