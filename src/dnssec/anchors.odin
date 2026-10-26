@@ -148,13 +148,17 @@ parse_trust_anchor :: proc(text: string, allocator := context.allocator) -> (anc
 
 	joined := strings.concatenate(fields[start + 3:], context.temp_allocator)
 	digest, digest_ok := decode_hex(joined, allocator)
+	// `decode_hex` frees its own failure; every refusal after it frees what it kept.
+	defer if !ok {
+		delete(digest, allocator)
+	}
 	if !digest_ok || len(digest) == 0 {
 		return {}, false
 	}
 	/*
 	`digest_size` rather than `digest_supported`: this is a length check on a
-digest type we recognise, and `digest_supported` also answers for what the
-local crypto policy will compute. Reading it here would
+	digest type we recognise, and `digest_supported` also answers for what the
+	local crypto policy will compute. Reading it here would
 	make the same anchor line parse or fail depending on when it was parsed -
 	`--check` runs before the probe, `start_validator` after it - over a
 	question that has nothing to do with the policy.
