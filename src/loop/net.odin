@@ -187,12 +187,17 @@ accept_tcp :: proc(listener: net.TCP_Socket) -> (net.TCP_Socket, net.Endpoint, n
 				net.close(client)
 				// Retried as a connection that went away between the SYN and the
 				// accept would be: the queue has moved on either way.
+				take_turn()
 				return {}, {}, .Aborted
 			}
 			take_turn()
 			return client, from, nil
 		}
 		if err != .Would_Block {
+			// Counted as the other wrappers count their errors: an accept loop
+			// retries an aborted connection at once, and a queue of them would
+			// otherwise hold the loop.
+			take_turn()
 			return {}, {}, err
 		}
 		if !socket_wait(linux.Fd(listener), {.In}, .RCVTIMEO, start, &deadline, &armed) {

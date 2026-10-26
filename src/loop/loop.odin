@@ -500,7 +500,9 @@ drain_posts :: proc(l: ^Loop) {
 		switch p.kind {
 		case .Start:
 			live_insert(l, p.fiber)
-			p.fiber.cancelled = l.cancelled_all
+			// Or'd rather than set: a `cancel` made on this loop reaches the fiber
+			// at once, which may be before its start is drained here.
+			p.fiber.cancelled = p.fiber.cancelled || l.cancelled_all
 			append(&l.ready, p.fiber)
 		case .Wake:
 			wake_local(p.fiber, p.value, .Ready)

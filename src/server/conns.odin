@@ -78,6 +78,9 @@ Conn_Entry :: struct {
 	// Which client's share this fiber is occupying. Zero for the permanent
 	// loops, which are nobody's client.
 	prefix:    Client_Prefix,
+	// Where it sits in `entries`, so leaving is a swap rather than a walk of the
+	// table under the lock every loop's connections take to leave.
+	index:     int,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, limit: int, prefix_limit: int) {
@@ -166,6 +169,7 @@ conn_spawn :: proc(
 	Listed before it can run, under the lock it takes to leave, so a fiber that
 	finishes at once still finds itself here to remove.
 	*/
+	e.index = len(cm.entries)
 	append(&cm.entries, e)
 	if !counted {
 		cm.permanent += 1
@@ -197,14 +201,14 @@ conn_entry_run :: proc(data: rawptr) {
 
 @(private)
 conn_entry_remove_locked :: proc(cm: ^Conn_Manager, e: ^Conn_Entry) {
-	for entry, i in cm.entries {
-		if entry == e {
-			unordered_remove(&cm.entries, i)
-			if e.permanent {
-				cm.permanent -= 1
-			}
-			return
-		}
+	i := e.index
+	assert(i < len(cm.entries) && cm.entries[i] == e, "a connection entry out of place in its table")
+	last := cm.entries[len(cm.entries) - 1]
+	cm.entries[i] = last
+	last.index = i
+	pop(&cm.entries)
+	if e.permanent {
+		cm.permanent -= 1
 	}
 }
 

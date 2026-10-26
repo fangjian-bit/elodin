@@ -1094,3 +1094,44 @@ test_a_cancelled_fiber_still_parks_on_a_cond :: proc(t: ^testing.T) {
 	testing.expect(t, woke, "the cancelled waiter never saw the signal")
 	testing.expect_value(t, s.p.value, 1)
 }
+
+/*
+A fiber started from another thread and cancelled on its own loop before the
+loop has taken its start runs cancelled: the start does not undo the cancel.
+*/
+@(test)
+test_a_cancel_made_before_the_start_is_drained_holds :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		p:         Probe,
+		ran:       bool,
+		cancelled: bool,
+	}
+	s: Shared
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		l := tl_loop
+		// Spawned as another thread spawns: the start is posted, and the loop
+		// takes it only after this fiber has given the loop up.
+		tl_loop = nil
+		h, ok := spawn(l, proc(data: rawptr) {
+			s := (^Shared)(data)
+			s.ran = true
+			s.cancelled = cancelled()
+			sync.sema_post(&s.p.done)
+		}, s)
+		tl_loop = l
+		if !ok {
+			sync.sema_post(&s.p.done)
+			return
+		}
+		cancel(h)
+	}, &s)
+	testing.expect(t, sync.sema_wait_with_timeout(&s.p.done, WAIT))
+	testing.expect(t, s.ran, "the fiber did not run")
+	testing.expect(t, s.cancelled, "the start undid a cancel made before it was drained")
+}

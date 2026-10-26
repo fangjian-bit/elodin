@@ -9,12 +9,12 @@ Queries answered on fibers of their own: every UDP datagram, every DoH request
 over HTTP/2, every refresh of an expired or expiring entry.
 
 A query that waits on an upstream parks its fiber and the loop runs others, so
-how many can be in flight at once is no longer how many threads there are. What
-bounds it is `server.max_pending`, counted here: a query is counted from the
-moment it is admitted until its fiber returns, which is the whole of the time it
-holds memory - its stack, its scratch, the buffers it reads its answers into.
-Past the bound a datagram is dropped and an HTTP/2 request answered 503, as a
-full queue was before (see `max_pending` in `docs/sizing.md`).
+how many can be in flight at once is not a count of threads. What bounds it is
+`server.max_pending`, counted here: a query is counted from the moment it is
+admitted until its fiber returns, which is the whole of the time it holds memory
+- its stack, its scratch, the buffers it reads its answers into. Past the bound
+a datagram is dropped and an HTTP/2 request answered 503 (see `max_pending` in
+`docs/sizing.md`).
 
 Queries asked over TCP, DoT and HTTP/1.1 are not counted. They are answered on
 their connection's own fiber, one at a time per connection and in order, so

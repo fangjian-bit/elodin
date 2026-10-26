@@ -1105,7 +1105,7 @@ spawn_failure_words :: proc(why: Spawn_Result) -> Spawn_Failure_Words {
 		reported = &conn_failed_reported,
 		brief = "%s: refusing a connection, the OS would not map a stack for it, below the limit of %d",
 		line = "%s: refusing a connection, the OS would not map a stack for it - this is below server.max_connections (%d), so raising that will not help",
-		hint = "check the process memory limits (RLIMIT_AS, cgroup memory.max, MemoryMax=); these are counted as conn_failed= in the stats line, and further ones are logged at debug level",
+		hint = "check the process memory limits (RLIMIT_AS, cgroup memory.max, MemoryMax=) and the mapping count (vm.max_map_count, two mappings per fiber stack); these are counted as conn_failed= in the stats line, and further ones are logged at debug level",
 	}
 }
 
