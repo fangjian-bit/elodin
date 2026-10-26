@@ -869,6 +869,9 @@ pipe_wait :: proc(c: ^Pipe_Conn, w: ^Pipe_Waiter, id: u16, deadline: time.Tick) 
 
 		c.reading = true
 		sync.mutex_unlock(&c.mu)
+		// Replies for the others arriving back to back never let this caller
+		// park; the reads yield between them (`loop.take_turn`), still marked as
+		// the reader, so nobody takes the reading over meanwhile.
 		rerr := pipe_read_one(c, remaining)
 		sync.mutex_lock(&c.mu)
 		c.reading = false

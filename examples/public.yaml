@@ -66,7 +66,7 @@ server:
   #
   # The descriptor limit is the one that bites first at this figure, and it is
   # not in this file: systemd leaves the soft RLIMIT_NOFILE at 1024 unless the
-  # unit says otherwise, and the shipped unit sets LimitNOFILE=16384, which this
+  # unit says otherwise, and the shipped unit sets LimitNOFILE=65536, which this
   # table and every query max_pending allows in flight fit inside. Copy this configuration onto a box that has neither and
   # elodin will say so at startup - a table it cannot accept into is a listener
   # that stops accepting, counted as accept_backoff=, rather than a table that

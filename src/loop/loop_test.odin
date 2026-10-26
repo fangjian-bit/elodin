@@ -967,18 +967,75 @@ test_take_turn_yields_every_batch :: proc(t: ^testing.T) {
 		_, _ = spawn(current_loop(), proc(data: rawptr) {
 			(^Shared)(data).other_ran = true
 		}, s)
-		rounds := 0
 		for _ in 0 ..< TURN_BATCH - 1 {
-			take_turn(&rounds)
+			take_turn()
 		}
 		s.before_turn = s.other_ran
-		take_turn(&rounds)
+		take_turn()
 		s.after_turn = s.other_ran
 		sync.sema_post(&s.p.done)
 	}, &s)
 	testing.expect(t, sync.sema_wait_with_timeout(&s.p.done, WAIT))
 	testing.expect(t, !s.before_turn, "the other fiber ran before the batch was reached")
 	testing.expect(t, s.after_turn, "the reader did not yield at the end of the batch")
+}
+
+/*
+The socket wrappers take the turns themselves, so a read loop that never waits
+yields without calling `take_turn`: a UDP socket with more than a batch of
+datagrams already queued is read straight through by `recv_udp`, and the fiber
+started beside the reader runs at the `TURN_BATCH`th read and not before.
+*/
+@(test)
+test_a_reader_that_never_waits_yields_by_itself :: proc(t: ^testing.T) {
+	rx, rerr := net.make_bound_udp_socket(net.IP4_Loopback, 0)
+	if !testing.expectf(t, rerr == nil, "cannot bind: %v", rerr) {
+		return
+	}
+	defer net.close(rx)
+	_ = net.set_blocking(rx, false)
+	at, _ := net.bound_endpoint(rx)
+	tx, terr := net.make_unbound_udp_socket(.IP4)
+	if !testing.expectf(t, terr == nil, "no sender: %v", terr) {
+		return
+	}
+	defer net.close(tx)
+	one := [1]u8{1}
+	for _ in 0 ..< TURN_BATCH + 4 {
+		_, _ = net.send_udp(tx, one[:], at)
+	}
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		p:           Probe,
+		rx:          net.UDP_Socket,
+		other_ran:   bool,
+		before_turn: bool,
+		after_turn:  bool,
+	}
+	s := Shared {
+		rx = rx,
+	}
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		_, _ = spawn(current_loop(), proc(data: rawptr) {
+			(^Shared)(data).other_ran = true
+		}, s)
+		buf: [8]u8
+		for _ in 0 ..< TURN_BATCH - 1 {
+			_, _, _ = recv_udp(s.rx, buf[:])
+		}
+		s.before_turn = s.other_ran
+		_, _, _ = recv_udp(s.rx, buf[:])
+		s.after_turn = s.other_ran
+		sync.sema_post(&s.p.done)
+	}, &s)
+	testing.expect(t, sync.sema_wait_with_timeout(&s.p.done, WAIT))
+	testing.expect(t, !s.before_turn, "the other fiber ran before the batch was reached")
+	testing.expect(t, s.after_turn, "a read loop that never waited did not yield")
 }
 
 /*

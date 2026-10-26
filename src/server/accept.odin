@@ -504,24 +504,31 @@ Descriptor_Demand :: struct {
 	pooled_upstream: int,
 	// `server.max_pending`: each query in flight may hold an upstream socket.
 	in_flight:       int,
-	// Race legs, which outlive their queries; see `upstream.Racer_Budget`.
+	// Race legs, a socket each, while their query waits and after; see
+	// `upstream.Racer_Budget`.
 	racers:          int,
 	udp_readers:     int,
 	// One epoll descriptor and one eventfd per loop.
 	loops:           int,
 }
 
-// Whether the default group or any route races, and so has losers to hold sockets.
-races :: proc(cfg: config.Upstream_Config) -> bool {
+/*
+The most race legs one query can start: the servers of the widest group that
+races, default or route, or zero when none does. A query racing that group holds
+a socket per leg while it waits, and its losers go on holding theirs after it has
+its answer; see `upstream.Racer_Budget`.
+*/
+race_width :: proc(cfg: config.Upstream_Config) -> int {
+	width := 0
 	if cfg.strategy == .Race {
-		return true
+		width = len(cfg.servers)
 	}
 	for zone in cfg.zones {
 		if zone.upstream.strategy == .Race {
-			return true
+			width = max(width, len(zone.upstream.servers))
 		}
 	}
-	return false
+	return width
 }
 
 descriptors_wanted :: proc(d: Descriptor_Demand) -> int {

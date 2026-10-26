@@ -44,15 +44,16 @@ ConfigurationDirectory=elodin
 # limit at 1024 otherwise. Every query in flight may hold an upstream socket as
 # well, and server.max_pending derives to thousands on a machine with a few GB,
 # so the connection table, the queries in flight, the upstream pools and the
-# loops together are past 1024 on most machines - and under strategy: race the
-# racers may hold max_pending sockets again. Past the limit the
+# loops together are past 1024 on most machines - and under strategy: race each
+# query may hold a socket per server it races. Past the limit the
 # accept loop cannot take a connection at all: it waits between attempts,
 # escalating to a second, warns once naming this setting, and counts each wait
-# as accept_backoff=. 16384 covers the largest derived figures with a racing
-# group (4096 in flight, 4096 racers, 512 connections) and leaves room to raise
-# max_connections into the thousands without editing the unit; past that, raise
-# this with it.
-LimitNOFILE=16384
+# as accept_backoff=. 65536 covers the largest derived figures racing a dozen
+# servers (4096 in flight, 4096 race queries per server, 512 connections) and
+# leaves room to raise max_connections into the thousands without editing the
+# unit; past that, raise this with it. A descriptor limit costs nothing until it
+# is used.
+LimitNOFILE=65536
 
 # A blocklist refresh builds new rule tables, tens of MB at a few hundred
 # thousand rules, and frees the old ones. Each free of a block that large raises

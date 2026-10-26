@@ -81,6 +81,9 @@ exchange_udp :: proc(
 	*/
 	rejected := false
 
+	// Datagrams passed over arriving back to back - a spoofed flood at this port -
+	// never let this query park; `loop.recv_udp` yields between them (see
+	// `loop.take_turn`).
 	for arm_receive(socket, deadline) {
 		n, remote, recv_err := loop.recv_udp(socket, buf)
 		if recv_err != nil {

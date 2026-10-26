@@ -27,7 +27,7 @@ live on this page; each names its report under `bench/results/`.
   usable CPU, up to eight, which `--check` prints.
 - The descriptor limit, if you raise `server.max_connections`. Every held
   connection is a descriptor. systemd leaves the soft limit at 1024 unless the
-  unit says otherwise; the shipped unit sets `LimitNOFILE=16384`. Past `RLIMIT_NOFILE`,
+  unit says otherwise; the shipped unit sets `LimitNOFILE=65536`. Past `RLIMIT_NOFILE`,
   accepts fail and the listener waits between attempts: `elodin_accept_backoffs_total`
   climbs. Startup warns when the limit cannot cover the table; `--check` does not,
   since it would read its own process's limit, not the service's.

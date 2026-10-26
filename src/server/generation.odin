@@ -342,7 +342,7 @@ build_upstreams :: proc(s: ^Server, l: ^Live) -> bool {
 	racers - up to `max_pending` more, the budget below - may be asking an
 	upstream beside the queries that are.
 	*/
-	in_flight := cfg.server.max_pending * (2 if races(cfg.upstream) else 1)
+	in_flight := cfg.server.max_pending * (2 if race_width(cfg.upstream) > 0 else 1)
 	outstanding := upstream.pipeline_outstanding(in_flight, cfg.server.max_connections)
 	// The budget's figure is set by `build_live` once the whole generation is built.
 	group, gerr := upstream.make_group(
@@ -528,13 +528,15 @@ build_live :: proc(s: ^Server, l: ^Live, prev: ^Live) -> (built, carried: Parts,
 		}
 	}
 	/*
-	Race losers outlive their queries, so they are not counted in `max_pending`
-	and need a bound of their own; the same figure, since it is what the
-	descriptor estimate allows them (`Descriptor_Demand.racers`). One budget for
-	every group, so routes do not each get another. Set here, where nothing can
-	fail any more, so a reload refused above leaves it at the figure in effect.
+	Every race leg is counted, while its query waits and after it has gone, so
+	the figure is every query in flight racing the widest group at once: `max_pending`
+	legs per member. That is what the descriptor estimate allows them
+	(`Descriptor_Demand.racers`), and losers left behind by queries that have
+	moved on take room a new race then does not get. One budget for every group,
+	so routes do not each get another. Set here, where nothing can fail any more,
+	so a reload refused above leaves it at the figure in effect.
 	*/
-	sync.atomic_store(&s.racers.limit, cfg.server.max_pending)
+	sync.atomic_store(&s.racers.limit, cfg.server.max_pending * max(race_width(cfg.upstream), 1))
 	return built, carried, true
 }
 

@@ -245,7 +245,11 @@ client_serve :: proc(c: ^Client) {
 	}
 
 	header: [FRAME_HEADER_SIZE]u8
+	// An upstream that keeps the socket readable never lets this reader park, and
+	// the queries waiting on its answers may be on the same loop: counted per
+	// frame as well as per socket call, as in `serve`. See `loop.take_turn`.
 	for {
+		loop.take_turn()
 		if !client_read_exact(c, header[:]) {
 			return
 		}

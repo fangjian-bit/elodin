@@ -230,6 +230,8 @@ bootstrap_query :: proc(
 	buf := make([]u8, 4096, context.temp_allocator)
 	deadline := time.tick_add(time.tick_now(), timeout)
 
+	// As in `exchange_udp`: datagrams passed over back to back never park, and
+	// `loop.recv_udp` yields between them.
 	for arm_receive(socket, deadline) {
 		n, remote, recv_err := loop.recv_udp(socket, buf)
 		if recv_err != nil {

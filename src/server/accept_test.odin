@@ -4,6 +4,7 @@ import "core:net"
 import "core:strings"
 import "core:testing"
 import "core:time"
+import "elodin:config"
 
 /*
 Every `net.Accept_Error`, against a table written out by hand.
@@ -658,4 +659,28 @@ test_a_dead_socket_waits_as_long_as_a_shortage :: proc(t: ^testing.T) {
 			err,
 		)
 	}
+}
+
+/*
+The widest group that races, default or route: what one query can hold a socket
+per server for, and so what the racer budget and the descriptor estimate are
+sized by. A group that does not race adds nothing however wide it is.
+*/
+@(test)
+test_race_width_is_the_widest_racing_group :: proc(t: ^testing.T) {
+	servers :: proc(n: int) -> []config.Upstream_Spec {
+		return make([]config.Upstream_Spec, n, context.temp_allocator)
+	}
+	cfg: config.Upstream_Config
+	cfg.servers = servers(6)
+	testing.expect_value(t, race_width(cfg), 0)
+	cfg.strategy = .Race
+	cfg.servers = servers(3)
+	testing.expect_value(t, race_width(cfg), 3)
+	zones := make([]config.Zone_Route, 2, context.temp_allocator)
+	zones[0].upstream = config.Upstream_Config{strategy = .Race, servers = servers(5)}
+	zones[1].upstream = config.Upstream_Config{strategy = .Failover, servers = servers(9)}
+	cfg.zones = zones
+	testing.expect_value(t, race_width(cfg), 5)
+	free_all(context.temp_allocator)
 }

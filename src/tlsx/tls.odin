@@ -921,7 +921,11 @@ read :: proc(conn: ^Conn, buf: []u8) -> (n: int, err: Error) {
 	if len(buf) == 0 {
 		return 0, .None
 	}
-	return transfer(conn, .Read, buf, time.Duration(sync.atomic_load(&conn.read_timeout_ns)))
+	n, err = transfer(conn, .Read, buf, time.Duration(sync.atomic_load(&conn.read_timeout_ns)))
+	// After `transfer` has let go of `mu`: a record already decrypted is read
+	// without touching the socket, so the wrapper's count never sees it.
+	loop.take_turn()
+	return
 }
 
 write :: proc(conn: ^Conn, buf: []u8) -> (n: int, err: Error) {
@@ -940,6 +944,8 @@ write :: proc(conn: ^Conn, buf: []u8) -> (n: int, err: Error) {
 		}
 		written += sent
 	}
+	// Writes go out through OpenSSL straight to the socket; see `read`.
+	loop.take_turn()
 	return written, .None
 }
 

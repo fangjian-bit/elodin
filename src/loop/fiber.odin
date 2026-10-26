@@ -35,6 +35,8 @@ Fiber :: struct {
 	stack:        Stack,
 	fn:           proc(data: rawptr),
 	data:         rawptr,
+	// Socket calls completed in a row without giving the loop up; see `take_turn`.
+	turns:        int,
 	state:        Fiber_State,
 	/*
 	Moved on every time a park ends, so a wake meant for one park cannot end a
@@ -304,6 +306,8 @@ switch_to_fiber :: proc(l: ^Loop, f: ^Fiber) {
 @(private)
 switch_to_scheduler :: proc "contextless" (f: ^Fiber) {
 	l := f.loop
+	// Giving the loop up is what `take_turn` counts towards.
+	f.turns = 0
 	when ASAN {
 		__sanitizer_start_switch_fiber(&f.asan_fake, l.thread_stack_bottom, l.thread_stack_size)
 		elodin_fiber_switch(&f.sp, l.sched_sp)

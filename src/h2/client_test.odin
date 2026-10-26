@@ -1036,6 +1036,87 @@ hook_read_nothing :: proc(user: rawptr, buf: []u8) -> (n: int, ok: bool) {
 	return 0, false
 }
 
+/*
+An upstream that always has the next frame does not hold the reader's loop: a
+fiber started beside the reader runs once `loop.TURN_BATCH` frames have been
+read, not once the upstream stops sending. The reader is a fiber of the loop
+that dialled the connection, and the queries waiting on its answers may be on
+the same loop.
+*/
+@(test)
+test_client_serve_takes_turns :: proc(t: ^testing.T) {
+	FRAMES :: 4 * loop.TURN_BATCH
+	Feed :: struct {
+		frames:  int,
+		sent:    int,
+		ran_at:  int,
+		started: bool,
+	}
+	feed := Feed {
+		ran_at = -1,
+	}
+	feed_read :: proc(user: rawptr, buf: []u8) -> (n: int, ok: bool) {
+		f := (^Feed)(user)
+		if !f.started {
+			f.started = true
+			// Behind the reader on the ready list, so it runs only once the reader
+			// parks or yields.
+			_, _ = loop.spawn(loop.current_loop(), proc(data: rawptr) {
+				f := (^Feed)(data)
+				f.ran_at = f.frames
+			}, f)
+		}
+		if f.frames >= FRAMES {
+			return 0, false
+		}
+		// A WINDOW_UPDATE of one on a stream nobody opened, which changes nothing.
+		frame := [FRAME_HEADER_SIZE + 4]u8{0, 0, 4, u8(Frame_Type.Window_Update), 0, 0, 0, 0, 1, 0, 0, 0, 1}
+		n = copy(buf, frame[f.sent:])
+		f.sent += n
+		if f.sent == len(frame) {
+			f.sent = 0
+			f.frames += 1
+		}
+		return n, true
+	}
+
+	l, made := loop.make_loop()
+	if !testing.expect(t, made, "no loop") {
+		return
+	}
+	th := loop.spawn_thread(l, loop.run, context)
+	c := client_make(IO{user = &feed, read = feed_read, write = proc(user: rawptr, buf: []u8) -> bool {return true}})
+	Job :: struct {
+		c:    ^Client,
+		done: sync.Sema,
+	}
+	job := Job {
+		c = c,
+	}
+	_, _ = loop.spawn(l, proc(data: rawptr) {
+		j := (^Job)(data)
+		client_serve(j.c)
+		sync.sema_post(&j.done)
+	}, &job)
+	finished := sync.sema_wait_with_timeout(&job.done, 5 * time.Second)
+	loop.stop(l)
+	thread.join(th)
+	thread.destroy(th)
+	loop.destroy(l)
+	client_unref(c)
+
+	testing.expect(t, finished, "the reader did not finish")
+	// The premise: the reader never had to wait for a frame.
+	testing.expect_value(t, feed.frames, FRAMES)
+	testing.expectf(
+		t,
+		feed.ran_at >= 0 && feed.ran_at <= loop.TURN_BATCH,
+		"the fiber beside the reader ran after %d of %d frames",
+		feed.ran_at,
+		FRAMES,
+	)
+}
+
 @(test)
 test_data_frame_cannot_touch_an_abandoned_stream :: proc(t: ^testing.T) {
 	/*

@@ -166,7 +166,7 @@ start_listeners :: proc(s: ^Server, l: ^Listeners) -> bool {
 				max_connections = cfg.server.max_connections if streams else 0,
 				pooled_upstream = config.pooled_upstream_connections(cfg.upstream),
 				in_flight = cfg.server.max_pending,
-				racers = cfg.server.max_pending if races(cfg.upstream) else 0,
+				racers = cfg.server.max_pending * race_width(cfg.upstream),
 				udp_readers = cfg.listeners.udp.readers if cfg.listeners.udp.enabled else 0,
 				loops = len(s.loops),
 			},
@@ -673,16 +673,13 @@ udp_loop :: proc(data: rawptr) {
 
 	// Labelled for the submit below, whose `break` would otherwise leave only
 	// the switch it sits in.
-	// Datagrams read since this reader last let the loop's other fibers run.
-	batch := 0
+	/*
+	A reader under a flood never waits - its socket always has the next datagram -
+	so it would read for ever with every query it started queued behind it on the
+	same loop. `loop.recv_udp` steps aside every `loop.TURN_BATCH` calls that did
+	not wait, which bounds how far reading can get ahead of answering.
+	*/
 	reading: for !sync.atomic_load(&l.stop) {
-		/*
-		A reader under a flood never waits - its socket always has the next
-		datagram - so it would read for ever with every query it started queued
-		behind it on the same loop. Every `loop.TURN_BATCH` datagrams it steps
-		aside for them, which bounds how far reading can get ahead of answering.
-		*/
-		loop.take_turn(&batch)
 		n, client, err := loop.recv_udp(socket, buf)
 		if err != nil {
 			if sync.atomic_load(&l.stop) || loop.cancelled() {
@@ -1624,11 +1621,9 @@ accept_loop :: proc(data: rawptr) {
 	// The run of consecutive failures, reset by anything that is not one - an
 	// accepted connection, or the poll tick. See `accept_failed`.
 	run: Accept_Run
-	// Under a connection storm the backlog always has the next one; see
-	// `loop.take_turn`.
-	rounds := 0
+	// Under a connection storm the backlog always has the next one, and
+	// `loop.accept_tcp` steps aside between them; see `loop.take_turn`.
 	for !sync.atomic_load(&l.stop) {
-		loop.take_turn(&rounds)
 		client_socket, client, err := loop.accept_tcp(listener)
 		if err != nil && (sync.atomic_load(&l.stop) || loop.cancelled()) {
 			break
@@ -1878,10 +1873,8 @@ serve_dns_stream :: proc(s: ^Server, conn: Conn, proto: Protocol, client: string
 	// what decides whether the refusal below drains first - see `stream_linger`.
 	answered := false
 	// A client pipelining queries the cache answers never lets this fiber park;
-	// see `loop.take_turn`.
-	rounds := 0
+	// its reads and writes step aside between them (`loop.take_turn`).
 	for {
-		loop.take_turn(&rounds)
 		/*
 		One budget for the length prefix and the body behind it, taken fresh per
 		message and not restarted by the bytes that arrive inside one - see

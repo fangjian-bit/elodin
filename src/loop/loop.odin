@@ -764,24 +764,36 @@ yield :: proc() {
 }
 
 /*
-How many rounds a reader may go without waiting before it yields.
+How many socket calls a fiber may complete in a row without waiting before it
+yields.
 
-A reader whose socket always has the next message - a UDP reader under a flood,
+A fiber whose socket always has the next message - a UDP reader under a flood,
 an accept loop under a connection storm, a client pipelining queries the cache
-answers - never parks, so without a yield it would hold its loop for as long as
-the peer keeps sending: every other fiber on the loop, and every query the
-reader itself started there, would wait behind it.
+answers, an upstream streaming replies - never parks, so without a yield it
+would hold its loop for as long as the peer keeps sending: every other fiber on
+the loop, the queries it started or is reading for included, would wait behind
+it. Threads had the kernel's scheduler for this.
 */
 TURN_BATCH :: 64
 
 /*
-Count one round of a reader's loop, and `yield` every `TURN_BATCH` of them. Call
-it between messages, holding no plain lock. Off a fiber it only counts.
+Count one call that completed without giving up the loop, and `yield` at every
+`TURN_BATCH`th in a row (`Fiber.turns`; a park or a yield starts the count
+again). Every socket wrapper in this package calls it on success, and `tlsx`
+does once its lock is released, so no read loop has to remember to: a loop that
+forgot is how one connection starves the rest. A reader over something other
+than a socket - h2's frame loops, which tests drive from memory - calls it
+itself. Called holding no plain lock, as any wrapper call that may park already
+must be. Off a fiber it does nothing.
 */
-take_turn :: proc(rounds: ^int) {
-	rounds^ += 1
-	if rounds^ >= TURN_BATCH {
-		rounds^ = 0
+take_turn :: proc() {
+	l := tl_loop
+	if l == nil || l.current == nil {
+		return
+	}
+	f := l.current
+	f.turns += 1
+	if f.turns >= TURN_BATCH {
 		yield()
 	}
 }

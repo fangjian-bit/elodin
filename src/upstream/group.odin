@@ -37,13 +37,16 @@ Group :: struct {
 }
 
 /*
-Racers in flight across every group that shares it, and how many there may be.
+Race legs in flight across every group that shares it, and how many there may be.
 
-A race's losers run on to their own timeout after the query has its answer (see
-`Race_State`), each holding a socket while the query that started them is no
-longer counted against `server.max_pending`. This is their bound. Past it a
-race starts as many legs as there is room for, and with no room at all asks its
-members in turn instead (`resolve_sequential`).
+Every leg is counted from its start to its end: while its query waits, and after,
+since a race's losers run on to their own timeout once the query has its answer
+(see `Race_State`), each holding a socket while the query that started them is no
+longer counted against `server.max_pending`. The server sizes it at every query
+in flight racing its widest group (`server.race_width`), so ordinary load never
+reaches it; what does is losers piling up behind a member that does not answer.
+Past it a race starts as many legs as there is room for, and with no room at all
+asks its members in turn instead (`resolve_sequential`).
 */
 Racer_Budget :: struct {
 	in_flight: int,

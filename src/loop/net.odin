@@ -106,6 +106,7 @@ recv_tcp :: proc(socket: net.TCP_Socket, buf: []u8) -> (int, net.TCP_Recv_Error)
 	for {
 		n, err := net.recv_tcp(socket, buf)
 		if err != .Would_Block {
+			take_turn()
 			return n, err
 		}
 		if !socket_wait(linux.Fd(socket), {.In}, .RCVTIMEO, start, &deadline, &armed) {
@@ -127,6 +128,7 @@ send_tcp :: proc(socket: net.TCP_Socket, buf: []u8) -> (n: int, err: net.TCP_Sen
 		wrote, serr := net.send_tcp(socket, buf[n:])
 		n += wrote
 		if serr != .Would_Block {
+			take_turn()
 			return n, serr
 		}
 		if !socket_wait(linux.Fd(socket), {.Out}, .SNDTIMEO, start, &deadline, &armed) {
@@ -143,6 +145,7 @@ recv_udp :: proc(socket: net.UDP_Socket, buf: []u8) -> (int, net.Endpoint, net.U
 	for {
 		n, from, err := net.recv_udp(socket, buf)
 		if err != .Would_Block {
+			take_turn()
 			return n, from, err
 		}
 		if !socket_wait(linux.Fd(socket), {.In}, .RCVTIMEO, start, &deadline, &armed) {
@@ -159,6 +162,7 @@ send_udp :: proc(socket: net.UDP_Socket, buf: []u8, to: net.Endpoint) -> (int, n
 	for {
 		n, err := net.send_udp(socket, buf, to)
 		if err != .Would_Block {
+			take_turn()
 			return n, err
 		}
 		if !socket_wait(linux.Fd(socket), {.Out}, .SNDTIMEO, start, &deadline, &armed) {
@@ -185,6 +189,7 @@ accept_tcp :: proc(listener: net.TCP_Socket) -> (net.TCP_Socket, net.Endpoint, n
 				// accept would be: the queue has moved on either way.
 				return {}, {}, .Aborted
 			}
+			take_turn()
 			return client, from, nil
 		}
 		if err != .Would_Block {
