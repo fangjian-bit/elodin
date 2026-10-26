@@ -895,9 +895,9 @@ close_idle :: proc(u: ^Upstream, all := false) -> (closed: int) {
 
 	stale_h2 := take_idle_h2_locked(u, all)
 	sync.mutex_unlock(&u.mu)
-	// Retired once the lock is let go: retiring writes a TLS close_notify,
-	// which can take the write timeout, and every query on this upstream
-	// needs `u.mu` to get a connection.
+	// Retired once the lock is let go, as `get_h2_conn` retires the one it
+	// replaces: nothing in retiring needs `u.mu`, and every query on this
+	// upstream waits on it to get a connection.
 	if stale_h2 != nil {
 		retire_h2_conn(stale_h2)
 		closed += 1

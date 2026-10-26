@@ -55,8 +55,15 @@ h2_idle_setup :: proc(t: ^testing.T, f: ^H2_Idle_Fixture) -> bool {
 	u.proto = .H2
 	f.hc = start_h2_conn(u, Stream{socket = socket})
 	u.h2 = f.hc
-	f.reader = u.h2_readers[len(u.h2_readers) - 1]
+	started := len(u.h2_readers) > 0
+	if started {
+		f.reader = u.h2_readers[len(u.h2_readers) - 1]
+	}
 	sync.mutex_unlock(&u.mu)
+	if !testing.expect(t, started, "no thread for the connection's reader") {
+		h2_idle_teardown(f)
+		return false
+	}
 	return true
 }
 
@@ -70,7 +77,7 @@ h2_idle_teardown :: proc(f: ^H2_Idle_Fixture) {
 @(private = "file")
 h2_idle_age :: proc(hc: ^H2_Conn, by: time.Duration) {
 	sync.mutex_lock(&hc.client.mu)
-	hc.client.released = time.time_add(hc.client.released, -by)
+	hc.client.released = time.tick_add(hc.client.released, -by)
 	sync.mutex_unlock(&hc.client.mu)
 }
 
@@ -82,12 +89,12 @@ h2_idle_kept :: proc(f: ^H2_Idle_Fixture) -> bool {
 }
 
 @(private = "file")
-h2_idle_reader_left :: proc(t: ^testing.T, reader: ^thread.Thread) {
+h2_idle_reader_left :: proc(t: ^testing.T, reader: ^thread.Thread) -> bool {
 	start := time.tick_now()
 	for !thread.is_done(reader) && time.tick_since(start) < 3 * time.Second {
 		time.sleep(time.Millisecond)
 	}
-	testing.expect(t, thread.is_done(reader), "the retired connection's reader is still polling")
+	return testing.expect(t, thread.is_done(reader), "the connection's reader is still polling")
 }
 
 @(test)
@@ -100,8 +107,8 @@ test_close_idle_retires_an_h2_conn_the_peer_closed :: proc(t: ^testing.T) {
 
 	// The reader's way out when the peer hangs up.
 	_ = net.shutdown(f.socket, .Receive)
-	for !thread.is_done(f.reader) {
-		time.sleep(time.Millisecond)
+	if !h2_idle_reader_left(t, f.reader) {
+		return
 	}
 	testing.expect(t, h2.client_closed(f.hc.client), "the premise: the client is closed")
 	testing.expect(t, h2_idle_kept(&f), "the premise: the upstream still holds it")

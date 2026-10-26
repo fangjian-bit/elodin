@@ -280,8 +280,8 @@ take_idle_h2_locked :: proc(u: ^Upstream, all: bool) -> (stale: ^H2_Conn) {
 		return nil
 	}
 	if !h2.client_closed(u.h2.client) {
-		idle := h2.client_idle_for(u.h2.client)
-		if idle == 0 || (!all && idle < u.idle_timeout) {
+		idle, busy := h2.client_idle_for(u.h2.client)
+		if busy || (!all && idle < u.idle_timeout) {
 			return nil
 		}
 	}
