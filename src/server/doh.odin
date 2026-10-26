@@ -7,6 +7,7 @@ import "elodin:cache"
 import "elodin:dns"
 import "elodin:h2"
 import "elodin:logx"
+import "elodin:loop"
 import "elodin:tlsx"
 
 /*
@@ -536,7 +537,11 @@ serve_doh :: proc(s: ^Server, conn: Conn, client: string) {
 	defer delete(r.buf)
 
 	last_question := time.tick_now()
+	// A client pipelining requests the cache answers never lets this fiber park;
+	// see `loop.take_turn`.
+	rounds := 0
 	for {
+		loop.take_turn(&rounds)
 		// Nothing to free: the round before this one reset the arena on its way out.
 		if doh_question_overdue(s, last_question, time.tick_now()) {
 			return

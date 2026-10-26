@@ -942,6 +942,46 @@ test_a_fiber_that_keeps_yielding_does_not_starve_a_descriptor :: proc(t: ^testin
 }
 
 /*
+A reader that never parks lets the other fibers of its loop run every
+`TURN_BATCH` rounds, and not before: the fiber started beside it has not run one
+round short of the batch, and has run once the batch is reached.
+*/
+@(test)
+test_take_turn_yields_every_batch :: proc(t: ^testing.T) {
+	r, started := start(t)
+	if !started {
+		return
+	}
+	defer finish(r)
+	Shared :: struct {
+		p:           Probe,
+		other_ran:   bool,
+		before_turn: bool,
+		after_turn:  bool,
+	}
+	s: Shared
+	_, _ = spawn(r.l, proc(data: rawptr) {
+		s := (^Shared)(data)
+		// Started from here, so it is on the ready list behind this fiber and runs
+		// only once this one parks or yields.
+		_, _ = spawn(current_loop(), proc(data: rawptr) {
+			(^Shared)(data).other_ran = true
+		}, s)
+		rounds := 0
+		for _ in 0 ..< TURN_BATCH - 1 {
+			take_turn(&rounds)
+		}
+		s.before_turn = s.other_ran
+		take_turn(&rounds)
+		s.after_turn = s.other_ran
+		sync.sema_post(&s.p.done)
+	}, &s)
+	testing.expect(t, sync.sema_wait_with_timeout(&s.p.done, WAIT))
+	testing.expect(t, !s.before_turn, "the other fiber ran before the batch was reached")
+	testing.expect(t, s.after_turn, "the reader did not yield at the end of the batch")
+}
+
+/*
 A cancelled fiber waiting on a cond in the usual loop - `for !ready { cond_wait }`
 - parks until it is signalled, rather than having every wait return at once and
 spinning its loop: the fiber that would signal it is on the same loop, and a spin

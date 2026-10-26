@@ -341,7 +341,12 @@ serve :: proc(c: ^Conn) {
 	}
 
 	header: [FRAME_HEADER_SIZE]u8
+	// A peer that keeps the socket readable never lets this reader park, and the
+	// handlers it starts on the same loop would wait behind it; see
+	// `loop.take_turn`.
+	rounds := 0
 	for {
+		loop.take_turn(&rounds)
 		if !read_exact(c, header[:]) {
 			return
 		}

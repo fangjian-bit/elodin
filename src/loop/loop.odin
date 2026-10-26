@@ -395,6 +395,11 @@ spawn :: proc(l: ^Loop, fn: proc(data: rawptr), data: rawptr) -> (h: Handle, ok:
 			f.next = l.free_cold
 			l.free_cold = f
 			l.alive -= 1
+			// The count this took kept a stopping loop from returning; as in
+			// `fiber_recycle`, the one that takes it to zero says so.
+			if l.alive == 0 && l.stopping {
+				signal_locked(l)
+			}
 			sync.mutex_unlock(&l.mu)
 			return {}, false
 		}
@@ -562,26 +567,27 @@ fiber_recycle :: proc(l: ^Loop, f: ^Fiber) {
 	f.token += 1
 	oversized := scratch_oversized(&f.scratch)
 	sync.mutex_lock(&l.mu)
+	// A stack kept warm goes straight back on the list, in the one lock a
+	// finished query costs; only one being unmapped is let go of first, since
+	// `spawn` may hand out whatever is on a list the moment it is there.
 	keep := !oversized && l.warm < STACK_CACHE
 	if keep {
 		l.warm += 1
+		f.next = l.free_warm
+		l.free_warm = f
 	}
 	l.alive -= 1
 	if l.alive == 0 && l.stopping {
 		signal_locked(l)
 	}
 	sync.mutex_unlock(&l.mu)
-	if !keep {
-		fiber_release(l, f)
-	}
-	sync.mutex_lock(&l.mu)
 	if keep {
-		f.next = l.free_warm
-		l.free_warm = f
-	} else {
-		f.next = l.free_cold
-		l.free_cold = f
+		return
 	}
+	fiber_release(l, f)
+	sync.mutex_lock(&l.mu)
+	f.next = l.free_cold
+	l.free_cold = f
 	sync.mutex_unlock(&l.mu)
 }
 
@@ -755,6 +761,29 @@ yield :: proc() {
 	append(&l.ready, f)
 	switch_to_scheduler(f)
 	f.token += 1
+}
+
+/*
+How many rounds a reader may go without waiting before it yields.
+
+A reader whose socket always has the next message - a UDP reader under a flood,
+an accept loop under a connection storm, a client pipelining queries the cache
+answers - never parks, so without a yield it would hold its loop for as long as
+the peer keeps sending: every other fiber on the loop, and every query the
+reader itself started there, would wait behind it.
+*/
+TURN_BATCH :: 64
+
+/*
+Count one round of a reader's loop, and `yield` every `TURN_BATCH` of them. Call
+it between messages, holding no plain lock. Off a fiber it only counts.
+*/
+take_turn :: proc(rounds: ^int) {
+	rounds^ += 1
+	if rounds^ >= TURN_BATCH {
+		rounds^ = 0
+		yield()
+	}
 }
 
 /*

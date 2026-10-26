@@ -487,7 +487,7 @@ test_a_port_already_held_is_refused :: proc(t: ^testing.T) {
 
 /*
 A reader steps aside for the queries it started, so a backlog in its socket is
-answered as it is read rather than all read first (`UDP_BATCH`).
+answered as it is read rather than all read first (`loop.TURN_BATCH`).
 
 A reader whose socket always has the next datagram never waits, and a loop runs
 a fiber until it does. So without the step aside, a queue of datagrams is read

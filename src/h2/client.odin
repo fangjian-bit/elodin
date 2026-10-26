@@ -961,7 +961,7 @@ client_request :: proc(
 	looks streams up while holding `c.mu` and acts on what it finds; freeing
 	one outside the lock would let this cleanup run between that lookup and
 	the use, leaving the reader writing into memory already handed back.
-	`client_unref` takes the lock itself, so it stays outside.
+	`client_unref` stays outside: the last reference frees `c`, lock and all.
 	*/
 	defer {
 		loop.lock(&c.mu)

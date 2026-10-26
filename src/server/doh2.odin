@@ -239,9 +239,26 @@ h2_handler :: proc(hc: ^h2.Conn, req: ^h2.Request) {
 		free(job)
 		h2_shed(ctx, hc, req, max_pending)
 	case .Stopped:
-		// Shutting down: answer inline, on the connection's own fiber, rather than
-		// dropping the stream - a query `max_pending` does not count, so it is
-		// one of the connections' for the chain-walk bound too.
+		if can_detach(ctx.server) {
+			/*
+			A server with loops stops its connections before its loops, so what
+			refused this start is a stack that could not be mapped. Shed, as at
+			`max_pending`: answered here instead, the reader would stop reading
+			for an upstream round trip, and a body past the client's window would
+			park on a WINDOW_UPDATE only this reader could read.
+			*/
+			if asked {
+				sync.atomic_sub(&ctx.pending, 1)
+			}
+			h2.conn_unref(hc)
+			free(job)
+			h2_shed(ctx, hc, req, max_pending)
+			return
+		}
+		// No loop to start it on - a `Server` built as a literal, driven from a
+		// test's own thread: answered inline, on the connection's own fiber, as a
+		// query `max_pending` does not count, and so one of the connections' for
+		// the chain-walk bound too.
 		h2_answer(job, .Connection)
 	}
 }

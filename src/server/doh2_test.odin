@@ -181,9 +181,15 @@ serve_one :: proc(
 	await: string,
 	occupy: bool,
 	limiter: ^Rate_Limiter = nil,
+	// Stop the loop first, so every start is refused while the server still
+	// has loops: what a stack that cannot be mapped looks like.
+	refuse_starts := false,
 ) -> Result {
 	handler_pool: Test_Loop
 	start_test_loop(&handler_pool)
+	if refuse_starts {
+		loop.stop(handler_pool.loops[0])
+	}
 	s := Server {
 		cfg          = cfg,
 		loops        = handler_pool.loops[:],
@@ -240,6 +246,30 @@ serve_one :: proc(
 		pending = ctx.pending,
 		stamped_after_gate = time.tick_diff(opened, ctx.last_question) > 0,
 	}
+}
+
+/*
+A request whose fiber cannot be started on a running server is shed as at
+`max_pending`, not answered on the reader: answering there stops the connection
+reading for an upstream round trip, and a body past the client's window would
+park on a WINDOW_UPDATE only that reader could read.
+*/
+@(test)
+test_doh2_sheds_a_request_it_cannot_start :: proc(t: ^testing.T) {
+	context.allocator = runtime.heap_allocator()
+
+	cfg := config.default_config()
+	cfg.listeners.doh.path = "/dns-query"
+	cfg.server.max_pending = 8
+	cfg.cache.enabled = false
+	cfg.blocking.enabled = false
+
+	got := serve_one(&cfg, "/dns-query?dns=AAAAAAAAAAAAAAAA", "", occupy = false, refuse_starts = true)
+	defer delete(got.output)
+
+	testing.expect(t, strings.contains(string(got.output[:]), "503"), "the request was not shed")
+	testing.expect(t, !wrote_a_body(got.output[:]), "the shed answer carried a body")
+	testing.expect_value(t, got.dropped, u64(1))
 }
 
 /*

@@ -661,11 +661,6 @@ udp_readers_line :: proc(readers, asked, granted: int) -> string {
 	return fmt.tprintf("%s, %.0M of receive buffer each", count, granted)
 }
 
-// How many datagrams a reader takes off its socket before it lets the queries it
-// started run; see `udp_loop`.
-@(private)
-UDP_BATCH :: 64
-
 @(private)
 udp_loop :: proc(data: rawptr) {
 	ctx := cast(^Udp_Context)data
@@ -684,14 +679,10 @@ udp_loop :: proc(data: rawptr) {
 		/*
 		A reader under a flood never waits - its socket always has the next
 		datagram - so it would read for ever with every query it started queued
-		behind it on the same loop. Every `UDP_BATCH` datagrams it steps aside for
-		them, which bounds how far reading can get ahead of answering.
+		behind it on the same loop. Every `loop.TURN_BATCH` datagrams it steps
+		aside for them, which bounds how far reading can get ahead of answering.
 		*/
-		batch += 1
-		if batch >= UDP_BATCH {
-			batch = 0
-			loop.yield()
-		}
+		loop.take_turn(&batch)
 		n, client, err := loop.recv_udp(socket, buf)
 		if err != nil {
 			if sync.atomic_load(&l.stop) || loop.cancelled() {
@@ -1633,7 +1624,11 @@ accept_loop :: proc(data: rawptr) {
 	// The run of consecutive failures, reset by anything that is not one - an
 	// accepted connection, or the poll tick. See `accept_failed`.
 	run: Accept_Run
+	// Under a connection storm the backlog always has the next one; see
+	// `loop.take_turn`.
+	rounds := 0
 	for !sync.atomic_load(&l.stop) {
+		loop.take_turn(&rounds)
 		client_socket, client, err := loop.accept_tcp(listener)
 		if err != nil && (sync.atomic_load(&l.stop) || loop.cancelled()) {
 			break
@@ -1882,7 +1877,11 @@ serve_dns_stream :: proc(s: ^Server, conn: Conn, proto: Protocol, client: string
 	// Whether this connection has anything the close could take back, which is
 	// what decides whether the refusal below drains first - see `stream_linger`.
 	answered := false
+	// A client pipelining queries the cache answers never lets this fiber park;
+	// see `loop.take_turn`.
+	rounds := 0
 	for {
+		loop.take_turn(&rounds)
 		/*
 		One budget for the length prefix and the body behind it, taken fresh per
 		message and not restarted by the bytes that arrive inside one - see
@@ -1967,9 +1966,9 @@ serve_dns_stream :: proc(s: ^Server, conn: Conn, proto: Protocol, client: string
 			return
 		}
 
-		// TCP and DoT: this is the connection's own fiber, so a slow answer here
-		// costs nobody but this client.
-		// On the connection's fiber, outside `max_pending`; see `handle_query`'s `pool`.
+		// TCP and DoT: this is the connection's own fiber, so an answer waiting on
+		// the network here costs nobody but this client. On the connection's fiber,
+		// outside `max_pending`; see `handle_query`'s `pool`.
 		response, _, ok := handle_query(s, query, proto, client, context.temp_allocator, pool = .Connection)
 		if !ok || len(response) == 0 {
 			free_all(context.temp_allocator)
@@ -2250,15 +2249,9 @@ conn_write_all :: proc(c: Conn, buf: []u8) -> bool {
 		_, err := tlsx.write(c.tls, buf)
 		return err == .None
 	}
-	sent := 0
-	for sent < len(buf) {
-		n, err := loop.send_tcp(c.socket, buf[sent:])
-		if err != nil || n <= 0 {
-			return false
-		}
-		sent += n
-	}
-	return true
+	// `loop.send_tcp` writes the whole buffer or says why not.
+	n, err := loop.send_tcp(c.socket, buf)
+	return err == nil && n == len(buf)
 }
 
 @(private)
