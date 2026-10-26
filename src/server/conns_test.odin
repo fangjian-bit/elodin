@@ -5,6 +5,7 @@ import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
+import "elodin:loop"
 
 /*
 The connection limit is `len(threads) - permanent`, so `permanent` has to keep
@@ -381,4 +382,57 @@ test_a_connection_closed_during_shutdown_is_not_counted :: proc(t: ^testing.T) {
 	thread.join(shutdown)
 	thread.destroy(shutdown)
 	testing.expect_value(t, active_connections(&cm), 0)
+}
+
+/*
+Stopping the listener loops cancels them where they wait.
+
+A read or accept loop on an event loop waits as long as its socket's timeout
+allows, and its socket cannot be closed under it - a descriptor closed under a
+waiting fiber is a number the next socket may be given while the fiber still
+holds it. So the stop cancels the loop's fiber, which ends its wait at once, and
+returns once the permanent entries are gone. The fiber here waits for an hour;
+the bound on the wait below only ends a failing run.
+*/
+@(test)
+test_stopping_the_listener_loops_cancels_them :: proc(t: ^testing.T) {
+	tl: Test_Loop
+	if !testing.expect(t, start_test_loop(&tl), "no loop") {
+		return
+	}
+	cm: Conn_Manager
+	conn_manager_init(&cm, 4, 0)
+	Parked :: struct {
+		parked:   loop.Sema,
+		finished: bool,
+	}
+	p: Parked
+	started := conn_spawn(&cm, &p, proc(data: rawptr) {
+		p := (^Parked)(data)
+		loop.sema_post(&p.parked)
+		_ = loop.sleep(time.Hour)
+		sync.atomic_store(&p.finished, true)
+	}, counted = false, on = tl.loops[0])
+	testing.expect_value(t, started, Spawn_Result.Started)
+	testing.expect(t, loop.sema_wait_with_timeout(&p.parked, 5 * time.Second), "the loop fiber never ran")
+
+	Stop :: struct {
+		cm:   ^Conn_Manager,
+		done: sync.Sema,
+	}
+	st := Stop {
+		cm = &cm,
+	}
+	stopper := thread.create_and_start_with_poly_data(&st, proc(st: ^Stop) {
+		conn_manager_stop_permanent(st.cm)
+		sync.sema_post(&st.done)
+	})
+	if !testing.expect(t, sync.sema_wait_with_timeout(&st.done, 5 * time.Second), "the listener loop was not cancelled") {
+		return
+	}
+	thread.join(stopper)
+	thread.destroy(stopper)
+	testing.expect(t, sync.atomic_load(&p.finished), "the loop fiber never returned")
+	conn_manager_shutdown(&cm)
+	stop_test_loop(&tl)
 }

@@ -35,6 +35,26 @@ of the pointer it is given as the option's length, which for a `timeval` is half
 of it, and the kernel refuses the read - every socket would have looked as if it
 had no timeout, and a wait meant to end would have lasted for ever.
 */
+/*
+A socket read or written from a fiber must be non-blocking, or the call sleeps
+in the kernel with the whole loop under it - every other fiber on the thread
+waiting out this one's timeout. Nothing at the call says which a socket is, so
+in a debug build - the integration suite's - every call made on a fiber checks,
+and a socket created or adopted without `set_blocking(false)` stops the process
+where it is used rather than showing up as a loop that answers one query at a
+time. A system call per socket call, which is why it is debug only.
+*/
+@(private)
+assert_nonblocking :: proc(fd: linux.Fd, loc := #caller_location) {
+	when ODIN_DEBUG {
+		if current() == nil {
+			return
+		}
+		flags, err := linux.fcntl(fd, linux.F_GETFL)
+		assert(err != .NONE || .NONBLOCK in flags, "a blocking socket was used on a loop", loc)
+	}
+}
+
 @(private)
 socket_deadline :: proc(fd: linux.Fd, option: linux.Socket_Option, start: Tick) -> Tick {
 	tv: linux.Time_Val
@@ -79,6 +99,7 @@ socket_wait :: proc(
 }
 
 recv_tcp :: proc(socket: net.TCP_Socket, buf: []u8) -> (int, net.TCP_Recv_Error) {
+	assert_nonblocking(linux.Fd(socket))
 	start := time.tick_now()
 	deadline: Tick
 	armed: bool
@@ -98,6 +119,7 @@ Write all of `buf`, as `net.send_tcp` does, or say why not. What was written
 before a failure is counted in `n`.
 */
 send_tcp :: proc(socket: net.TCP_Socket, buf: []u8) -> (n: int, err: net.TCP_Send_Error) {
+	assert_nonblocking(linux.Fd(socket))
 	start := time.tick_now()
 	deadline: Tick
 	armed: bool
@@ -114,6 +136,7 @@ send_tcp :: proc(socket: net.TCP_Socket, buf: []u8) -> (n: int, err: net.TCP_Sen
 }
 
 recv_udp :: proc(socket: net.UDP_Socket, buf: []u8) -> (int, net.Endpoint, net.UDP_Recv_Error) {
+	assert_nonblocking(linux.Fd(socket))
 	start := time.tick_now()
 	deadline: Tick
 	armed: bool
@@ -129,6 +152,7 @@ recv_udp :: proc(socket: net.UDP_Socket, buf: []u8) -> (int, net.Endpoint, net.U
 }
 
 send_udp :: proc(socket: net.UDP_Socket, buf: []u8, to: net.Endpoint) -> (int, net.UDP_Send_Error) {
+	assert_nonblocking(linux.Fd(socket))
 	start := time.tick_now()
 	deadline: Tick
 	armed: bool
@@ -148,6 +172,7 @@ send_udp :: proc(socket: net.UDP_Socket, buf: []u8, to: net.Endpoint) -> (int, n
 returns is non-blocking as well, ready for this package's reads and writes.
 */
 accept_tcp :: proc(listener: net.TCP_Socket) -> (net.TCP_Socket, net.Endpoint, net.Accept_Error) {
+	assert_nonblocking(linux.Fd(listener))
 	start := time.tick_now()
 	deadline: Tick
 	armed: bool

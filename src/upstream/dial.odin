@@ -83,10 +83,6 @@ dial_tcp_timeout :: proc(endpoint: net.Endpoint, timeout: time.Duration) -> (soc
 		}
 	}
 
-	if posix.fcntl(fd, .SETFL, flags) < 0 {
-		return 0, .Dial_Failed
-	}
-
 	ok = true
 	return net.TCP_Socket(fd), .None
 }

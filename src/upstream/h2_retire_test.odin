@@ -281,3 +281,98 @@ test_retiring_a_tls_h2_conn_sends_close_notify :: proc(t: ^testing.T) {
 		time.sleep(time.Millisecond)
 	}
 }
+
+/*
+A reader on a loop that is told to stop leaves, rather than spinning.
+
+Its read waits `H2_POLL_INTERVAL` and goes round again on a timeout, which is how
+a long-lived connection sits through quiet. A cancelled fiber's every wait
+returns at once, as a timeout does, so a reader that went round on that too
+would spin on its loop for ever and the loop - waiting for its last fiber - would
+never stop. The loop is stopped the way the server stops it, with
+`loop.cancel_all`; the wait for it to finish is bounded only so a failing run
+reports rather than hangs.
+*/
+@(test)
+test_a_cancelled_h2_reader_leaves_its_loop :: proc(t: ^testing.T) {
+	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if !testing.expectf(t, lerr == nil, "cannot listen: %v", lerr) {
+		return
+	}
+	defer net.close(listener)
+	bound, _ := net.bound_endpoint(listener)
+	u, uerr := make_upstream(
+		config.Upstream_Spec{name = "cancelled", kind = .TCP, address = "127.0.0.1", port = bound.port, hostname = "doh.invalid", path = "/dns-query"},
+		8,
+		30 * time.Second,
+	)
+	if !testing.expectf(t, uerr == .None, "cannot make the upstream: %v", uerr) {
+		return
+	}
+	defer destroy(u)
+
+	l, made := loop.make_loop()
+	if !testing.expect(t, made, "no loop") {
+		return
+	}
+	th := loop.spawn_thread(l, loop.run, context)
+	Start :: struct {
+		u:       ^Upstream,
+		port:    int,
+		started: sync.Sema,
+		ok:      bool,
+	}
+	st := Start {
+		u    = u,
+		port = bound.port,
+	}
+	// Started from a fiber of the loop, so the reader is one of its fibers.
+	_, _ = loop.spawn(l, proc(data: rawptr) {
+		st := (^Start)(data)
+		defer sync.sema_post(&st.started)
+		socket, derr := dial_tcp_timeout(net.Endpoint{address = net.IP4_Loopback, port = st.port}, time.Second)
+		if derr != .None {
+			return
+		}
+		_ = net.set_option(socket, .Receive_Timeout, H2_POLL_INTERVAL)
+		sync.mutex_lock(&st.u.mu)
+		st.u.proto = .H2
+		st.u.h2 = start_h2_conn(st.u, Stream{socket = socket})
+		sync.mutex_unlock(&st.u.mu)
+		st.ok = true
+	}, &st)
+	testing.expect(t, sync.sema_wait_with_timeout(&st.started, 5 * time.Second), "the dial never ran")
+	if !testing.expect(t, st.ok, "could not start the connection") {
+		loop.stop(l)
+		thread.join(th)
+		thread.destroy(th)
+		loop.destroy(l)
+		return
+	}
+	// The premise: a reader on the loop, waiting in its read.
+	testing.expect(t, h2_readers_running(u) == 1, "no reader is running on the loop")
+
+	Stopper :: struct {
+		l:    ^loop.Loop,
+		th:   ^thread.Thread,
+		done: sync.Sema,
+	}
+	stopper := Stopper {
+		l  = l,
+		th = th,
+	}
+	waiter := thread.create_and_start_with_poly_data(&stopper, proc(s: ^Stopper) {
+		loop.cancel_all(s.l)
+		loop.stop(s.l)
+		thread.join(s.th)
+		sync.sema_post(&s.done)
+	})
+	if !testing.expect(t, sync.sema_wait_with_timeout(&stopper.done, 5 * time.Second), "the loop never stopped: its reader is still running") {
+		return
+	}
+	thread.join(waiter)
+	thread.destroy(waiter)
+	thread.destroy(th)
+	loop.destroy(l)
+	testing.expect_value(t, h2_readers_running(u), 0)
+}

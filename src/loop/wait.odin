@@ -1,5 +1,6 @@
 package loop
 
+import "base:intrinsics"
 import "core:sys/linux"
 import "core:time"
 
@@ -183,6 +184,30 @@ dispatch_event :: proc(l: ^Loop, ev: linux.EPoll_Event) {
 }
 
 /*
+`ppoll(2)` with a timeout in milliseconds, -1 for none.
+
+Not `core:sys/linux`'s `poll`, which on arm64 builds the `timespec` for
+`ppoll` from a negative timeout by casting it to unsigned: "no timeout" becomes
+a timeout of some 18 quadrillion seconds, which the kernel refuses with EINVAL,
+and every wait with no deadline failed at once. A NULL `timespec` is what
+`ppoll` takes for none, and `ppoll` serves both architectures.
+*/
+@(private)
+ppoll :: proc(fds: []linux.Poll_Fd, timeout_ms: i32) -> (i32, linux.Errno) {
+	ts: linux.Time_Spec
+	tsp: ^linux.Time_Spec
+	if timeout_ms >= 0 {
+		ts = linux.Time_Spec{uint(timeout_ms / 1000), uint(timeout_ms % 1000) * 1_000_000}
+		tsp = &ts
+	}
+	ret := intrinsics.syscall(linux.SYS_ppoll, uintptr(raw_data(fds)), uintptr(len(fds)), uintptr(tsp), 0, 0)
+	if int(ret) < 0 && int(ret) > -4096 {
+		return 0, linux.Errno(-int(ret))
+	}
+	return i32(ret), .NONE
+}
+
+/*
 `wait_fd` for a thread that is not running a loop.
 
 Retried across EINTR with what is left of the deadline, which is how a blocking
@@ -207,7 +232,7 @@ poll_fd :: proc(fd: linux.Fd, events: Events, deadline: Tick) -> Wait_Result {
 			ms = i32(min((left + time.Millisecond - 1) / time.Millisecond, time.Duration(max(i32))))
 		}
 		fds := [1]linux.Poll_Fd{{fd = fd, events = want}}
-		n, err := linux.poll(fds[:], ms)
+		n, err := ppoll(fds[:], ms)
 		if err == .EINTR {
 			continue
 		}

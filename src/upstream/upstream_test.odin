@@ -4193,7 +4193,9 @@ test_a_zero_socket_timeout_is_still_no_timeout :: proc(t: ^testing.T) {
 	defer net.close(socket)
 	set_socket_timeouts(socket, 0)
 	buf: [16]u8
-	n, rerr := net.recv_tcp(socket, buf[:])
+	// Through the call every transport reads with: the socket is non-blocking,
+	// and this is what waits on it for as long as its timeout says.
+	n, rerr := loop.recv_tcp(socket, buf[:])
 	testing.expectf(t, rerr == nil && n == 1, "a read with no timeout gave %d bytes, %v", n, rerr)
 }
 

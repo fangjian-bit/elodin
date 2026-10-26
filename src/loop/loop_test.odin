@@ -725,3 +725,80 @@ test_an_idle_loop_gives_back_its_warm_stacks :: proc(t: ^testing.T) {
 	}
 	testing.expectf(t, warm(r.l) <= WARM_IDLE_KEEP, "%d stacks still warm after %v idle", warm(r.l), time.tick_since(start))
 }
+
+/*
+`cancel_all` reaches every fiber on the loop, a fiber started by another fiber
+and parked on a descriptor included - the shape of an upstream connection's
+reader at shutdown.
+*/
+@(test)
+test_cancel_all_reaches_a_fiber_waiting_on_a_descriptor :: proc(t: ^testing.T) {
+	a, b, paired := socket_pair(t)
+	if !paired {
+		return
+	}
+	defer linux.close(a)
+	defer linux.close(b)
+	l, made := make_loop()
+	if !testing.expect(t, made) {
+		return
+	}
+	th := spawn_thread(l, run, context)
+	Shared :: struct {
+		fd:      linux.Fd,
+		parked:  Sema,
+		result:  Wait_Result,
+		done:    sync.Sema,
+	}
+	s := Shared {
+		fd = a,
+	}
+	_, _ = spawn(l, proc(data: rawptr) {
+		// Started from a fiber, as an upstream reader is.
+		_ = go(proc(data: rawptr) {
+			s := (^Shared)(data)
+			sema_post(&s.parked)
+			s.result = wait_fd(s.fd, {.In}, time.tick_add(time.tick_now(), time.Hour))
+			sync.sema_post(&s.done)
+		}, data)
+	}, &s)
+	testing.expect(t, sema_wait_with_timeout(&s.parked, WAIT))
+	time.sleep(10 * time.Millisecond)
+	cancel_all(l)
+	woke := sync.sema_wait_with_timeout(&s.done, WAIT)
+	testing.expect(t, woke, "cancel_all did not end the wait")
+	testing.expect_value(t, s.result, Wait_Result.Cancelled)
+	stop(l)
+	if woke {
+		thread.join(th)
+		thread.destroy(th)
+		destroy(l)
+	}
+}
+
+/*
+A wait with no deadline off a loop waits, rather than failing at once: `ppoll`
+with no timeout, which `core:sys/linux`'s `poll` cannot express on arm64.
+*/
+@(test)
+test_a_wait_off_a_loop_with_no_deadline_waits :: proc(t: ^testing.T) {
+	a, b, paired := socket_pair(t)
+	if !paired {
+		return
+	}
+	defer linux.close(a)
+	defer linux.close(b)
+	Writer :: struct {
+		fd: linux.Fd,
+	}
+	w := Writer{b}
+	th := thread.create_and_start_with_poly_data(&w, proc(w: ^Writer) {
+		time.sleep(30 * time.Millisecond)
+		_, _ = linux.write(w.fd, transmute([]u8)string("x"))
+	})
+	defer {
+		thread.join(th)
+		thread.destroy(th)
+	}
+	testing.expect_value(t, wait_fd(a, {.In}, {}), Wait_Result.Ready)
+}

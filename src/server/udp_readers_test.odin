@@ -8,6 +8,7 @@ import "core:time"
 import "elodin:config"
 import "elodin:dns"
 import "elodin:logx"
+import "elodin:loop"
 
 /*
 Several readers, one port.
@@ -407,4 +408,96 @@ test_a_port_already_held_is_refused :: proc(t: ^testing.T) {
 	stop_test_loop(&second_pool)
 	destroy_listeners(&second_l)
 	testing.expect(t, !started, "a second listener joined the running one's port and took a share of its datagrams")
+}
+
+/*
+A reader steps aside for the queries it started, so a backlog in its socket is
+answered as it is read rather than all read first (`UDP_BATCH`).
+
+A reader whose socket always has the next datagram never waits, and a loop runs
+a fiber until it does. So without the step aside, a queue of datagrams is read
+end to end before any query it started has run - all of them in flight at once,
+and every one past `max_pending` dropped although the server is answering as
+fast as it can. The loop is held while the queue builds, which is the moment a
+flood leaves it in, and then let go; with the reader stepping aside every batch
+nothing is in flight beyond a batch, and nothing is dropped.
+*/
+@(test)
+test_a_reader_lets_its_queries_run_between_batches :: proc(t: ^testing.T) {
+	cfg: config.Config
+	fixture(&cfg, 1)
+	LIMIT :: 80
+	SENT :: 150
+	cfg.server.max_pending = LIMIT
+	tl: Test_Loop
+	if !testing.expect(t, start_test_loop(&tl), "no loop") {
+		return
+	}
+	s := Server {
+		cfg   = &cfg,
+		loops = tl.loops[:],
+	}
+
+	// The loop, held: the fiber blocks the thread itself until the queue is
+	// built, which nothing on a loop is allowed to do outside a test.
+	Gate :: struct {
+		started, go: sync.Sema,
+	}
+	gate: Gate
+	_, _ = loop.spawn(tl.loops[0], proc(data: rawptr) {
+		g := (^Gate)(data)
+		sync.sema_post(&g.started)
+		sync.sema_wait(&g.go)
+	}, &gate)
+	if !testing.expect(t, sync.sema_wait_with_timeout(&gate.started, 5 * time.Second), "the loop never ran") {
+		sync.sema_post(&gate.go)
+		stop_test_loop(&tl)
+		return
+	}
+
+	l: Listeners
+	if !start_listeners(&s, &l) {
+		sync.sema_post(&gate.go)
+		stop_test_loop(&tl)
+		testing.expect(t, false, "could not start the UDP listener")
+		return
+	}
+	defer {
+		stop_listeners(&l)
+		stop_test_loop(&tl)
+		destroy_listeners(&l)
+	}
+
+	client, cerr := net.make_unbound_udp_socket(.IP4)
+	if !testing.expectf(t, cerr == nil, "no client socket: %v", cerr) {
+		sync.sema_post(&gate.go)
+		return
+	}
+	defer net.close(client)
+	// A header and no question, answered FORMERR without a lookup.
+	query: [dns.HEADER_SIZE]u8
+	for _ in 0 ..< SENT {
+		_, _ = net.send_udp(client, query[:], l.udp_bound)
+	}
+	sync.sema_post(&gate.go)
+
+	// Until the reader has taken everything the kernel kept and every query it
+	// started has been answered.
+	start := time.tick_now()
+	last := u64(0)
+	steady := time.tick_now()
+	for time.tick_since(start) < 5 * time.Second {
+		got := sync.atomic_load(&l.udp[0].received)
+		if got != last {
+			last = got
+			steady = time.tick_now()
+		} else if queries_pending(&s) == 0 && time.tick_since(steady) > 200 * time.Millisecond {
+			break
+		}
+		time.sleep(5 * time.Millisecond)
+	}
+	// The premise: more arrived than may be in flight, so reading them all before
+	// answering any would have had to drop some.
+	testing.expectf(t, last > LIMIT, "only %d of %d datagrams reached the reader; the case needs more than %d", last, SENT, LIMIT)
+	testing.expect_value(t, sync.atomic_load(&s.stats.dropped), 0)
 }

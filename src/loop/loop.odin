@@ -835,5 +835,15 @@ go :: proc(fn: proc(data: rawptr), data: rawptr) -> bool {
 		_, ok := spawn(l, fn, data)
 		return ok
 	}
-	return spawn_thread(data, fn, context, self_cleanup = true) != nil
+	/*
+	The job runs with the caller's context, but the thread's own bookkeeping is
+	the heap's: a thread that cleans up after itself frees its `Thread` after
+	`fn` has returned, which is after anything waiting on `fn` has been told it
+	is done - so on the caller's allocator that free could land after the caller
+	itself had finished with it, which under the test runner's tracking
+	allocator is a leak reported against a test that leaked nothing.
+	*/
+	caller := context
+	context.allocator = runtime.heap_allocator()
+	return spawn_thread(data, fn, caller, self_cleanup = true) != nil
 }
