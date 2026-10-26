@@ -243,7 +243,7 @@ start_h2_conn :: proc(u: ^Upstream, stream: Stream) -> ^H2_Conn {
 		// afresh, and the reader's share is let go here instead.
 		u.h2_readers -= 1
 		loop.lock(&hc.client.mu)
-		hc.client.closed = true
+		sync.atomic_store(&hc.client.closed, true)
 		loop.unlock(&hc.client.mu)
 		release_h2_conn(hc)
 		return hc

@@ -8,7 +8,7 @@ loops            = listeners.udp.readers = usable_cpus, at most 8
 max_pending      = (usable memory / 8) / 320 KiB, between 64 and 4096
                    (409 on a 1 GiB machine; 1024 where memory cannot be read)
 heavy_decodes    = (usable memory / 32) / 8 MiB, between 2 and 128 (not a key)
-chain_walks      = max_pending less a reserved quarter
+chain_walks      = max_pending + max_connections, less a reserved quarter
 ```
 
 - "Usable" is what this process can have: the CPU affinity mask, and a cgroup CPU
@@ -21,7 +21,7 @@ chain_walks      = max_pending less a reserved quarter
 ```console
 $ elodin --check
 /etc/elodin/elodin.yaml is valid: 2 upstreams, 0 zone routes, 4 blocklists, 0 rewrites
-  loops=2 max_pending=3164 heavy_decodes=30 chain_walks=2373 (derived from 2 usable CPUs and 7.7 GiB)
+  loops=2 max_pending=3164 heavy_decodes=30 chain_walks=2757 (derived from 2 usable CPUs and 7.7 GiB)
   answering queries from 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, ::1/128, fc00::/7, fe80::/10; every other source is refused
   udp: 2 readers, asking for 1MiB of receive buffer each (derived from 2 usable CPUs)
   connections: at most 512 at once across TCP, DoT and DoH, of which one client prefix (/24, /64) may hold 256; connections past a prefix's share are refused and counted as conn_refused=

@@ -1267,12 +1267,18 @@ start_loops :: proc(n: int) -> (loops: []^loop.Loop, threads: []^thread.Thread) 
 	return
 }
 
-// Cancel what is still running on the loops, wait for each to finish, and free them.
+/*
+Cancel what is still running on the loops, wait for each to finish, and free them.
+
+Stopped before cancelled: a loop that is stopping starts nothing more, so a
+cancelled fiber cannot start one the cancel has already gone past - an upstream
+connection's reader, say, which would then keep its loop running for good.
+*/
 @(private)
 stop_loops :: proc(loops: []^loop.Loop, threads: []^thread.Thread) {
 	for l in loops {
-		loop.cancel_all(l)
 		loop.stop(l)
+		loop.cancel_all(l)
 	}
 	for t, i in threads {
 		thread.join(t)

@@ -260,8 +260,20 @@ RESERVED_HANDLERS_SHARE :: 4
 MIN_RESERVED_HANDLERS :: 2
 
 /*
+The most queries that can be in flight at once: `max_pending` on fibers of their
+own, and one on each connection, which `max_pending` does not count (see
+`server/queries.odin`). The chain-walk bound and the follower ceiling are shares
+of this rather than of `max_pending` alone: a query on a TCP connection holds a
+walk or a follower's place as a UDP one does, and shares of a figure that left
+them out would let the connections take every walk the datagrams have.
+*/
+queries_in_flight :: proc(s: Server_Config) -> int {
+	return max(s.max_pending, 0) + max(s.max_connections, 0)
+}
+
+/*
 Chain-of-trust walks that may be waiting on an upstream at once, for a bound of
-`in_flight` queries: everything but the reservation above. At least one whatever
+`in_flight` queries (`queries_in_flight`): everything but the reservation above. At least one whatever
 the arithmetic says, since the bound is on walks at once rather than on walks.
 */
 derive_chain_walks :: proc(in_flight: int) -> int {

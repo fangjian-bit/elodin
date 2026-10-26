@@ -2,6 +2,7 @@ package h2
 
 import "core:mem"
 import "core:strconv"
+import "core:sync"
 import "core:time"
 import "elodin:loop"
 
@@ -33,6 +34,15 @@ Client :: struct {
 	// Requests waiting for a stream slot, apart from `cond` so that every
 	// frame answering some other stream does not wake the whole queue.
 	slot_cond: loop.Cond,
+	/*
+	Read without `mu` by `client_ref`, `client_unref`, `client_closed` and
+	`client_idle_for`, so all four are atomic and `closed` is only ever written
+	atomically (under `mu` too, which the other readers hold). `mu` is held across
+	socket writes, which park; the upstream asks these four under a plain lock of
+	its own, and a fiber that parked on `mu` while holding that one would block
+	every fiber of its loop that reached for it next - the writer holding `mu`
+	among them, if it is on the same loop.
+	*/
 	refs:      int,
 	closed:    bool,
 	// When a reference was last let go of, which is when a request on the
@@ -173,17 +183,14 @@ client_make :: proc(io: IO, allocator := context.allocator) -> ^Client {
 // `client_request` takes its own for the length of the call, so this is only
 // needed by code that keeps a pointer to `c` around between calls.
 client_ref :: proc(c: ^Client) {
-	loop.lock(&c.mu)
-	c.refs += 1
-	loop.unlock(&c.mu)
+	sync.atomic_add(&c.refs, 1)
 }
 
 client_unref :: proc(c: ^Client) {
-	loop.lock(&c.mu)
-	c.refs -= 1
-	c.released = time.tick_now()
-	last := c.refs == 0
-	loop.unlock(&c.mu)
+	// The time before the count, so a reader that sees the count drop sees the
+	// time it dropped at; see `client_idle_for`.
+	sync.atomic_store(&c.released._nsec, time.tick_now()._nsec)
+	last := sync.atomic_sub(&c.refs, 1) == 1
 	if !last {
 		return
 	}
@@ -205,9 +212,7 @@ client_stream_destroy :: proc(c: ^Client, s: ^Client_Stream) {
 // Whether the connection is known dead. Callers check this before reusing a
 // cached connection and dial a fresh one instead of reusing this one.
 client_closed :: proc(c: ^Client) -> bool {
-	loop.lock(&c.mu)
-	defer loop.unlock(&c.mu)
-	return c.closed
+	return sync.atomic_load(&c.closed)
 }
 
 /*
@@ -217,9 +222,9 @@ its length, and so does a caller between taking the connection and making the
 request, so a connection is only idle once all of them have let go.
 */
 client_idle_for :: proc(c: ^Client) -> (idle: time.Duration, busy: bool) {
-	loop.lock(&c.mu)
-	defer loop.unlock(&c.mu)
-	return time.tick_since(c.released), c.refs > 1
+	busy = sync.atomic_load(&c.refs) > 1
+	idle = time.tick_since(time.Tick{_nsec = sync.atomic_load(&c.released._nsec)})
+	return
 }
 
 /*
@@ -233,7 +238,7 @@ close this performs on its way out.
 client_serve :: proc(c: ^Client) {
 	defer {
 		loop.lock(&c.mu)
-		c.closed = true
+		sync.atomic_store(&c.closed, true)
 		loop.cond_broadcast(&c.cond)
 		loop.cond_broadcast(&c.slot_cond)
 		loop.unlock(&c.mu)
@@ -895,7 +900,7 @@ client_request :: proc(
 		with streams still open is not special: those free slots as usual.
 		*/
 		if len(c.streams) == 0 {
-			c.closed = true
+			sync.atomic_store(&c.closed, true)
 			loop.cond_broadcast(&c.slot_cond)
 			break
 		}
@@ -920,13 +925,13 @@ client_request :: proc(
 	// still in flight - acceptable because doh.odin retries and this is
 	// 2^30 requests away, not because there is nothing to cut short.
 	if c.next_stream_id > 0x7fff_ffff {
-		c.closed = true
+		sync.atomic_store(&c.closed, true)
 		loop.cond_broadcast(&c.cond)
 		loop.cond_broadcast(&c.slot_cond)
 		loop.unlock(&c.mu)
 		return {}, .Closed
 	}
-	c.refs += 1
+	sync.atomic_add(&c.refs, 1)
 	stream_id := c.next_stream_id
 	c.next_stream_id += 2
 	s := new(Client_Stream, c.allocator)

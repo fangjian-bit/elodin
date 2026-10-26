@@ -2945,7 +2945,7 @@ validate :: proc(l: ^Loader, cfg: ^Config) {
 	it currently is. See `derive_chain_walks`.
 	*/
 	if cfg.dnssec.max_chain_walks == 0 {
-		cfg.dnssec.max_chain_walks = derive_chain_walks(cfg.server.max_pending)
+		cfg.dnssec.max_chain_walks = derive_chain_walks(queries_in_flight(cfg.server))
 		cfg.server.sizing.derived_chain_walks = true
 	}
 	/*

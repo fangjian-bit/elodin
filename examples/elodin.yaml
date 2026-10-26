@@ -462,7 +462,8 @@ dnssec:
   # where it would have gone upstream, which is what an upstream that did not
   # answer already produces.
   #
-  # 0 is server.max_pending less a reserved quarter of it: the point is to keep
+  # 0 is server.max_pending plus server.max_connections - every query that can
+  # be in flight, a connection's included - less a reserved quarter: the point is to keep
   # that quarter out of the walk, so it comes back in a round trip rather than
   # in the thirty a walk may take, not to cap what this resolver validates.
   #

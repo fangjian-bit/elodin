@@ -3,6 +3,7 @@ package server
 import "core:mem"
 import "core:sync"
 import "core:time"
+import "elodin:config"
 import "elodin:loop"
 
 /*
@@ -119,8 +120,9 @@ Stored_Verdict :: enum u8 {
 }
 
 /*
-How many followers may wait on leaders at once: a quarter of `server.max_pending`,
-the same share `refresh_ceiling` gives the stale refreshes.
+How many followers may wait on leaders at once: a quarter of what can be in
+flight (`config.queries_in_flight`: `max_pending` and one per connection), the
+share `refresh_ceiling` takes of `max_pending` for the stale refreshes.
 
 A follower holds its place in flight for as long as the leader takes, up to its
 `flight_patience`, about four of its longest group's timeouts - and a leader
@@ -128,17 +130,17 @@ validating a slow chain holds one of `dnssec.max_chain_walks` - so without a
 ceiling, one flood of a single cold signed name would park everything in flight
 behind one walk, which is the exhaustion that bound exists to prevent (issue
 #356). Past the ceiling a query forwards on its own and meets that bound like
-any other. Every follower is counted, a connection's included: it holds a stack
-and its scratch like any other query. No bound - a `Server` built as a literal -
-is no ceiling.
+any other. Every follower is counted, a connection's included, so the share is
+of the connections as well: of `max_pending` alone, a client holding connections
+could fill it and leave every datagram for a hot name to forward on its own. No
+bound - a `Server` built as a literal - is no ceiling.
 */
 @(private)
 follower_ceiling :: proc(s: ^Server) -> int {
-	limit := live(s).cfg.server.max_pending
-	if limit <= 0 {
+	if live(s).cfg.server.max_pending <= 0 {
 		return 0
 	}
-	return max(limit / 4, 1)
+	return max(config.queries_in_flight(live(s).cfg.server) / 4, 1)
 }
 
 /*

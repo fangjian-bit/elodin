@@ -76,7 +76,8 @@ test_chain_walks_are_derived_at_load :: proc(t: ^testing.T) {
 	testing.expect(t, err == nil, "expected a clean load")
 	// From the bound on queries in flight, derived at load rather than at
 	// start-up, so `--check` and the run that follows it name the same number.
-	testing.expect_value(t, cfg.dnssec.max_chain_walks, derive_chain_walks(16))
+	// Of the connections too: a query on one holds a walk as a datagram does.
+	testing.expect_value(t, cfg.dnssec.max_chain_walks, derive_chain_walks(16 + 512))
 	testing.expect(t, cfg.server.sizing.derived_chain_walks, "a derived bound was not marked so")
 
 	// A number in the file wins, as everywhere else in this file.
@@ -322,7 +323,7 @@ test_configured_max_pending_wins :: proc(t: ^testing.T) {
 	testing.expect(t, err == nil, "expected a clean load")
 	testing.expect_value(t, cfg.server.max_pending, 40)
 	testing.expect(t, !cfg.server.sizing.derived_max_pending, "a configured bound is not a derived one")
-	testing.expect_value(t, cfg.dnssec.max_chain_walks, derive_chain_walks(40))
+	testing.expect_value(t, cfg.dnssec.max_chain_walks, derive_chain_walks(40 + 512))
 
 	_, nerr := load_string("upstream:\n  servers: [1.1.1.1]\nserver:\n  max_pending: -1\n", context.temp_allocator)
 	testing.expect(t, nerr != nil, "a negative max_pending should be refused")

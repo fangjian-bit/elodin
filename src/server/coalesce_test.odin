@@ -601,6 +601,22 @@ test_a_follower_is_told_whether_its_message_was_the_leaders :: proc(t: ^testing.
 	testing.expect(t, !follow(leader, nil), "no message was the same")
 }
 
+/*
+The ceiling is a quarter of every query that can be in flight, a connection's
+included: a quarter of `max_pending` alone would let clients holding connections
+fill it, and every datagram for a hot name would then forward on its own.
+*/
+@(test)
+test_the_follower_ceiling_counts_the_connections :: proc(t: ^testing.T) {
+	cfg: config.Config
+	cfg.server.max_pending = 16
+	cfg.server.max_connections = 48
+	s := Server{cfg = &cfg}
+	testing.expect_value(t, follower_ceiling(&s), 16)
+	cfg.server.max_pending = 0
+	testing.expect_value(t, follower_ceiling(&s), 0)
+}
+
 // Followers stop at the ceiling, whatever transport they arrived on, and the
 // count comes back down as they leave.
 @(test)

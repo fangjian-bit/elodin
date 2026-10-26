@@ -1072,7 +1072,7 @@ Retired_Key :: enum u8 {
 Retired_Keys :: bit_set[Retired_Key]
 
 // The release in which the retired keys become unknown ones, and are refused:
-// the one after the release that retires them, 0.10.0.
+// the one after the release that retires them, 0.25.0.
 RETIRED_KEYS_REFUSED_IN :: "0.26.0"
 
 /*

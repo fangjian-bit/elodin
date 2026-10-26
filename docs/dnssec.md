@@ -4,7 +4,7 @@
 dnssec:
   enabled: true
   max_nsec3_iterations: 100
-  max_chain_walks: 0      # 0 is server.max_pending less a reserved quarter
+  max_chain_walks: 0      # 0 is max_pending + max_connections less a reserved quarter
   max_cached_zones: 0     # 0 is 4096
   trust_anchors: []       # empty uses the built-in root keys
 ```
@@ -137,9 +137,12 @@ since the reserved queries can be busy on their own forward, but each comes back
 in one round trip rather than thirty. A cached apex is not a cached name: a name
 below one still costs a DS lookup per label.
 
-The default (0) is `server.max_pending` less a reserved quarter, at least two;
-`--check` prints it as `chain_walks=`. One bound covers every transport: a query
-on a TCP, DoT or DoH connection spends it as a UDP query does. To cap the
+The default (0) is what can be in flight - `server.max_pending`, plus one query
+per connection up to `server.max_connections` - less a reserved quarter, at
+least two; `--check` prints it as `chain_walks=`. One bound covers every
+transport: a query on a TCP, DoT or DoH connection spends it as a UDP query does,
+and is counted in the figure it is a share of, so connections cannot take the
+reserve from datagrams. To cap the
 upstream volume a flood can provoke, set it lower. Negative values are refused.
 
 When the bound binds, a walk reads the caches and answers SERVFAIL where it would
@@ -158,11 +161,11 @@ The client's extended error does not say which limit stopped the walk; the log
 and the counter do.
 
 `--check` and the startup log name the number in use. Startup warns when a
-configured value leaves nothing of `max_pending` reserved, which switches the
+configured value leaves nothing of that figure reserved, which switches the
 bound off:
 
 ```
-dnssec: max_chain_walks <n> leaves none of the <n> queries server.max_pending allows in flight reserved, so a flood of fresh names can hold them all; see issue #356
+dnssec: max_chain_walks <n> leaves none of the <n> queries server.max_pending and server.max_connections allow in flight reserved, so a flood of fresh names can hold them all; see issue #356
 ```
 
 `dnssec.max_connection_walks` is no longer used: a file that names it loads, with

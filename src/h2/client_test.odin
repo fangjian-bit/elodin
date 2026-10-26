@@ -2747,3 +2747,53 @@ test_client_a_raised_stream_limit_lets_a_waiting_request_in :: proc(t: ^testing.
 	testing.expect_value(t, r.err, Client_Error.None)
 	free_all(context.temp_allocator)
 }
+
+@(private = "file")
+State_Probe :: struct {
+	c:        ^Client,
+	finished: sync.Sema,
+	closed:   bool,
+	busy:     bool,
+}
+
+@(private = "file")
+state_probe_run :: proc(p: ^State_Probe) {
+	p.closed = client_closed(p.c)
+	client_ref(p.c)
+	_, p.busy = client_idle_for(p.c)
+	client_unref(p.c)
+	sync.sema_post(&p.finished)
+}
+
+/*
+What the upstream asks of a connection under a lock of its own - closed, idle,
+another reference - must not wait for `mu`. `mu` is held across a socket write,
+which parks; a fiber that parked on it while holding the upstream's plain lock
+would block every fiber of its loop that reached for that lock next, the writer
+among them when it shares the loop, and none of them would run again.
+*/
+@(test)
+test_client_state_is_read_without_the_connection_lock :: proc(t: ^testing.T) {
+	log := Client_Frame_Log {
+		frames = make([dynamic]Frame_Header, 0, 16),
+	}
+	defer delete(log.frames)
+	c := client_make(IO{user = &log, read = hook_read_nothing, write = client_log_write})
+	defer client_unref(c)
+
+	// A writer parked mid-frame, as far as anybody else can tell.
+	loop.lock(&c.mu)
+	p := State_Probe {
+		c = c,
+	}
+	th := thread.create_and_start_with_poly_data(&p, state_probe_run)
+	answered := sync.sema_wait_with_timeout(&p.finished, 2 * time.Second)
+	loop.unlock(&c.mu)
+	thread.join(th)
+	thread.destroy(th)
+
+	testing.expect(t, answered, "reading the connection's state waited for the lock a writer holds")
+	testing.expect(t, !p.closed, "a fresh connection read as closed")
+	testing.expect(t, p.busy, "a second reference did not make the connection busy")
+	free_all(context.temp_allocator)
+}

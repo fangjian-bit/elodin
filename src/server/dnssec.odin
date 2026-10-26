@@ -3,6 +3,7 @@ package server
 import "core:mem"
 import "core:strings"
 import "core:time"
+import "elodin:config"
 import "elodin:dns"
 import "elodin:dnssec"
 import "elodin:logx"
@@ -135,11 +136,12 @@ start_validator :: proc(s: ^Server, l: ^Live) -> bool {
 	resolver that will not start, or one quietly running at a number nobody
 	chose, is worse than one that says what it is doing.
 	*/
-	if !l.cfg.server.sizing.derived_chain_walks && l.cfg.dnssec.max_chain_walks >= l.cfg.server.max_pending {
+	in_flight := config.queries_in_flight(l.cfg.server)
+	if !l.cfg.server.sizing.derived_chain_walks && l.cfg.dnssec.max_chain_walks >= in_flight {
 		logx.warnf(
-			"dnssec: max_chain_walks %d leaves none of the %d queries server.max_pending allows in flight reserved, so a flood of fresh names can hold them all; see issue #356",
+			"dnssec: max_chain_walks %d leaves none of the %d queries server.max_pending and server.max_connections allow in flight reserved, so a flood of fresh names can hold them all; see issue #356",
 			l.cfg.dnssec.max_chain_walks,
-			l.cfg.server.max_pending,
+			in_flight,
 		)
 	}
 

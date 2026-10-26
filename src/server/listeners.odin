@@ -209,11 +209,12 @@ start_listeners :: proc(s: ^Server, l: ^Listeners) -> bool {
 stop_listeners :: proc(l: ^Listeners) {
 	sync.atomic_store(&l.stop, true)
 	// The read and accept loops first, and their sockets only once nothing is
-	// waiting on them; see `conn_manager_stop_permanent`.
+	// waiting on them; see `conn_manager_stop_permanent`. The UDP sockets stay
+	// open until `destroy_listeners`: every query a reader admitted answers on
+	// its reader's socket, and those run on through the drain that follows this.
+	// Closed now, the number goes to the next socket opened - an upstream
+	// query's, most likely - and an answer meant for a client is written there.
 	conn_manager_stop_permanent(&l.conns)
-	for reader in l.udp {
-		net.close(reader.socket)
-	}
 	if l.tcp_open {
 		net.close(l.tcp_socket)
 	}
@@ -261,15 +262,16 @@ stop_metrics :: proc(l: ^Listeners) {
 }
 
 /*
-Release what the loops were given.
+Release what the loops were given, and close the UDP sockets.
 
 Separate from `stop_listeners` because stopping is not the same as being
-finished with: a query admitted before the sockets closed still runs while the
-server drains, and it reads the context of the reader that admitted it. The
-caller drains the queries between the two.
+finished with: a query admitted before the listeners stopped still runs while
+the server drains, reads the context of the reader that admitted it, and answers
+on that reader's socket. The caller drains the queries between the two.
 */
 destroy_listeners :: proc(l: ^Listeners) {
 	for &reader in l.udp {
+		net.close(reader.socket)
 		if reader.ctx != nil {
 			free(reader.ctx)
 			reader.ctx = nil
@@ -391,7 +393,7 @@ start_udp :: proc(s: ^Server, l: ^Listeners) -> bool {
 	Bound into a list of their own before `l.udp` exists.
 
 	So that a bind that fails halfway leaves `l.udp` empty rather than half
-	filled: `stop_listeners` closes every socket it finds there, and a reader
+	filled: `destroy_listeners` closes every socket it finds there, and a reader
 	that was never bound holds a zero, which is descriptor 0 and somebody else's.
 	Nothing is published to the listener until every socket is open.
 	*/

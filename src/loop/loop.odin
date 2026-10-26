@@ -211,7 +211,9 @@ run :: proc(l: ^Loop) {
 			left := time.tick_diff(l.clock(), l.timers[0].deadline)
 			// Rounded up, so a timer due in 0.4 ms is not polled for in a loop of
 			// zero-length waits until it is due.
-			timeout = i32(max(0, (left + time.Millisecond - 1) / time.Millisecond))
+			// Held to what `epoll_wait` takes: a deadline weeks away would
+			// otherwise wrap to a negative figure, which is no timeout at all.
+			timeout = i32(clamp((left + time.Millisecond - 1) / time.Millisecond, 0, time.Duration(max(i32))))
 		}
 		// Wake to trim, if there is anything to trim; see `trim_idle`.
 		if trim_pending(l) && (timeout < 0 || timeout > i32(TRIM_AFTER / time.Millisecond)) {
